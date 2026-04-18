@@ -8,16 +8,42 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `test/smoke.ts` — 24-check smoke harness exercising the full non-destructive
-  command surface against a real running browser. `bun run test:smoke`.
+- `ghax qa` — orchestrated QA pass over a URL list. Flow: attach →
+  goto each URL → `snapshot -i` → record console errors + HTTP >=400
+  responses → write `qa-report.json`. Flags: `--url` (repeatable),
+  `--urls a,b,c`, positional URLs, or stdin JSON array. `--out`,
+  `--screenshots`, `--annotate`, `--gif`.
+- `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
+  pass-through for Chrome's `--load-extension` so scratch profiles can
+  auto-load an unpacked MV3 extension without browser-UI steps. Pairs
+  `--disable-extensions-except` for clean isolation.
+- `test/smoke.ts` — 25-check harness exercising the full non-destructive
+  command surface against a real running browser, including a new
+  shadow-DOM cursor-scan check that injects an open-shadow-root element
+  and asserts `click @c<n>` resolves through the pierce.
+- `test/hot-reload-smoke.ts` — fully scripted hot-reload verification:
+  launches a scratch Edge with the test fixture, opens example.com,
+  bumps the manifest version, runs `ghax ext hot-reload`, and asserts
+  the SW version and the content-script banner both update in-place
+  without a tab refresh.
 - `test/fixtures/test-extension/` — minimal MV3 extension for live
   `ghax ext hot-reload` verification (injects a versioned banner on
   example.com/.org).
 
+### Fixed
+
+- Shadow-DOM selector generation: direct children of a `ShadowRoot`
+  were emitting an empty segment (`parentElement` is null at the
+  boundary) producing invalid `foo >> ` selectors that Playwright
+  rejected. Now falls back to `walker.parentNode` for sibling indexing
+  when parent is a ShadowRoot.
+- Shadow-DOM selectors use ` >> ` (Playwright's chain combinator)
+  rather than an invented `>>>` syntax.
+
 ### Changed
 
-- README reflects v0.3 features (hot-reload, gif, shadow-DOM) and the
-  current `v1.0 — internal hardening` status.
+- README reflects v0.3+ features (hot-reload, gif, shadow-DOM, qa)
+  and the current `v1.0 — internal hardening` status.
 
 ## [0.3.0] — 2026-04-18
 
@@ -34,7 +60,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ffmpeg (2-pass palette for clean colors). Flags: `--delay ms` (default
   1000), `--scale px` (default 800), `--keep-frames` for debugging.
 - Shadow-DOM aware snapshot cursor scan. Recursively walks open shadow roots
-  and emits Playwright pierce selectors (`host >>> inner`) so click/fill
+  and emits Playwright chain selectors (`host >> inner`) so click/fill
   commands keep working on custom elements (Shoelace, Lit, Polymer, etc.).
 - Deprecation hint on `ghax ext reload` when the extension declares content
   scripts — suggests `hot-reload` instead.

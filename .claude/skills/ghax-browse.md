@@ -56,6 +56,9 @@ If nothing responds, either:
 # Connect
 ghax attach                              # reuses running browser on :9222
 ghax attach --launch --browser edge      # launches a scratch-profile Edge
+ghax attach --launch --load-extension ./my-ext --data-dir /tmp/dev-profile
+                                         # launch with an unpacked extension
+                                         # pre-loaded into an isolated profile
 ghax status                              # tabs, targets, ext count
 ghax detach                              # clean daemon shutdown
 
@@ -150,6 +153,15 @@ ghax ext storage <ext-id> local set someKey null
 ```bash
 ghax diff https://staging.example.com https://prod.example.com
 ```
+
+## Shadow DOM
+
+`ghax snapshot -i` (or `-C`) walks open shadow roots and emits `@c<n>`
+refs with Playwright chain selectors (`host >> inner`). Click works
+transparently: `ghax click @c3` resolves through both DOM trees.
+
+Closed shadow roots are deliberately skipped — the DOM itself forbids
+walking them and no automation tool can force entry.
 
 ## Gotchas
 

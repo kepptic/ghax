@@ -179,8 +179,16 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
       console.error(`Browser ${browserOpt} not found. Installed: ${browsers.map((b) => b.kind).join(', ')}`);
       return EXIT.NOT_ATTACHED;
     }
-    console.log(`launching ${target.label} with CDP on :${port} (scratch profile in ~/.ghax/${target.kind}-profile)`);
-    const launched = await launchBrowser(target, { port });
+    const loadExt = parsed.flags['load-extension'] as string | undefined;
+    const dataDir = parsed.flags['data-dir'] as string | undefined;
+    const extNote = loadExt ? ` with unpacked extension from ${loadExt}` : '';
+    const profileNote = dataDir ? dataDir : `~/.ghax/${target.kind}-profile`;
+    console.log(`launching ${target.label} with CDP on :${port} (profile: ${profileNote})${extNote}`);
+    const launched = await launchBrowser(target, {
+      port,
+      ...(loadExt ? { loadExtension: loadExt } : {}),
+      ...(dataDir ? { dataDir } : {}),
+    });
     endpoint = launched.endpoint;
     kind = target.kind;
   } else {
@@ -371,7 +379,7 @@ function expandSnapshotFlags(argv: string[]): ParsedArgs {
 const HELP = `ghax — attach to your real Chrome/Edge via CDP and drive it.
 
 Connection:
-  attach [--port 9222] [--browser edge|chrome] [--launch]
+  attach [--port 9222] [--browser edge|chrome] [--launch] [--load-extension <path>] [--data-dir <path>]
   status [--json]
   detach
   restart
@@ -421,6 +429,11 @@ Batch / recording:
   record stop
   record status
   replay <file>
+
+Orchestrated:
+  qa --url <u> [--url <u> ...] [--urls a,b,c]
+     [--out report.json] [--screenshots <dir>] [--no-screenshots]
+     [--annotate] [--gif <out.gif>]
   gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
 
 Add --json for machine-readable output on any command.
@@ -506,6 +519,9 @@ async function main(): Promise<number> {
 
       case 'gif':
         return await cmdGif(parseArgs(rest));
+
+      case 'qa':
+        return await cmdQa(parseArgs(rest));
 
       default:
         console.error(`Unknown command: ${verb}\n\nRun 'ghax --help' for usage.`);
@@ -742,6 +758,199 @@ async function cmdReplay(parsed: ParsedArgs): Promise<number> {
       }
     }
     return EXIT.OK;
+  });
+}
+
+interface QaPageReport {
+  url: string;
+  finalUrl: string;
+  title: string;
+  loadMs: number;
+  screenshotPath?: string;
+  refCount: number;
+  consoleErrors: Array<{ text: string; url?: string }>;
+  failedRequests: Array<{ url: string; status?: number; method: string }>;
+}
+
+interface QaReport {
+  startedAt: string;
+  durationMs: number;
+  urlsAttempted: number;
+  urlsOk: number;
+  pages: QaPageReport[];
+}
+
+async function cmdQa(parsed: ParsedArgs): Promise<number> {
+  // Accept URLs three ways:
+  //   1. Multiple --url flags (argv parser collapses duplicates, so allow
+  //      --urls comma-joined as the canonical form).
+  //   2. Positional args.
+  //   3. JSON array on stdin.
+  const urls: string[] = [];
+  if (parsed.flags.urls && typeof parsed.flags.urls === 'string') {
+    urls.push(...parsed.flags.urls.split(',').map((s) => s.trim()).filter(Boolean));
+  }
+  // Repeatable --url: parseArgs collapses duplicate keys, so rescan argv
+  // directly to catch every instance. Only applies to this command.
+  const argv = process.argv.slice(3);
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--url' && argv[i + 1]) {
+      urls.push(argv[i + 1]);
+      i++;
+    } else if (argv[i].startsWith('--url=')) {
+      urls.push(argv[i].slice(6));
+    }
+  }
+  for (const p of parsed.positional) {
+    if (/^https?:\/\//.test(p)) urls.push(p);
+  }
+  if (urls.length === 0 && !process.stdin.isTTY) {
+    const body = await readStdin();
+    if (body.trim()) {
+      try {
+        const arr = JSON.parse(body);
+        if (Array.isArray(arr)) urls.push(...arr.map((x) => String(x)));
+      } catch {
+        // Treat stdin as newline-separated.
+        urls.push(...body.split(/\r?\n/).map((s) => s.trim()).filter(Boolean));
+      }
+    }
+  }
+  if (urls.length === 0) {
+    console.error('Usage: ghax qa --url <u> [--url <u> ...] [--out <report.json>] [--screenshots <dir>]');
+    console.error('       ghax qa --urls a.com,b.com');
+    console.error('       echo \'["a","b"]\' | ghax qa --out report.json');
+    return EXIT.USAGE;
+  }
+
+  const outPath = (parsed.flags.out as string | undefined) || '/tmp/ghax-qa-report.json';
+  const shotsDir = (parsed.flags.screenshots as string | undefined) || (parsed.flags['no-screenshots'] ? null : `/tmp/ghax-qa-shots-${Date.now()}`);
+  const annotate = Boolean(parsed.flags.annotate);
+  const gifOut = parsed.flags.gif as string | undefined;
+
+  if (shotsDir) fs.mkdirSync(shotsDir, { recursive: true });
+
+  return withDaemon(async (port) => {
+    const startedAt = Date.now();
+    const report: QaReport = {
+      startedAt: new Date(startedAt).toISOString(),
+      durationMs: 0,
+      urlsAttempted: urls.length,
+      urlsOk: 0,
+      pages: [],
+    };
+
+    for (const url of urls) {
+      console.log(`→ ${url}`);
+      const pageStart = Date.now();
+      try {
+        const nav = (await rpc(port, 'goto', [url])) as { url: string; title: string };
+        // Let rendering settle; most SPAs finish hydrating within ~500ms.
+        await new Promise((r) => setTimeout(r, 500));
+
+        const snapRes = (await rpc(port, 'snapshot', [], {
+          interactive: true,
+          ...(annotate ? { annotate: true } : {}),
+        })) as { text: string; count: number; annotatedPath?: string };
+
+        let screenshotPath: string | undefined;
+        if (shotsDir) {
+          const safe = url.replace(/^https?:\/\//, '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+          screenshotPath = annotate && snapRes.annotatedPath
+            ? snapRes.annotatedPath
+            : `${shotsDir}/${safe}.png`;
+          if (!annotate) {
+            await rpc(port, 'screenshot', [], { path: screenshotPath, fullPage: true });
+          }
+        }
+
+        // Pull the console buffer slice that belongs to this page — ghax
+        // exposes the tail of the rolling buffer, so filter to "since page
+        // start" as a close-enough heuristic.
+        const consoleLog = (await rpc(port, 'console', [], { last: 200 })) as Array<{
+          timestamp: number;
+          level: string;
+          text: string;
+          url?: string;
+        }>;
+        const consoleErrors = consoleLog
+          .filter((e) => e.level === 'error' && e.timestamp >= pageStart)
+          .map((e) => ({ text: e.text, url: e.url }));
+
+        const netLog = (await rpc(port, 'network', [], { last: 500 })) as Array<{
+          timestamp: number;
+          url: string;
+          method: string;
+          status?: number;
+        }>;
+        const failedRequests = netLog
+          .filter((e) => e.timestamp >= pageStart && e.status !== undefined && e.status >= 400)
+          .map((e) => ({ url: e.url, status: e.status, method: e.method }));
+
+        report.pages.push({
+          url,
+          finalUrl: nav.url,
+          title: nav.title,
+          loadMs: Date.now() - pageStart,
+          ...(screenshotPath ? { screenshotPath } : {}),
+          refCount: snapRes.count,
+          consoleErrors,
+          failedRequests,
+        });
+        report.urlsOk++;
+        const errTag = consoleErrors.length > 0 ? `, ${consoleErrors.length} console errors` : '';
+        const netTag = failedRequests.length > 0 ? `, ${failedRequests.length} failed requests` : '';
+        console.log(`  ✓ ${snapRes.count} refs${errTag}${netTag}`);
+      } catch (err: any) {
+        console.log(`  ✗ ${err.message}`);
+        report.pages.push({
+          url,
+          finalUrl: url,
+          title: '',
+          loadMs: Date.now() - pageStart,
+          refCount: 0,
+          consoleErrors: [{ text: `[qa] ${err.message}` }],
+          failedRequests: [],
+        });
+      }
+    }
+
+    report.durationMs = Date.now() - startedAt;
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+    console.log(`\nReport → ${outPath}`);
+    console.log(`  ${report.urlsOk}/${report.urlsAttempted} pages ok, ${report.durationMs}ms total`);
+    const totalConsoleErrors = report.pages.reduce((n, p) => n + p.consoleErrors.length, 0);
+    const totalNetFailures = report.pages.reduce((n, p) => n + p.failedRequests.length, 0);
+    if (totalConsoleErrors > 0) console.log(`  ${totalConsoleErrors} console errors across all pages`);
+    if (totalNetFailures > 0) console.log(`  ${totalNetFailures} failed requests across all pages`);
+
+    // Optional GIF from the screenshots (if we took any).
+    if (gifOut && shotsDir) {
+      const probe = Bun.spawnSync(['ffmpeg', '-version'], { stdout: 'ignore', stderr: 'ignore' });
+      if (probe.exitCode !== 0) {
+        console.error(`  (skipping --gif: ffmpeg not on PATH)`);
+      } else {
+        // Stitch screenshots lexically. Users should name URLs so they sort
+        // in the desired order, or we'd need another flag for ordering.
+        const pattern = `${shotsDir}/*.png`;
+        const render = Bun.spawnSync([
+          'ffmpeg', '-y',
+          '-framerate', '1',
+          '-pattern_type', 'glob',
+          '-i', pattern,
+          '-vf', 'scale=1024:-1:flags=lanczos',
+          '-loop', '0',
+          gifOut,
+        ], { stdout: 'ignore', stderr: 'pipe' });
+        if (render.exitCode !== 0) {
+          console.error(`  ffmpeg failed: ${render.stderr.toString().split('\n').slice(-3).join(' | ')}`);
+        } else {
+          console.log(`  GIF → ${gifOut}`);
+        }
+      }
+    }
+
+    return report.urlsOk === report.urlsAttempted ? EXIT.OK : EXIT.CDP_ERROR;
   });
 }
 

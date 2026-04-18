@@ -142,7 +142,7 @@ export async function snapshot(
   // Auto-enable cursor scan when interactive mode is on — many React apps
   // (Radix, Headless UI) build popovers from plain divs with cursor:pointer.
   // The scan walks both light DOM and any open shadow roots it encounters,
-  // emitting Playwright-compatible pierce selectors (`host >>> inner`) when
+  // emitting Playwright-compatible chain selectors (`host >> inner`) when
   // it crosses a shadow boundary.
   const wantCursor = opts.cursorInteractive || opts.interactive;
   if (wantCursor) {
@@ -152,25 +152,39 @@ export async function snapshot(
         const results: Array<{ selector: string; text: string; reason: string }> = [];
 
         // Build a selector path for an element that may be inside nested open
-        // shadow roots. Each shadow boundary becomes a `>>>` in the output.
+        // shadow roots. Each shadow boundary becomes a ` >> ` in the output
+        // — Playwright's chain operator, which descends into the first
+        // selector's match (including its open shadow root) before applying
+        // the next selector. We chain per-tree nth-child segments because
+        // that guarantees uniqueness within each shadow tree.
+        //
+        // Per-tree walk needs to handle three cases at each step:
+        //   (1) walker.parentElement exists — normal light-DOM ancestor chain.
+        //   (2) walker.parentElement is null AND parentNode is a ShadowRoot —
+        //       walker is a direct child of the shadow root. We still need to
+        //       emit its nth-child position against the shadow root's children
+        //       before crossing the boundary.
+        //   (3) walker.parentElement is null AND parentNode is null/document —
+        //       we're at <html>; stop.
         const selectorFor = (el: Element): string => {
           const chunks: string[] = [];
           let current: Element | null = el;
           while (current && current !== document.documentElement) {
             const segment: string[] = [];
             let walker: Element | null = current;
-            // Walk up through the current shadow tree (or light tree) until
-            // we hit a shadow root or the document root.
             while (walker) {
               const parent: Element | null = walker.parentElement;
-              if (!parent) {
-                // parentElement is null across a shadow boundary; fall through
-                // to handle the shadow root separately.
-                break;
+              const parentNode = walker.parentNode;
+              let siblings: Element[] | null = null;
+              if (parent) {
+                siblings = Array.from(parent.children);
+              } else if (parentNode instanceof ShadowRoot) {
+                siblings = Array.from(parentNode.children);
               }
-              const siblings = Array.from(parent.children);
+              if (!siblings) break;
               const idx = siblings.indexOf(walker) + 1;
               segment.unshift(`${walker.tagName.toLowerCase()}:nth-child(${idx})`);
+              if (!parent) break;
               walker = parent;
             }
             chunks.unshift(segment.join(' > '));
@@ -182,7 +196,7 @@ export async function snapshot(
               current = null;
             }
           }
-          return chunks.join(' >>> ');
+          return chunks.join(' >> ');
         };
 
         const isInFloating = (el: Element): boolean => {
