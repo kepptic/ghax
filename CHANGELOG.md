@@ -13,6 +13,31 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   responses → write `qa-report.json`. Flags: `--url` (repeatable),
   `--urls a,b,c`, positional URLs, or stdin JSON array. `--out`,
   `--screenshots`, `--annotate`, `--gif`.
+- `ghax qa --crawl <root>` — auto URL discovery. Tries
+  `<root>/sitemap.xml` first; falls back to same-origin `<a href>`
+  scraping up to `--depth N` hops (default 1), capped by `--limit N`
+  (default 20).
+- `ghax is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>`
+  — assertion command. Exit 0 if condition holds, 1 otherwise.
+  Supports @ref selectors resolved against the last snapshot.
+- `ghax storage [local|session] [get|set|remove|clear|keys] [key] [value]`
+  — page-level localStorage / sessionStorage. Distinct from
+  `ghax ext storage` which targets `chrome.storage.*`.
+- `ghax ext message <ext-id> <json-payload>` — wrapper for
+  `chrome.runtime.sendMessage`. Returns the extension's response.
+- `ghax gesture dblclick <x,y>` — real double-click via
+  `Input.dispatchMouseEvent` with `clickCount=2` on the second pair.
+- `ghax gesture scroll <up|down|left|right> [amount=300]` — real
+  scroll via `Input.dispatchMouseEvent` type=mouseWheel at the
+  viewport center.
+
+### Changed
+
+- `ghax ext list` now enriches each entry with manifest-derived
+  `name` and `version` fields (pulled via Runtime.evaluate against
+  the extension's SW or background_page). Also exposes `enabled`
+  (currently always true — Chrome's `/json/list` only surfaces
+  enabled extensions).
 - `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
   pass-through for Chrome's `--load-extension` so scratch profiles can
   auto-load an unpacked MV3 extension without browser-UI steps. Pairs

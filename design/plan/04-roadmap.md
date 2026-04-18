@@ -186,8 +186,8 @@ release track is on hold.
       fixture loading without browser-UI steps.
 - [x] `test/hot-reload-smoke.ts` — fully scripted hot-reload probe:
       launch scratch browser → load fixture → confirm SW → hot-reload
-      → assert SW version bumps.
-- [ ] Shadow-DOM smoke check in `test/smoke.ts`.
+      → assert SW version bumps + content-script banner re-injects.
+- [x] Shadow-DOM smoke check in `test/smoke.ts` (25/25 checks pass).
 - [ ] Skill acceptance eval harness (v0.3 carryover — needs Claude API
       integration, scoped for its own session).
 
@@ -210,11 +210,38 @@ that composes existing daemon handlers.
       (comma form), positional URLs, or JSON on stdin. `--out`,
       `--screenshots`, `--annotate`, `--gif`. First iteration — no
       smart nav inference (user provides URL list).
-- [ ] `ghax qa` v2: infer URL list from the sitemap / main-nav links
-      of a root URL. `--crawl <root> --depth N`.
+- [x] `ghax qa --crawl <root> [--depth N] [--limit N]` — sitemap.xml
+      first, falls back to same-origin link scraping.
 - [ ] `ghax profile [--duration N]` — perf / memory snapshot of the
       active tab or an extension target. Uses CDP `Performance.*` +
       `HeapProfiler.takeHeapSnapshot`. Writes `.ghax/profiles/<ts>.json`.
+
+### Unimplemented items from `03-commands.md` (fill-in pass)
+
+Re-read the original command surface doc: several items from the v1
+design were never implemented. Grouped by leverage:
+
+High leverage (shipped):
+
+- [x] `ghax ext list` → `version`, `name`, `enabled` fields
+- [x] `ghax storage [local|session] [get|set|remove|clear|keys] [key] [value]`
+- [x] `ghax is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>`
+- [x] `ghax ext message <ext-id> <json>` — sendMessage wrapper
+- [x] `ghax gesture dblclick <x,y>` + `ghax gesture scroll <dir> [amount]`
+
+Medium leverage:
+
+- [ ] `ghax console --follow` / `ghax network --follow` — streaming
+      tail mode (SSE or chunked HTTP from the daemon)
+- [ ] `ghax ext sw <id> logs [--follow]` — dedicated SW console tail
+- [ ] `ghax ext popup <id>` + `ghax ext options <id>` — interact with
+      popup and options pages (mirrors `ghax ext panel`)
+
+Lower leverage:
+
+- [ ] `ghax diff-state <before> <after>` — diff two snapshots
+      (storage, console, etc.). `chain` + `eval` already covers most
+      of this use case.
 
 ## Future tools (no timeline)
 

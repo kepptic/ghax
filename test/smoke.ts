@@ -306,6 +306,47 @@ c('gesture key returns ok', async () => {
   assert(data.ok === true, 'gesture key should return ok');
 });
 
+c('gesture scroll dispatches mouseWheel', async () => {
+  const r = await run(['gesture', 'scroll', 'down', '100', '--json']);
+  const data = parseJson<{ ok: boolean; direction: string }>(r.stdout);
+  assert(data.ok === true && data.direction === 'down', 'gesture scroll payload');
+});
+
+c('gesture dblclick dispatches double press/release', async () => {
+  const r = await run(['gesture', 'dblclick', '50,50', '--json']);
+  const data = parseJson<{ ok: boolean }>(r.stdout);
+  assert(data.ok === true, 'gesture dblclick should return ok');
+});
+
+c('is <check> asserts element state', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['snapshot', '-i']);
+  const r = await run(['is', 'visible', '@e1', '--json']);
+  const data = parseJson<{ check: string; target: string; result: boolean }>(r.stdout);
+  assert(data.check === 'visible' && data.result === true, `is visible @e1 → ${JSON.stringify(data)}`);
+});
+
+c('storage local round-trips set/get/remove', async () => {
+  const key = `ghax-smoke-${Date.now()}`;
+  await run(['storage', 'local', 'set', key, 'hello']);
+  const getRes = (await run(['storage', 'local', 'get', key])).stdout.trim();
+  assert(getRes === 'hello', `expected "hello", got ${getRes}`);
+  await run(['storage', 'local', 'remove', key]);
+  const afterRes = (await run(['storage', 'local', 'get', key])).stdout.trim();
+  assert(afterRes === 'null' || afterRes === '', `expected null after remove, got ${afterRes}`);
+});
+
+c('ext list entries carry version field', async () => {
+  const r = await run(['ext', 'list', '--json']);
+  const exts = parseJson<Array<{ id: string; version: string; name: string; targetCount: number }>>(r.stdout);
+  if (exts.length === 0) {
+    console.log('  (no extensions — skipping version check)');
+    return;
+  }
+  const anyWithVersion = exts.some((e) => typeof e.version === 'string' && e.version.length > 0);
+  assert(anyWithVersion, `no extension reported a version in ${JSON.stringify(exts.map((e) => ({ id: e.id, v: e.version })))}`);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

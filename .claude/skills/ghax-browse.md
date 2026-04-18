@@ -89,11 +89,23 @@ ghax ext hot-reload <ext-id> --verbose   # per-tab injection report
 
 # Real user gestures (for APIs that require them)
 ghax gesture click 100,200               # real Input.dispatchMouseEvent
+ghax gesture dblclick 100,200
+ghax gesture scroll down 400             # mouseWheel event at viewport center
 ghax gesture key Enter
+
+# Orchestrated QA pass
+ghax qa --crawl https://example.com --depth 1 --out /tmp/qa.json
 
 # Logs
 ghax console --errors --last 50
 ghax network --pattern 'api/tickets'
+
+# Assertions + page storage
+ghax is visible @e3                       # exit 0 if visible, 1 if not
+ghax is enabled "button[type=submit]"
+ghax storage local keys
+ghax storage local get auth_token
+ghax storage session set flash "hi"
 
 # Responsive + diff
 ghax viewport 375x667
