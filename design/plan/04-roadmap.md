@@ -50,18 +50,22 @@ instead of hand-written Python.
 - [x] `ghax record start / stop / status` + `ghax replay <file>`
       (writes `.ghax/recordings/<name>.json`)
 - [x] CircularBuffer console/network buffers (5k each)
-- [ ] `ghax gif <recording> [out.gif]` — ffmpeg wrapper
-- [ ] Shadow-DOM aware clicking (cross-shadow selector resolution)
+- [x] `ghax gif <recording> [out.gif]` — ffmpeg wrapper (2-pass palette)
+- [x] Shadow-DOM aware clicking (cursor-interactive walks open shadow
+      roots, emits `host >>> inner` pierce selectors)
 
-## v0.3 — Claude Code skills
+## v0.3 — Claude Code skills + MV3 hot-reload ✓ shipped 2026-04-18
 
-- [ ] `.claude/skills/ghax-browse.md` — invocable as `/ghax-browse`
-- [ ] `.claude/skills/ghax.md` — top-level router skill
-- [ ] Register under one of the devops-skill-registry namespace roots
-      (or document manual install for external users)
+- [x] `.claude/skills/ghax-browse.md` — invocable as `/kepptic-ghax-browse`
+- [x] `.claude/skills/ghax.md` — top-level router skill
+      (`/kepptic-ghax`)
+- [x] Auto-registered via `devops-skill-registry` under the `kepptic`
+      namespace root
+- [x] `ghax ext hot-reload` (see spec below) — shipped as part of v0.3
 - [ ] Skill acceptance eval — pointable at Beam / Setsail dashboards
+      (deferred — needs a dedicated eval session)
 
-### New command: `ghax ext hot-reload <ext-id>` (MV3 seamless reload)
+### New command: `ghax ext hot-reload <ext-id>` (MV3 seamless reload) ✓ shipped
 
 **Why**: `ghax ext reload` today just calls `chrome.runtime.reload()`. That's
 correct but kills the service worker AND orphans every content script already
@@ -168,10 +172,10 @@ sees `pnpm --filter ... build` complete on an extension target.
 
 ## v1.0 — open source release
 
+- [x] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
+- [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
 - [ ] Make repo public, re-export under a personal / kepptic org decision
-- [ ] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
 - [ ] `bunx ghax` zero-install usage (publish `@ghax/cli` to npm)
-- [ ] GitHub Actions CI (bun test, compile matrix for mac/linux/win)
 - [ ] Docs site — `ghax.dev` or GitHub Pages
 - [ ] v1.0 tag + announce (HN, X, dev.to)
 
