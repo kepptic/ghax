@@ -1,19 +1,20 @@
-# ghax — session handoff (2026-04-18, end of build session)
+# ghax — session handoff (2026-04-18, end of v0.3 session)
 
 Start here when you pick this back up in a new session.
 
 ## Where we are
 
-v0.1 + v0.2 shipped and pushed to https://github.com/kepptic/ghax (private).
+v0.1, v0.2, and v0.3 shipped + pushed to https://github.com/kepptic/ghax (private).
 
-- `main` @ `037899d` — "v0.2 — QA ergonomics: annotated snapshots, responsive,
-  chain, record/replay"
+- `main` @ `277cadf` — "v0.3 — hot-reload, shadow DOM, gif, skills, CI, contributor docs"
+- `main` @ `5f93acf` — "docs(plan): mark v0.1 + v0.2 shipped; refresh session handoff"
+- `main` @ `037899d` — "v0.2 — QA ergonomics"
 - `main` @ `5533bca` — "Initial commit — ghax v0.1"
 
 The flagship attach / drive / extension-introspection loop works end-to-end
-against a live Edge session. Verified on the Beam extension
-(`hligjpiaogkblpkobldladoohgknedge`): SW eval, `chrome.storage.local` dump,
-interactive snapshot on the dashboard.
+against a live Edge session. Hot-reload, gif rendering, and shadow-DOM aware
+cursor scan all land in v0.3. Claude Code skills are registered globally
+as `kepptic-ghax-browse` and `kepptic-ghax`.
 
 ## Repo layout (as of this handoff)
 
@@ -21,99 +22,86 @@ interactive snapshot on the dashboard.
 ghax/
   bin/ghax                  shell shim (dist/ghax → fallback bun run src/cli.ts)
   src/
-    cli.ts                  argv → daemon RPC, handles attach/detach specials
+    cli.ts                  argv → daemon RPC, exit-code propagation
     daemon.ts               Node http server, Playwright + raw CDP, all handlers
     browser-launch.ts       browser detection + CDP probe + --launch scratch profile
     cdp-client.ts           /json/list + CdpTarget WebSocket pool
     config.ts               state dir resolution (git root → .ghax/ghax.json)
     buffers.ts              CircularBuffer<T> for console + network
-    snapshot.ts             aria tree → @e<n> refs + cursor-interactive pass
-  dist/
-    ghax                    Bun-compiled CLI binary (~61 MB)
-    ghax-daemon.mjs         Node ESM bundle (~38 KB, externalises playwright)
+    snapshot.ts             aria tree + @e<n> refs + shadow-DOM cursor pass
+  dist/                     gitignored — bun run build to produce
+  .claude/skills/
+    ghax-browse.md          flagship skill (kepptic-ghax-browse)
+    ghax.md                 top-level router (kepptic-ghax)
+  .github/workflows/ci.yml  typecheck + compile matrix (mac/linux/win)
   design/plan/              vision, architecture, commands, roadmap, this file
-  package.json              @ghax/cli, Bun 1.3.11, Playwright 1.59.1
-  tsconfig.json             bundler moduleResolution, strict
+  CHANGELOG.md              Keep-a-Changelog format, v0.1/v0.2/v0.3 + Unreleased
+  CONTRIBUTING.md           repo layout, dev loop, architecture invariants
+  CODE_OF_CONDUCT.md        Contributor Covenant v2.1
+  LICENSE                   MIT (with gstack attribution)
+  README.md                 quickstart + command surface
 ```
 
-## Key architectural decisions that already landed
+## What's shipped in v0.3 specifically
 
-- **CLI = Bun (compiled). Daemon = Node (ESM bundle).** Playwright's
-  `connectOverCDP` hangs under Bun 1.3.x. Node runs it reliably. Build command:
-  `bun build --compile src/cli.ts` + `bun build --target=node --format=esm src/daemon.ts`
-  (Playwright is an external so it resolves from `node_modules/` at runtime).
-- **Daemon HTTP server** uses Node's `http` module, not `Bun.serve` (the daemon
-  runs under Node).
-- **Handler registry** — each command is registered via `register('name', fn)`
-  in `daemon.ts`. Adding a new command = one handler + one CLI case.
-- **Recording** wraps the dispatcher: every cmd except the NEVER_RECORD set
-  (meta, read-only queries) gets appended to `ctx.recording.steps`.
-- **Annotated screenshots** inject an SVG overlay into the page (not absolute
-  divs) to avoid triggering re-layout on React apps.
-- **Extension ID discovery** uses CDP target grouping (parse
-  `chrome-extension://<id>/` out of target URLs in `/json/list`). No
-  `chrome://extensions` parsing needed.
+- **`ghax ext hot-reload <ext-id>` [--wait N] [--no-inject] [--verbose]** —
+  reads the extension manifest via Runtime.evaluate, fires
+  `chrome.runtime.reload()` fire-and-forget, sleeps `wait * 1000` ms,
+  re-discovers the new SW target on `/json/list`, then runs a single
+  chained `chrome.tabs.query + chrome.scripting.executeScript` call per
+  `content_scripts` entry. Returns per-tab `{tabId, url, status, error?}`.
+  Exit codes: 3 (ext not found), 4 (CDP error), 5 (SW timed out), 6 (>0
+  re-inject failures).
+- **Shadow-DOM aware cursor scan** — `snapshot.ts`'s cursor-interactive
+  pass now recursively walks open shadow roots and emits Playwright
+  pierce selectors (`host >>> inner`).
+- **`ghax gif <recording> [out.gif]` [--delay ms] [--scale px]** — drives
+  a replay, screenshots between steps, stitches via ffmpeg's 2-pass
+  palette flow. Fails gracefully if ffmpeg isn't on PATH.
+- **Deprecation hint on `ghax ext reload`** — when the extension declares
+  `content_scripts`, prints a hint to use `hot-reload` instead.
+- **Daemon → CLI exit-code propagation** — `new DaemonError(msg, code)`
+  in the daemon sets `exitCode` on the RPC response; CLI's `rpc()` helper
+  reads it and attaches to the thrown error for `main()` to honor.
+- **Claude Code skills** — `.claude/skills/ghax-browse.md` and
+  `.claude/skills/ghax.md`, auto-picked-up by
+  `devops-skill-registry` (confirmed in `~/.claude/skill-audit.log`).
+- **CHANGELOG + CONTRIBUTING + CODE_OF_CONDUCT + CI.**
 
-## Gotchas discovered while building
+## Things deliberately NOT done in v0.3
 
-- Bun's `Bun.spawnSync` / `Bun.spawn` are fine in the CLI; don't reach for them
-  in the daemon.
-- `Bun.serve`'s `server.port` type is `number | undefined` — we switched to
-  `http.createServer` anyway, but worth remembering.
-- `page.fill()` is unreliable on controlled React inputs. Our `fill` handler
-  uses the native value setter + dispatched `input`/`change` events.
-- Playwright doesn't expose side-panel pages via `browserContext.pages()`
-  cleanly — we talk to them via raw CDP `Runtime.evaluate` from the
-  `CdpPool`.
-- `chrome.storage.local get` returns JWT / OAuth tokens in plaintext. Don't
-  echo it into public logs.
+- **Skill acceptance eval.** We have the skills but no scripted eval
+  pointed at Beam / Setsail. Next session could script a series of
+  Claude prompts against each skill and assert tool-call outcomes.
+  Deferred because eval scaffolding is its own rabbit hole.
+- **Live smoke-test of `ghax ext hot-reload`.** Wasn't run against Beam
+  in this session because it would disrupt the user's open Autotask /
+  KaseyaOne / dashboard tabs. The daemon path is the exact pattern the
+  user ran by hand earlier this session (referenced in the roadmap), so
+  the confidence is high, but a one-shot verification on a throwaway
+  extension is worth doing early in v1.0 polishing.
+- **Real-profile attach.** Still deferred. `--launch` uses a scratch
+  profile. Plan is to investigate LaunchServices + keychain entitlements
+  on macOS before attempting to copy the real Edge profile.
 
-## What's next (in priority order)
+## What's next (v1.0 path)
 
-1. **`/ghax-browse` Claude Code skill.** The whole point of ghax is that it
-   becomes the AI's browser hands. A `.claude/skills/ghax-browse.md` with a
-   clear command cheat-sheet, plus auto-registration via
-   `devops-skill-registry` (see `/Users/gr/Documents/DevOps/.claude-skills/`),
-   is the single highest-leverage v0.3 item.
-
-2. **`ghax gif <recording> [out.gif]`.** ffmpeg wrapper. Replay a recording
-   while taking periodic screenshots, composite into a GIF. Turns QA sessions
-   into shareable artefacts. ~1-2 hours.
-
-3. **Shadow-DOM aware clicking.** Some component libraries (Shoelace, custom
-   web components) put interactive elements inside `shadowRoot`. Playwright's
-   `locator` handles open shadow DOM but our cursor-interactive scan doesn't
-   pierce shadow boundaries. Adapt gstack's shadow-aware walk.
-
-4. **Publish prep.** GitHub Actions matrix (mac/linux/win), CHANGELOG,
-   CONTRIBUTING, flip to public, npm publish `@ghax/cli`.
-
-5. **Tests.** A `test/smoke.ts` (attach → goto example.com → snapshot → detach)
-   would catch regressions before they reach the build. Deferred during v0.2
-   because dogfooding covered it manually.
-
-## Things deliberately NOT done
-
-- **Real-profile attach** (copy the user's live Edge profile into a
-  --user-data-dir so cookies/extensions come along). Research required on
-  keychain entitlements — deferred to v0.2+ track. For now, `--launch` uses a
-  scratch profile under `~/.ghax/<kind>-profile/` and the intended flow is to
-  have the user launch their real browser with `--remote-debugging-port=9222`.
-
-- **Auth tokens on the daemon.** Single-user localhost — no token auth in v0.1
-  or v0.2. Add scoped tokens (mirroring gstack's `token-registry.ts`) if we
-  ever expose the daemon to remote agents.
-
-- **Anti-bot stealth.** We're attaching to the user's real browser. Whatever
-  their fingerprint is, it's already good.
-
-## Reference reading
-
-- `/tmp/ref-gstack/browse/src/cli.ts` — gstack's CLI (1008 lines, instructive
-  for edge cases we haven't hit yet)
-- `/tmp/ref-gstack/browse/src/server.ts` — gstack's daemon (2474 lines; we're
-  ~800)
-- `/tmp/ref-gstack/browse/src/snapshot.ts` — we ported the core of this
+1. **Decide repo visibility + org.** Currently private under
+   `kepptic`. For open-source release, flip to public — optionally
+   re-home to a personal account or a dedicated `ghax` org. User
+   decision.
+2. **Publish to npm.** Need to decide: publish `@ghax/cli` under the
+   `ghax` org on npm (safer) or `ghax` unscoped (user already verified
+   both are free). Set up an NPM_TOKEN secret in GitHub Actions and a
+   release workflow triggered on tags.
+3. **Smoke-test harness.** Tiny `test/smoke.ts` that attaches, runs a
+   handful of reads + writes, detaches. Fold into CI so we catch
+   daemon-boot regressions before they hit a human.
+4. **Docs site.** GitHub Pages or `ghax.dev`. Can be almost-entirely
+   auto-generated from the in-tree markdown + README.
+5. **Announce.** HN / X / dev.to. Point at the MV3 hot-reload loop and
+   the @ref-driven snapshot story as the differentiator from
+   gstack browse and playwright-cli.
 
 ## How to get running in a new session
 
@@ -128,5 +116,17 @@ bun install && bun run build
 ./dist/ghax tabs
 ./dist/ghax snapshot -i -a -o /tmp/shot.png
 ./dist/ghax ext list
+./dist/ghax ext hot-reload <ext-id>          # the v0.3 flagship
 ./dist/ghax detach
 ```
+
+## How to invoke ghax from Claude Code
+
+Skills are already registered on this machine. In any session:
+
+- `/kepptic-ghax-browse` — full skill with cheat sheet + recipes
+- `/kepptic-ghax` — top-level router
+
+Claude will also reach for them automatically whenever the user mentions
+"attach", "real edge", "hot-reload", or runs `pnpm build` on an
+extension.
