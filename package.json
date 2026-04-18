@@ -1,0 +1,51 @@
+{
+  "name": "@ghax/cli",
+  "version": "0.0.1",
+  "description": "Attach to your real Chrome or Edge via CDP and drive it — tabs, clicks, a11y snapshots, plus MV3 extension internals.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ghax": "./bin/ghax"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
+    "build": "bun build --compile src/cli.ts --outfile dist/ghax && bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core && chmod +x dist/ghax",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "keywords": [
+    "cdp",
+    "chrome",
+    "edge",
+    "browser",
+    "automation",
+    "playwright",
+    "chrome-extension",
+    "mv3",
+    "cli",
+    "qa",
+    "ai-agent"
+  ],
+  "files": [
+    "bin/",
+    "dist/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kepptic/ghax.git"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.12",
+    "@types/node": "^25.6.0"
+  }
+}

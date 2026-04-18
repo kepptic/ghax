@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# ghax CLI shim — delegates to compiled binary, falls back to `bun run src/cli.ts`.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if test -x "$DIR/dist/ghax"; then
+  exec "$DIR/dist/ghax" "$@"
+fi
+if command -v bun >/dev/null 2>&1 && test -f "$DIR/src/cli.ts"; then
+  exec bun run "$DIR/src/cli.ts" "$@"
+fi
+echo "ghax: no compiled binary at $DIR/dist/ghax and no Bun runtime available." >&2
+echo "Run: cd $DIR && bun install && bun run build" >&2
+exit 10
