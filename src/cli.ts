@@ -290,10 +290,13 @@ function printResult(data: unknown, jsonMode: boolean): void {
     }
     return;
   }
-  // Special case: snapshot returns {text, count}
+  // Special case: snapshot returns {text, count, annotatedPath?}
   const obj = data as Record<string, unknown>;
   if (typeof obj.text === 'string') {
     console.log(obj.text);
+    if (typeof obj.annotatedPath === 'string') {
+      console.error(`\n(annotated screenshot → ${obj.annotatedPath})`);
+    }
     return;
   }
   console.log(JSON.stringify(data, null, 2));
@@ -326,6 +329,8 @@ const SNAPSHOT_SHORT: Record<string, string> = {
   d: 'depth',
   s: 'selector',
   C: 'cursorInteractive',
+  a: 'annotate',
+  o: 'output',
 };
 
 function expandSnapshotFlags(argv: string[]): ParsedArgs {
@@ -347,7 +352,7 @@ function expandSnapshotFlags(argv: string[]): ParsedArgs {
     } else if (a.startsWith('-') && a.length === 2) {
       const short = a.slice(1);
       const long = SNAPSHOT_SHORT[short] ?? short;
-      if (long === 'depth' || long === 'selector') {
+      if (long === 'depth' || long === 'selector' || long === 'output') {
         flags[long] = argv[++i] ?? '';
       } else {
         flags[long] = true;
@@ -380,12 +385,15 @@ Tab:
   screenshot [<@ref|selector>] [--path <p>] [--fullPage]
 
 Snapshot & interact:
-  snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C]
+  snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
   click <@ref|selector>
   fill <@ref|selector> <value>
   press <key>
   type <text>
   wait <selector|ms|--networkidle|--load>
+  viewport <WxH>
+  responsive [prefix] [--fullPage]
+  diff <url1> <url2>
 
 Logs:
   console [--errors] [--last N]
@@ -403,6 +411,13 @@ Extensions (MV3):
 Real user gestures:
   gesture click <x,y>
   gesture key <key>
+
+Batch / recording:
+  chain < steps.json          (JSON array of {cmd, args?, opts?})
+  record start [name]
+  record stop
+  record status
+  replay <file>
 
 Add --json for machine-readable output on any command.
 `;
@@ -448,6 +463,9 @@ async function main(): Promise<number> {
       case 'html':
       case 'screenshot':
       case 'wait':
+      case 'viewport':
+      case 'responsive':
+      case 'diff':
         return await makeSimple(verb)(parseArgs(rest));
 
       case 'fill': {
@@ -472,6 +490,15 @@ async function main(): Promise<number> {
 
       case 'gesture':
         return await dispatchGesture(rest);
+
+      case 'chain':
+        return await cmdChain(parseArgs(rest));
+
+      case 'record':
+        return await dispatchRecord(rest);
+
+      case 'replay':
+        return await cmdReplay(parseArgs(rest));
 
       default:
         console.error(`Unknown command: ${verb}\n\nRun 'ghax --help' for usage.`);
@@ -550,6 +577,120 @@ async function dispatchExt(rest: string[]): Promise<number> {
       console.error(`Unknown ext sub: ${sub}`);
       return EXIT.USAGE;
   }
+}
+
+interface ChainStep {
+  cmd: string;
+  args?: unknown[];
+  opts?: Record<string, unknown>;
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf-8');
+}
+
+async function cmdChain(parsed: ParsedArgs): Promise<number> {
+  const stopOnError = Boolean(parsed.flags.stopOnError ?? true);
+  const body = await readStdin();
+  if (!body.trim()) {
+    console.error('ghax chain: expected JSON on stdin');
+    return EXIT.USAGE;
+  }
+  let steps: ChainStep[];
+  try {
+    const parsedBody = JSON.parse(body);
+    steps = Array.isArray(parsedBody) ? (parsedBody as ChainStep[]) : [parsedBody as ChainStep];
+  } catch (err: any) {
+    console.error(`ghax chain: invalid JSON — ${err.message}`);
+    return EXIT.USAGE;
+  }
+
+  return withDaemon(async (port) => {
+    const results: Array<{ cmd: string; ok: boolean; data?: unknown; error?: string }> = [];
+    for (const step of steps) {
+      if (!step.cmd) {
+        results.push({ cmd: '<missing>', ok: false, error: 'step missing cmd' });
+        if (stopOnError) break;
+        continue;
+      }
+      try {
+        const data = await rpc(port, step.cmd, step.args ?? [], step.opts ?? {});
+        results.push({ cmd: step.cmd, ok: true, data });
+      } catch (err: any) {
+        results.push({ cmd: step.cmd, ok: false, error: err.message });
+        if (stopOnError) break;
+      }
+    }
+    printResult(results, Boolean(parsed.flags.json) || true);
+    return results.some((r) => !r.ok) ? EXIT.CDP_ERROR : EXIT.OK;
+  });
+}
+
+async function dispatchRecord(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (!sub) {
+    console.error('Usage: ghax record <start|stop> [name]');
+    return EXIT.USAGE;
+  }
+  const parsed = parseArgs(rest.slice(1));
+  switch (sub) {
+    case 'start':
+      return withDaemon(async (port) => {
+        const name = parsed.positional[0] ?? `rec-${Date.now()}`;
+        await rpc(port, 'record.start', [name]);
+        console.log(`recording → ${name}`);
+        return EXIT.OK;
+      });
+    case 'stop':
+      return withDaemon(async (port) => {
+        const data = (await rpc(port, 'record.stop')) as { name: string; path: string; steps: number };
+        console.log(`saved ${data.steps} steps → ${data.path}`);
+        return EXIT.OK;
+      });
+    case 'status':
+      return withDaemon(async (port) => {
+        const data = await rpc(port, 'record.status');
+        printResult(data, Boolean(parsed.flags.json));
+        return EXIT.OK;
+      });
+    default:
+      console.error(`Unknown record sub: ${sub}`);
+      return EXIT.USAGE;
+  }
+}
+
+async function cmdReplay(parsed: ParsedArgs): Promise<number> {
+  const file = parsed.positional[0];
+  if (!file) {
+    console.error('Usage: ghax replay <file>');
+    return EXIT.USAGE;
+  }
+  const body = fs.readFileSync(file, 'utf-8');
+  let steps: ChainStep[];
+  try {
+    const doc = JSON.parse(body);
+    steps = (doc.steps ?? doc) as ChainStep[];
+  } catch (err: any) {
+    console.error(`ghax replay: invalid recording — ${err.message}`);
+    return EXIT.USAGE;
+  }
+  return withDaemon(async (port) => {
+    const results: Array<{ cmd: string; ok: boolean; error?: string }> = [];
+    for (const step of steps) {
+      try {
+        await rpc(port, step.cmd, step.args ?? [], step.opts ?? {});
+        results.push({ cmd: step.cmd, ok: true });
+        console.log(`✓ ${step.cmd}${step.args?.length ? ' ' + JSON.stringify(step.args) : ''}`);
+      } catch (err: any) {
+        results.push({ cmd: step.cmd, ok: false, error: err.message });
+        console.error(`✗ ${step.cmd} — ${err.message}`);
+        return EXIT.CDP_ERROR;
+      }
+    }
+    return EXIT.OK;
+  });
 }
 
 async function dispatchGesture(rest: string[]): Promise<number> {
