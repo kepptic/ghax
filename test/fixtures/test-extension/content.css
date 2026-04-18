@@ -1,0 +1,14 @@
+/* Banner injected by content.js. Keep loud so a human can spot it at a glance. */
+#ghax-test-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2147483647;
+  padding: 6px 12px;
+  background: #111;
+  color: #0f0;
+  font: 12px/1.4 ui-monospace, monospace;
+  border-bottom: 1px solid #0f0;
+  pointer-events: none;
+}

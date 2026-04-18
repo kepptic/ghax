@@ -8,6 +8,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `test/smoke.ts` — 24-check smoke harness exercising the full non-destructive
+  command surface against a real running browser. `bun run test:smoke`.
+- `test/fixtures/test-extension/` — minimal MV3 extension for live
+  `ghax ext hot-reload` verification (injects a versioned banner on
+  example.com/.org).
+
+### Changed
+
+- README reflects v0.3 features (hot-reload, gif, shadow-DOM) and the
+  current `v1.0 — internal hardening` status.
+
+## [0.3.0] — 2026-04-18
+
+### Added
+
 - `ghax ext hot-reload <ext-id>` — MV3 seamless reload. Reads the extension
   manifest, fires `chrome.runtime.reload()` without awaiting, waits for the
   service worker to restart, then re-injects each declared `content_scripts`
@@ -73,6 +88,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kepptic/ghax/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kepptic/ghax/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kepptic/ghax/releases/tag/v0.1.0

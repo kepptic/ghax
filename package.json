@@ -12,7 +12,8 @@
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
     "build": "bun build --compile src/cli.ts --outfile dist/ghax && bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core && chmod +x dist/ghax",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "test:smoke": "bun run test/smoke.ts"
   },
   "dependencies": {
     "playwright": "^1.58.2"

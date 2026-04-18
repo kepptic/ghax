@@ -70,13 +70,31 @@ daemon is a bundle, not a live file. The CLI alone can run via
   `docs(plan): ...`.
 - Don't claim "Co-Authored-By" unless a human co-authored.
 
+## Testing
+
+Two test surfaces:
+
+```bash
+bun run typecheck    # bunx tsc --noEmit — runs in CI
+bun run test:smoke   # test/smoke.ts — drives a real browser, NOT in CI
+```
+
+The smoke test requires a running Chromium-family browser on
+`--remote-debugging-port=9222`. It attaches, runs ~24 non-destructive
+commands, and detaches. Takes ~20s end-to-end.
+
+For MV3 hot-reload specifically, load `test/fixtures/test-extension/`
+as an unpacked extension and follow its README — that's the one bit of
+QA that needs a dedicated fixture rather than the real web.
+
 ## Before opening a PR
 
-1. `bunx tsc --noEmit` passes.
+1. `bun run typecheck` passes.
 2. `bun run build` succeeds on macOS (CI also runs Linux + Windows).
-3. You dogfooded against a real running Edge at least once — smoke-test
-   the happy path of what you changed.
-4. Updated `CHANGELOG.md` under `## [Unreleased]`.
+3. `bun run test:smoke` passes against a real running Edge.
+4. You dogfooded the specific thing you changed — fix a bug? reproduce
+   it before and after.
+5. Updated `CHANGELOG.md` under `## [Unreleased]`.
 
 ## Reporting issues
 

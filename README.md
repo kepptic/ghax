@@ -4,9 +4,10 @@ G's open-source developer toolkit. A collection of CLI tools + Claude Code skill
 that attach to your **real** environment (real browser, real auth, real extensions)
 instead of spinning up sandboxed copies.
 
-**Status**: v0.2 in active development. The flagship `ghax browse` works
-against real Chrome/Edge sessions — including MV3 extension service workers
-and side panels.
+**Status**: v0.3 internal-hardening. The flagship `ghax browse` works
+against real Chrome/Edge sessions — including MV3 extension service workers,
+side panels, and seamless hot-reload. Repo is private under `kepptic` for
+now; open-source release paused.
 
 ## What ghax does today
 
@@ -14,21 +15,27 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 
 - **Tabs**: list, switch, navigate, back/forward/reload, screenshot, text, eval.
 - **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role + name,
-  not fragile CSS selectors. Includes a cursor-interactive pass for Radix /
-  Headless UI popovers that never land in the a11y tree.
+  not fragile CSS selectors. Cursor-interactive pass for Radix / Headless UI
+  popovers that never land in the a11y tree, and **shadow-DOM aware** —
+  walks open shadow roots and emits `host >>> inner` pierce selectors for
+  custom-element-heavy apps (Lit, Shoelace, web components).
 - **Annotated snapshots** (`-a`): red overlay boxes + `@e<n>` labels drawn
   onto a full-page screenshot — useful when an LLM needs to "see" the refs.
 - **MV3 extensions**: list all extensions, reload them, eval JS in a service
   worker, read/write `chrome.storage.*`, interact with side panels.
+- **Seamless extension hot-reload** (`ghax ext hot-reload`): reload the SW
+  and re-inject content scripts + CSS into every matching tab, so
+  `pnpm build` → new code running in ~5s without killing your tab state.
 - **Real user gestures** via CDP `Input.dispatch*` (needed for APIs like
   `chrome.sidePanel.open()` that refuse synthetic clicks).
 - **Console + network capture** from the moment you attach — rolling 5k-entry
   buffers, `--errors` and `--pattern` filters.
 - **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
   widths; `ghax viewport WxH` for one-offs.
-- **Batch + record**: pipe JSON to `ghax chain` for scripted flows;
+- **Batch + record + render**: pipe JSON to `ghax chain` for scripted flows;
   `ghax record start / stop` captures every command into a replayable
-  `.ghax/recordings/<name>.json` file.
+  `.ghax/recordings/<name>.json`; `ghax gif <recording>` stitches the
+  frames via ffmpeg.
 
 ## Quickstart
 
@@ -119,7 +126,7 @@ The daemon auto-shuts after 30 minutes idle.
 ## Full command surface
 
 See [`design/plan/03-commands.md`](./design/plan/03-commands.md) for the full
-planned surface. Commands shipped in v0.1:
+planned surface. Commands shipped today:
 
 ```
 attach [--port N] [--browser edge|chrome] [--launch]
@@ -146,12 +153,14 @@ diff <url1> <url2>
 chain < steps.json
 record start [name] | stop | status
 replay <file>
+gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
 console [--errors] [--last N]
 network [--pattern re] [--last N]
 cookies
 ext list
 ext targets <ext-id>
 ext reload <ext-id>
+ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
 ext sw <ext-id> eval <js>
 ext panel <ext-id> eval <js>
 ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
@@ -166,9 +175,10 @@ Add `--json` on any command for machine-readable output.
 See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
 
 - **v0.1** — flagship `ghax browse` working against real browsers. ✓
-- **v0.2** (current) — annotated snapshots, responsive, diff, chain, record/replay. ✓
-- **v0.3** — Claude Code skills auto-registered, GIF export, shadow-DOM clicks.
-- **v1.0** — npm publish, GitHub Actions CI, docs site.
+- **v0.2** — annotated snapshots, responsive, diff, chain, record/replay. ✓
+- **v0.3** — hot-reload, shadow-DOM, gif, Claude Code skills, CI. ✓
+- **v1.0** (current) — internal hardening: smoke tests, live hot-reload
+  verification. Public release paused.
 
 ## Security
 
