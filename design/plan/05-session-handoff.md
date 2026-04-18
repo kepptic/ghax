@@ -92,16 +92,18 @@ the user's explicit decision.
 
 ```bash
 cd /Users/gr/Documents/DevOps/kepptic/products/open-source/ghax
-# 1. Confirm Edge is on CDP :9222 (or use --launch)
-curl -s http://127.0.0.1:9222/json/version | head -5
-# 2. Build
+# 1. Build + put on PATH
 bun install && bun run build
+bun run install-link            # symlink ~/.local/bin/ghax
+which ghax                       # /Users/gr/.local/bin/ghax
+# 2. Confirm Edge is on CDP :9222 (or use --launch)
+curl -s http://127.0.0.1:9222/json/version | head -5
 # 3. Run smoke tests (requires live browser)
-bun run test:smoke             # 34/34 checks, ~7s
-bun run test/hot-reload-smoke.ts  # scripted hot-reload verification
-# 4. Drive
-./dist/ghax attach
-./dist/ghax --help
+bun run test:smoke               # 34/34 checks, ~7s
+bun run test/hot-reload-smoke.ts # scripted hot-reload verification
+# 4. Drive (from anywhere after install-link)
+ghax attach
+ghax --help
 ```
 
 ## How to invoke ghax from Claude Code

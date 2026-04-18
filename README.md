@@ -45,7 +45,13 @@ Prerequisites: Bun 1.3+, Node 20+.
 ```bash
 bun install
 bun run build
+bun run install-link    # symlinks dist/ghax → ~/.local/bin/ghax
 ```
+
+`install-link` is optional but makes `ghax` available from any
+directory without qualifying the path. `~/.local/bin` is on the
+default macOS user PATH. Re-run is idempotent; remove via
+`bun run uninstall-link`.
 
 1. Launch your Edge or Chrome with CDP enabled:
 
