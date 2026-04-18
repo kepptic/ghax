@@ -96,6 +96,27 @@ ghax gesture key Enter
 # Orchestrated QA pass
 ghax qa --crawl https://example.com --depth 1 --out /tmp/qa.json
 
+# Profiling (Performance.getMetrics + optional heap)
+ghax profile --duration 5 --heap
+ghax profile --extension <ext-id>
+
+# Live tail (Server-Sent Events — Ctrl-C to stop)
+ghax console --follow
+ghax network --follow
+ghax ext sw <ext-id> logs --follow
+
+# Extra extension surfaces
+ghax ext popup <ext-id> eval "document.title"
+ghax ext options <ext-id> eval "chrome.storage.local.get()"
+ghax ext message <ext-id> '{"type":"ping"}'
+
+# Dev workflow helpers
+ghax ship --message "fix foo"        # typecheck + build + commit + push + PR
+ghax review                           # Claude-ready review prompt on stdout
+ghax canary https://prod.example.com --interval 60 --fail-fast
+ghax diff-state /tmp/before.json /tmp/after.json
+ghax pair status                      # SSH-tunnel instructions
+
 # Logs
 ghax console --errors --last 50
 ghax network --pattern 'api/tickets'

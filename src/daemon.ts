@@ -49,6 +49,13 @@ interface Recording {
   steps: RecordedStep[];
 }
 
+interface SwLogSubscription {
+  targetId: string;
+  buf: CircularBuffer<ConsoleEntry>;
+}
+
+type StreamListener = (entry: unknown) => void;
+
 interface Ctx {
   browser: Browser;
   context: BrowserContext;
@@ -64,6 +71,10 @@ interface Ctx {
   startedAt: number;
   stateDir: string;
   recording: Recording | null;
+  swLogs: Map<string, SwLogSubscription>;
+  consoleListeners: Set<StreamListener>;
+  networkListeners: Set<StreamListener>;
+  swLogListeners: Map<string, Set<StreamListener>>;
 }
 
 type Handler = (ctx: Ctx, args: unknown[], opts: Record<string, unknown>) => Promise<unknown>;
@@ -121,30 +132,36 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   ctx.instrumented.add(page);
 
   page.on('console', (msg) => {
-    ctx.consoleBuf.push({
+    const entry: ConsoleEntry = {
       timestamp: Date.now(),
       level: (msg.type() as ConsoleEntry['level']) ?? 'log',
       text: msg.text(),
       url: page.url(),
       source: 'tab',
-    });
+    };
+    ctx.consoleBuf.push(entry);
+    for (const l of ctx.consoleListeners) l(entry);
   });
   page.on('pageerror', (err) => {
-    ctx.consoleBuf.push({
+    const entry: ConsoleEntry = {
       timestamp: Date.now(),
       level: 'error',
       text: `[pageerror] ${err.message}`,
       url: page.url(),
       source: 'tab',
-    });
+    };
+    ctx.consoleBuf.push(entry);
+    for (const l of ctx.consoleListeners) l(entry);
   });
   page.on('request', (req) => {
-    ctx.networkBuf.push({
+    const entry: NetworkEntry = {
       timestamp: Date.now(),
       method: req.method(),
       url: req.url(),
       resourceType: req.resourceType(),
-    });
+    };
+    ctx.networkBuf.push(entry);
+    for (const l of ctx.networkListeners) l(entry);
   });
   page.on('response', (resp) => {
     // Best-effort: stamp status onto the most recent matching request entry.
@@ -870,6 +887,88 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   };
 });
 
+async function ensureSwLogSubscription(ctx: Ctx, extId: string): Promise<SwLogSubscription> {
+  const existing = ctx.swLogs.get(extId);
+  if (existing) {
+    // Check if the underlying target is still alive. After a hot-reload the
+    // SW target id changes, so the old subscription is dead.
+    const targets = await ctx.pool.list();
+    if (targets.some((t) => t.id === existing.targetId && t.type === 'service_worker')) {
+      return existing;
+    }
+    ctx.swLogs.delete(extId);
+  }
+
+  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
+  if (sws.length === 0) {
+    throw new DaemonError(`No service worker for ${extId}`, 3);
+  }
+  const targetInfo = sws[0];
+  const target = await ctx.pool.get(targetInfo);
+  await target.send('Runtime.enable');
+  const buf = new CircularBuffer<ConsoleEntry>(BUFFER_CAP);
+  target.on((event) => {
+    if (event.method === 'Runtime.consoleAPICalled') {
+      const p = event.params as {
+        type?: string;
+        args?: Array<{ value?: unknown; description?: string }>;
+        timestamp?: number;
+      };
+      const text = (p.args || [])
+        .map((a) => (a.value !== undefined ? stringifyArg(a.value) : (a.description ?? '')))
+        .join(' ');
+      const entry: ConsoleEntry = {
+        timestamp: p.timestamp ? Math.round(p.timestamp) : Date.now(),
+        level: (p.type as ConsoleEntry['level']) ?? 'log',
+        text,
+        source: 'service_worker',
+        targetId: targetInfo.id,
+      };
+      buf.push(entry);
+      const listeners = ctx.swLogListeners.get(extId);
+      if (listeners) for (const l of listeners) l(entry);
+    } else if (event.method === 'Runtime.exceptionThrown') {
+      const p = event.params as { exceptionDetails?: { text?: string; exception?: { description?: string } } };
+      const text = p.exceptionDetails?.exception?.description
+        ?? p.exceptionDetails?.text
+        ?? '[unknown SW exception]';
+      const entry: ConsoleEntry = {
+        timestamp: Date.now(),
+        level: 'error',
+        text: `[exception] ${text}`,
+        source: 'service_worker',
+        targetId: targetInfo.id,
+      };
+      buf.push(entry);
+      const listeners = ctx.swLogListeners.get(extId);
+      if (listeners) for (const l of listeners) l(entry);
+    }
+  });
+  const sub: SwLogSubscription = { targetId: targetInfo.id, buf };
+  ctx.swLogs.set(extId, sub);
+  return sub;
+}
+
+function stringifyArg(v: unknown): string {
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+register('ext.sw.logs', async (ctx, args, opts) => {
+  const extId = String(args[0] ?? '');
+  if (!extId) throw new Error('Usage: ext sw <ext-id> logs [--last N] [--errors]');
+  const sub = await ensureSwLogSubscription(ctx, extId);
+  const n = opts.last ? Number(opts.last) : 200;
+  const entries = sub.buf.last(n);
+  const errorsOnly = Boolean(opts.errors);
+  return errorsOnly ? entries.filter((e) => e.level === 'error') : entries;
+});
+
 register('ext.sw.eval', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const js = String(args[1] ?? '');
@@ -966,16 +1065,25 @@ register('ext.message', async (ctx, args) => {
   return res.result?.value ?? null;
 });
 
-register('ext.panel.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  if (!extId || !js) throw new Error('Usage: ext panel <ext-id> eval <js>');
-  const panels = (await ctx.pool.findByExtensionId(extId, 'page'))
-    .filter((t) => t.url.includes('/sidepanel.html') || t.url.includes('sidePanel') || t.url.includes('panel.html'));
-  if (panels.length === 0) {
-    throw new Error(`No sidepanel for ${extId}. Open it first (try: ghax gesture click <x,y> on the extension icon).`);
+// Shared eval-in-extension-page helper. `filter` decides which of the
+// extension's `page` targets we talk to; the CLI wraps this with distinct
+// verbs (panel, popup, options) so the user's intent is explicit.
+async function extViewEval(
+  ctx: Ctx,
+  extId: string,
+  js: string,
+  filter: (url: string) => boolean,
+  label: string,
+): Promise<unknown> {
+  if (!extId || !js) throw new Error(`Usage: ext ${label} <ext-id> eval <js>`);
+  const pages = (await ctx.pool.findByExtensionId(extId, 'page')).filter((t) => filter(t.url));
+  if (pages.length === 0) {
+    throw new DaemonError(
+      `No ${label} page open for ${extId}. Open it first (e.g. via gesture click on the extension icon).`,
+      3,
+    );
   }
-  const target = await ctx.pool.get(panels[0]);
+  const target = await ctx.pool.get(pages[0]);
   await target.send('Runtime.enable');
   const res = await target.send('Runtime.evaluate', {
     expression: `(async () => { return (${js}); })()`,
@@ -983,8 +1091,48 @@ register('ext.panel.eval', async (ctx, args) => {
     returnByValue: true,
   });
   const r = res as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (r.exceptionDetails) throw new Error(`Panel eval threw: ${JSON.stringify(r.exceptionDetails)}`);
+  if (r.exceptionDetails) throw new Error(`${label} eval threw: ${JSON.stringify(r.exceptionDetails)}`);
   return r.result?.value ?? null;
+}
+
+register('ext.panel.eval', async (ctx, args) => {
+  const extId = String(args[0] ?? '');
+  const js = String(args[1] ?? '');
+  return extViewEval(
+    ctx,
+    extId,
+    js,
+    (url) => /\/sidepanel\.html|sidePanel|panel\.html/i.test(url),
+    'panel',
+  );
+});
+
+register('ext.popup.eval', async (ctx, args) => {
+  const extId = String(args[0] ?? '');
+  const js = String(args[1] ?? '');
+  // Popups are transient — a page target only exists while the popup is
+  // actually open. Matching by popup.html or action/default_popup path.
+  return extViewEval(
+    ctx,
+    extId,
+    js,
+    (url) => /\/popup\.html|\/popup\.htm|default_popup/i.test(url),
+    'popup',
+  );
+});
+
+register('ext.options.eval', async (ctx, args) => {
+  const extId = String(args[0] ?? '');
+  const js = String(args[1] ?? '');
+  // Options pages open as normal tabs when the user clicks "Options" in
+  // the extensions panel. Path convention: options.html or options_ui.
+  return extViewEval(
+    ctx,
+    extId,
+    js,
+    (url) => /\/options\.html|\/options\/|options_ui/i.test(url),
+    'options',
+  );
 });
 
 // ─── Gesture commands (real Input.dispatch*) ───────────────────
@@ -1007,6 +1155,150 @@ register('gesture.click', async (ctx, args) => {
     await session.detach().catch(() => undefined);
   }
   return { ok: true };
+});
+
+// ─── Profiling ─────────────────────────────────────────────────
+
+interface MetricsSnapshot {
+  at: number;
+  metrics: Record<string, number>;
+}
+
+function metricsToMap(result: unknown): Record<string, number> {
+  const r = result as { metrics?: Array<{ name: string; value: number }> };
+  const out: Record<string, number> = {};
+  for (const m of r.metrics || []) out[m.name] = m.value;
+  return out;
+}
+
+async function takeMetricsViaSession(session: {
+  send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+}): Promise<Record<string, number>> {
+  await session.send('Performance.enable');
+  const result = await session.send('Performance.getMetrics');
+  return metricsToMap(result);
+}
+
+async function captureHeapSnapshot(
+  cdpSession: { send: (m: string, p?: Record<string, unknown>) => Promise<unknown>; on?: unknown },
+  outPath: string,
+): Promise<void> {
+  // Both the Playwright CDPSession and our raw CdpTarget wrap the same
+  // protocol. HeapProfiler streams chunks via HeapProfiler.addHeapSnapshotChunk
+  // events rather than returning the payload from takeHeapSnapshot directly,
+  // so we need an event listener regardless of the session flavour.
+  const listener = (event: unknown) => {
+    const e = event as { method?: string; params?: { chunk?: string } };
+    if (e.method === 'HeapProfiler.addHeapSnapshotChunk' && e.params?.chunk) {
+      fs.appendFileSync(outPath, e.params.chunk);
+    }
+  };
+  const off = attachSessionListener(cdpSession, listener);
+  try {
+    await cdpSession.send('HeapProfiler.enable');
+    await cdpSession.send('HeapProfiler.collectGarbage');
+    // Truncate the file before streaming in new chunks.
+    fs.writeFileSync(outPath, '');
+    await cdpSession.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
+  } finally {
+    off();
+  }
+}
+
+type CdpSend = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+
+function asCdpSend(session: unknown): { send: CdpSend } {
+  return session as { send: CdpSend };
+}
+
+function attachSessionListener(sess: unknown, cb: (event: unknown) => void): () => void {
+  // Playwright CDPSession: has `.on(eventName, handler)` — we hook the
+  // wildcard 'HeapProfiler.addHeapSnapshotChunk' event.
+  const s = sess as {
+    on?: (e: string, h: (p: unknown) => void) => void;
+    off?: (e: string, h: (p: unknown) => void) => void;
+  };
+  if (s.on && typeof s.on === 'function' && typeof s.off === 'function') {
+    const h = (params: unknown) => cb({ method: 'HeapProfiler.addHeapSnapshotChunk', params });
+    s.on('HeapProfiler.addHeapSnapshotChunk', h);
+    return () => s.off!('HeapProfiler.addHeapSnapshotChunk', h);
+  }
+  // Raw CdpTarget: its .on takes a CdpEvent consumer that fires for every event.
+  const t = sess as { on?: (h: (e: unknown) => void) => () => void };
+  if (t.on) {
+    return t.on(cb);
+  }
+  return () => undefined;
+}
+
+register('profile', async (ctx, _args, opts) => {
+  const durationMs = opts.duration ? Number(opts.duration) * 1000 : 0;
+  const heap = Boolean(opts.heap);
+  const extId = opts.extension ? String(opts.extension) : null;
+
+  const dir = `${ctx.stateDir}/profiles`;
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const base = `${dir}/${extId ? `ext-${extId}-${ts}` : `tab-${ts}`}`;
+
+  let startMetrics: Record<string, number>;
+  let endMetrics: Record<string, number> | null = null;
+  let target = extId ? `ext:${extId}` : 'active-tab';
+  let heapPath: string | null = null;
+
+  if (extId) {
+    const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
+    if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
+    const swTarget = await ctx.pool.get(sws[0]);
+    startMetrics = await takeMetricsViaSession(swTarget);
+    if (durationMs > 0) {
+      await new Promise((r) => setTimeout(r, durationMs));
+      endMetrics = await takeMetricsViaSession(swTarget);
+    }
+    if (heap) {
+      heapPath = `${base}.heapsnapshot`;
+      await captureHeapSnapshot(swTarget, heapPath);
+    }
+  } else {
+    const page = await activePage(ctx);
+    const session = await page.context().newCDPSession(page);
+    const sendable = asCdpSend(session);
+    try {
+      startMetrics = await takeMetricsViaSession(sendable);
+      if (durationMs > 0) {
+        await new Promise((r) => setTimeout(r, durationMs));
+        endMetrics = await takeMetricsViaSession(sendable);
+      }
+      if (heap) {
+        heapPath = `${base}.heapsnapshot`;
+        await captureHeapSnapshot(sendable, heapPath);
+      }
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
+    target = `tab:${page.url()}`;
+  }
+
+  const deltas: Record<string, number> = {};
+  if (endMetrics) {
+    for (const k of Object.keys(endMetrics)) {
+      const s = startMetrics[k] ?? 0;
+      deltas[k] = endMetrics[k] - s;
+    }
+  }
+
+  const report = {
+    at: new Date().toISOString(),
+    target,
+    durationMs,
+    start: { at: Date.now() - durationMs, metrics: startMetrics } satisfies MetricsSnapshot,
+    end: endMetrics ? ({ at: Date.now(), metrics: endMetrics } satisfies MetricsSnapshot) : null,
+    deltas: endMetrics ? deltas : null,
+    heapSnapshotPath: heapPath,
+  };
+  const reportPath = `${base}.json`;
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  return { reportPath, ...report };
 });
 
 // ─── Recording ─────────────────────────────────────────────────
@@ -1156,6 +1448,10 @@ async function main() {
     startedAt: Date.now(),
     stateDir: cfg.stateDir,
     recording: null,
+    swLogs: new Map(),
+    consoleListeners: new Set(),
+    networkListeners: new Set(),
+    swLogListeners: new Map(),
   };
 
   // Instrument the first page now so console/network start capturing immediately.
@@ -1204,6 +1500,78 @@ async function main() {
     if (url === '/shutdown' && req.method === 'POST') {
       json(res, 200, { ok: true });
       setTimeout(() => shutdown('shutdown-request'), 20);
+      return;
+    }
+
+    // ─── Server-Sent Events endpoints ─────────────────────────
+    //
+    // Each endpoint:
+    //   1. Sets text/event-stream headers.
+    //   2. Registers a listener against the appropriate in-memory source.
+    //   3. Writes `data: <json>\n\n` per event.
+    //   4. Sends a `:ping` line every 15s to keep proxies / long-lived
+    //      intermediaries from killing the connection.
+    //   5. On `close`, removes the listener so the buffer GC can reclaim.
+    //
+    // The CLI side (streamSse) fetches with a reader and prints lines.
+    if (url.startsWith('/sse/') && req.method === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      const write = (obj: unknown) => {
+        try {
+          res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        } catch {
+          // socket closed — cleanup via req close handler
+        }
+      };
+      const keepAlive = setInterval(() => {
+        try {
+          res.write(':ping\n\n');
+        } catch {
+          // ignore
+        }
+      }, 15_000);
+
+      let cleanup: () => void = () => undefined;
+
+      if (url === '/sse/console') {
+        ctx.consoleListeners.add(write);
+        cleanup = () => ctx.consoleListeners.delete(write);
+      } else if (url === '/sse/network') {
+        ctx.networkListeners.add(write);
+        cleanup = () => ctx.networkListeners.delete(write);
+      } else if (url.startsWith('/sse/ext-sw-logs/')) {
+        const extId = decodeURIComponent(url.slice('/sse/ext-sw-logs/'.length));
+        try {
+          // Force the subscription to exist before attaching the listener.
+          await ensureSwLogSubscription(ctx, extId);
+        } catch (err: any) {
+          write({ error: err.message });
+          clearInterval(keepAlive);
+          res.end();
+          return;
+        }
+        let listeners = ctx.swLogListeners.get(extId);
+        if (!listeners) {
+          listeners = new Set();
+          ctx.swLogListeners.set(extId, listeners);
+        }
+        listeners.add(write);
+        cleanup = () => listeners!.delete(write);
+      } else {
+        res.writeHead(404);
+        res.end('Unknown SSE stream');
+        clearInterval(keepAlive);
+        return;
+      }
+
+      req.on('close', () => {
+        clearInterval(keepAlive);
+        cleanup();
+      });
       return;
     }
     if (url === '/rpc' && req.method === 'POST') {

@@ -8,6 +8,40 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ghax profile [--duration sec] [--heap] [--extension <id>]` — CDP
+  `Performance.getMetrics` snapshot for the active tab or an
+  extension service worker. Optional duration-based delta capture and
+  heap snapshot (writes a `.heapsnapshot` loadable in DevTools).
+  Report written to `.ghax/profiles/<ts>.json`.
+- `ghax console --follow` / `ghax network --follow` / `ghax ext sw <id>
+  logs --follow` — live Server-Sent-Events streaming. Daemon exposes
+  `/sse/console`, `/sse/network`, `/sse/ext-sw-logs/<ext-id>`;
+  CLI consumes and prints each event as JSON. Ctrl-C exits 0.
+- `ghax ext sw <id> logs [--last N] [--errors]` — dedicated SW
+  console buffer (subscribes to `Runtime.consoleAPICalled` +
+  `Runtime.exceptionThrown` on first call). Persists across reads,
+  auto-resubscribes after hot-reload.
+- `ghax ext popup <id> eval <js>` + `ghax ext options <id> eval <js>`
+  — same shape as `ext panel`, for the popup and options pages. URL
+  pattern matching against `/popup.html`, `/options.html`, etc.
+- `ghax diff-state <before.json> <after.json>` — structural JSON
+  diff. Emits RFC-6901-style paths (`/a/b/0`) with `+` / `-` / `~`
+  prefixes. Supports `--json` for machine output.
+- `ghax ship [--message "..."] [--no-check] [--no-build] [--no-pr]
+  [--dry-run]` — opinionated commit + push + PR workflow. Runs
+  typecheck + build first; on a non-main branch, fires
+  `gh pr create --fill` or reports the existing PR URL.
+- `ghax canary <url> [--interval sec] [--max sec] [--out r.json]
+  [--fail-fast]` — periodic prod health check. Goto + snapshot +
+  capture console errors + HTTP >=400 responses per cycle. Appends
+  a rolling log to `.ghax/canary-<host>.log`; writes a structured
+  JSON report on exit.
+- `ghax review [--base origin/main] [--diff]` — emits a Claude-ready
+  review prompt wrapping the branch's diff against a base. No API
+  calls — stdout only, user pipes to `claude` or pastes.
+- `ghax pair status` — v0 SSH-tunnel setup instructions. A proper
+  token-auth multi-tenant mode is deferred to v0.5.
+
 - `ghax qa` — orchestrated QA pass over a URL list. Flow: attach →
   goto each URL → `snapshot -i` → record console errors + HTTP >=400
   responses → write `qa-report.json`. Flags: `--url` (repeatable),
@@ -19,56 +53,31 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (default 20).
 - `ghax is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>`
   — assertion command. Exit 0 if condition holds, 1 otherwise.
-  Supports @ref selectors resolved against the last snapshot.
 - `ghax storage [local|session] [get|set|remove|clear|keys] [key] [value]`
-  — page-level localStorage / sessionStorage. Distinct from
-  `ghax ext storage` which targets `chrome.storage.*`.
-- `ghax ext message <ext-id> <json-payload>` — wrapper for
-  `chrome.runtime.sendMessage`. Returns the extension's response.
-- `ghax gesture dblclick <x,y>` — real double-click via
-  `Input.dispatchMouseEvent` with `clickCount=2` on the second pair.
-- `ghax gesture scroll <up|down|left|right> [amount=300]` — real
-  scroll via `Input.dispatchMouseEvent` type=mouseWheel at the
-  viewport center.
+  — page-level localStorage / sessionStorage.
+- `ghax ext message <ext-id> <json-payload>` — `chrome.runtime.sendMessage`
+  wrapper.
+- `ghax gesture dblclick <x,y>` + `ghax gesture scroll <dir> [amount]` —
+  real CDP `Input.dispatch*` gestures.
+- `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
+  pass-through for Chrome's `--load-extension` + scratch profile.
+- `test/smoke.ts` — 34-check harness against a live browser.
+- `test/hot-reload-smoke.ts` — fully scripted hot-reload verification.
+- `test/fixtures/test-extension/` — minimal MV3 fixture.
 
 ### Changed
 
-- `ghax ext list` now enriches each entry with manifest-derived
-  `name` and `version` fields (pulled via Runtime.evaluate against
-  the extension's SW or background_page). Also exposes `enabled`
-  (currently always true — Chrome's `/json/list` only surfaces
-  enabled extensions).
-- `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
-  pass-through for Chrome's `--load-extension` so scratch profiles can
-  auto-load an unpacked MV3 extension without browser-UI steps. Pairs
-  `--disable-extensions-except` for clean isolation.
-- `test/smoke.ts` — 25-check harness exercising the full non-destructive
-  command surface against a real running browser, including a new
-  shadow-DOM cursor-scan check that injects an open-shadow-root element
-  and asserts `click @c<n>` resolves through the pierce.
-- `test/hot-reload-smoke.ts` — fully scripted hot-reload verification:
-  launches a scratch Edge with the test fixture, opens example.com,
-  bumps the manifest version, runs `ghax ext hot-reload`, and asserts
-  the SW version and the content-script banner both update in-place
-  without a tab refresh.
-- `test/fixtures/test-extension/` — minimal MV3 extension for live
-  `ghax ext hot-reload` verification (injects a versioned banner on
-  example.com/.org).
+- `ghax ext list` enriches each entry with manifest-derived `name`,
+  `version`, and `enabled` fields.
+- README reflects v0.3+ features and the current v0.4 status.
 
 ### Fixed
 
 - Shadow-DOM selector generation: direct children of a `ShadowRoot`
-  were emitting an empty segment (`parentElement` is null at the
-  boundary) producing invalid `foo >> ` selectors that Playwright
-  rejected. Now falls back to `walker.parentNode` for sibling indexing
-  when parent is a ShadowRoot.
+  were emitting an empty segment. Now falls back to `walker.parentNode`
+  when `parentElement` is null at the shadow boundary.
 - Shadow-DOM selectors use ` >> ` (Playwright's chain combinator)
-  rather than an invented `>>>` syntax.
-
-### Changed
-
-- README reflects v0.3+ features (hot-reload, gif, shadow-DOM, qa)
-  and the current `v1.0 — internal hardening` status.
+  instead of the invented `>>>`.
 
 ## [0.3.0] — 2026-04-18
 
