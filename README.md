@@ -4,11 +4,11 @@ G's open-source developer toolkit. A collection of CLI tools + Claude Code skill
 that attach to your **real** environment (real browser, real auth, real extensions)
 instead of spinning up sandboxed copies.
 
-**Status**: v0.1 in active development. The flagship `ghax browse` is working
+**Status**: v0.2 in active development. The flagship `ghax browse` works
 against real Chrome/Edge sessions — including MV3 extension service workers
 and side panels.
 
-## What v0.1 does today
+## What ghax does today
 
 Attach to a running Chrome or Edge over CDP, then drive it:
 
@@ -16,12 +16,19 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 - **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role + name,
   not fragile CSS selectors. Includes a cursor-interactive pass for Radix /
   Headless UI popovers that never land in the a11y tree.
+- **Annotated snapshots** (`-a`): red overlay boxes + `@e<n>` labels drawn
+  onto a full-page screenshot — useful when an LLM needs to "see" the refs.
 - **MV3 extensions**: list all extensions, reload them, eval JS in a service
   worker, read/write `chrome.storage.*`, interact with side panels.
 - **Real user gestures** via CDP `Input.dispatch*` (needed for APIs like
   `chrome.sidePanel.open()` that refuse synthetic clicks).
 - **Console + network capture** from the moment you attach — rolling 5k-entry
   buffers, `--errors` and `--pattern` filters.
+- **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
+  widths; `ghax viewport WxH` for one-offs.
+- **Batch + record**: pipe JSON to `ghax chain` for scripted flows;
+  `ghax record start / stop` captures every command into a replayable
+  `.ghax/recordings/<name>.json` file.
 
 ## Quickstart
 
@@ -127,12 +134,18 @@ eval <js>
 text
 html [<selector>]
 screenshot [<@ref|selector>] [--path p] [--fullPage]
-snapshot [-i] [-c] [-d N] [-s <sel>] [-C]
+snapshot [-i] [-c] [-d N] [-s <sel>] [-C] [-a] [-o <path>]
 click <@ref|selector>
 fill <@ref|selector> <value>
 press <key>
 type <text>
 wait <selector|ms|--networkidle|--load>
+viewport <WxH>
+responsive [prefix] [--fullPage]
+diff <url1> <url2>
+chain < steps.json
+record start [name] | stop | status
+replay <file>
 console [--errors] [--last N]
 network [--pattern re] [--last N]
 cookies
@@ -152,9 +165,9 @@ Add `--json` on any command for machine-readable output.
 
 See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
 
-- **v0.1** (current) — flagship `ghax browse` working against real browsers.
-- **v0.2** — recording + replay, responsive, diff, `@ref` annotations on screenshots.
-- **v0.3** — Claude Code skills auto-registered.
+- **v0.1** — flagship `ghax browse` working against real browsers. ✓
+- **v0.2** (current) — annotated snapshots, responsive, diff, chain, record/replay. ✓
+- **v0.3** — Claude Code skills auto-registered, GIF export, shadow-DOM clicks.
 - **v1.0** — npm publish, GitHub Actions CI, docs site.
 
 ## Security
