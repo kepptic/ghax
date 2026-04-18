@@ -1,55 +1,74 @@
 # ghax — roadmap
 
-## v0.1 — minimum useful (flagship `ghax browse`)
+## v0.1 — minimum useful (flagship `ghax browse`) ✓ shipped 2026-04-18
 
 Target: I can run the same extension QA I did on Beam in `ghax` commands
 instead of hand-written Python.
 
-- [ ] Repo scaffold (Bun workspace, tsconfig, package.json, bin wrapper)
-- [ ] `ghax attach` — detect / launch Edge or Chrome with CDP
-- [ ] `ghax status` / `ghax detach` / `ghax restart`
-- [ ] Daemon HTTP server (Bun.serve on random localhost port)
-- [ ] `.ghax/ghax.json` state file discovery
-- [ ] CDP client: WebSocket pool keyed by target id, auto-reconnect
-- [ ] `ghax tabs` / `ghax tab <id>` / `ghax goto`
-- [ ] `ghax snapshot -i` (accessibility tree + `@e<n>` refs)
-- [ ] `ghax click <@ref>` / `ghax fill <@ref> <value>` / `ghax eval`
-- [ ] `ghax screenshot [path]` (tab viewport)
-- [ ] `ghax console [--errors]` / `ghax network`
-- [ ] `ghax ext list` / `ghax ext reload <id>`
-- [ ] `ghax ext sw <id> eval <js>` + `logs`
-- [ ] `ghax ext panel <id> [eval|screenshot]`
-- [ ] `ghax ext storage <id> [get|set]`
-- [ ] `ghax gesture click <x,y>` — real `Input.dispatchMouseEvent`
-- [ ] `bun build --compile` single binary
-- [ ] README with quickstart
-- [ ] Dogfood against Beam — run the bug fixes I did this session
+- [x] Repo scaffold (Bun, tsconfig, package.json, bin wrapper) — `@ghax/cli`
+- [x] `ghax attach` — probes CDP on :9222, optional `--launch` scratch profile
+- [x] `ghax status` / `ghax detach` / `ghax restart`
+- [x] Daemon HTTP server — started as `Bun.serve`, switched to Node's `http`
+      because Playwright's `connectOverCDP` hangs under Bun
+- [x] `.ghax/ghax.json` state file discovery (git root fallback)
+- [x] Raw CDP client: WebSocket pool, target discovery via `/json/list`
+- [x] `ghax tabs` / `ghax tab <id>` / `ghax goto` / `back` / `forward` / `reload`
+- [x] `ghax snapshot -i` (aria tree + `@e<n>` refs + cursor-interactive pass)
+- [x] `ghax click` / `ghax fill` (React-safe native setter) / `ghax press` /
+      `ghax type` / `ghax eval` / `ghax wait`
+- [x] `ghax screenshot` (viewport, element, or full-page)
+- [x] `ghax text` / `ghax html` / `ghax cookies`
+- [x] `ghax console [--errors] [--last N]` / `ghax network [--pattern] [--last]`
+- [x] `ghax ext list` / `ghax ext targets` / `ghax ext reload`
+- [x] `ghax ext sw <id> eval <js>`
+- [x] `ghax ext panel <id> eval <js>`
+- [x] `ghax ext storage <id> [local|session|sync] [get|set|clear]`
+- [x] `ghax gesture click <x,y>` + `ghax gesture key <key>` via CDP Input.*
+- [x] `--json` flag on every command
+- [x] `bun build --compile` single binary for the CLI, Node ESM bundle for daemon
+- [x] README with quickstart
+- [x] Dogfood against the Beam Chrome extension (`hligjpiaogkblpkobldladoohgknedge`)
+      — verified SW eval, storage dump, interactive snapshot on dashboard
 
-## v0.2 — QA ergonomics
+### Decisions taken during v0.1
 
-- [ ] `ghax chain` JSON batch mode
-- [ ] `ghax responsive`, `ghax viewport`, `ghax diff`
-- [ ] `ghax record start/stop` + `ghax replay`
-- [ ] `ghax gif` (ffmpeg wrapper)
-- [ ] `--json` flag on all commands
-- [ ] `ghax snapshot -a` annotated screenshot
-- [ ] Shadow-DOM aware clicking (match gstack behavior)
-- [ ] CircularBuffer console/network (match gstack pattern)
+| Decision | Why |
+|----------|-----|
+| Standalone private GitHub repo (`kepptic/ghax`) from day 1 | Cleaner than submodule, no retroactive extraction |
+| Edge as the default target | Matches the user's daily driver |
+| `@ghax/cli` scoped npm name | Both `ghax` and `@ghax/cli` were free; scoped is safer long-term |
+| CLI (Bun) + Daemon (Node) split | Bun+Playwright hangs; Node runs connectOverCDP reliably |
+| Scratch profile in `~/.ghax/<kind>-profile/` for `--launch` | Real-profile copy is fragile (cookie keychain) — deferred to v0.2+ |
+| SVG overlay for annotated screenshots | No re-layout risk on React pages |
+
+## v0.2 — QA ergonomics ✓ shipped 2026-04-18
+
+- [x] `ghax snapshot -a` annotated screenshot (SVG rects + @refs)
+- [x] `ghax viewport <WxH>` + `ghax responsive [prefix]`
+- [x] `ghax diff <url1> <url2>` — naive line-based text diff
+- [x] `ghax chain` JSON batch mode from stdin
+- [x] `ghax record start / stop / status` + `ghax replay <file>`
+      (writes `.ghax/recordings/<name>.json`)
+- [x] CircularBuffer console/network buffers (5k each)
+- [ ] `ghax gif <recording> [out.gif]` — ffmpeg wrapper
+- [ ] Shadow-DOM aware clicking (cross-shadow selector resolution)
 
 ## v0.3 — Claude Code skills
 
-- [ ] `skills/ghax-browse/SKILL.md` — invocable as `/ghax-browse`
-- [ ] `skills/ghax/SKILL.md` — top-level router
-- [ ] Auto-register into `~/.claude/skills/` via devops-skill-registry
+- [ ] `.claude/skills/ghax-browse.md` — invocable as `/ghax-browse`
+- [ ] `.claude/skills/ghax.md` — top-level router skill
+- [ ] Register under one of the devops-skill-registry namespace roots
+      (or document manual install for external users)
+- [ ] Skill acceptance eval — pointable at Beam / Setsail dashboards
 
 ## v1.0 — open source release
 
-- [ ] LICENSE (MIT), CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
-- [ ] `bunx ghax` zero-install usage (publish to npm)
-- [ ] GitHub Actions CI (bun test, bun build --compile for mac/linux/win)
+- [ ] Make repo public, re-export under a personal / kepptic org decision
+- [ ] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
+- [ ] `bunx ghax` zero-install usage (publish `@ghax/cli` to npm)
+- [ ] GitHub Actions CI (bun test, compile matrix for mac/linux/win)
 - [ ] Docs site — `ghax.dev` or GitHub Pages
-- [ ] Announce: HN, X, dev.to
-- [ ] v1.0 tag
+- [ ] v1.0 tag + announce (HN, X, dev.to)
 
 ## Future tools in the `ghax` collection (no timeline)
 

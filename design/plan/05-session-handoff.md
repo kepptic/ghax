@@ -1,113 +1,132 @@
-# ghax — session handoff (2026-04-18)
+# ghax — session handoff (2026-04-18, end of build session)
 
 Start here when you pick this back up in a new session.
 
-## Context
+## Where we are
 
-This session was spent QA'ing Beam's Chrome extension + dashboard. During the
-work, we hit a pattern that no existing skill supported: attach to the user's
-**real** Edge browser via CDP to drive a Chrome extension whose sidepanel,
-service worker, and content scripts all needed independent inspection.
+v0.1 + v0.2 shipped and pushed to https://github.com/kepptic/ghax (private).
 
-I ended up writing Python scripts ad-hoc. The user asked whether this should
-be a new skill. We concluded yes — and the scope is bigger than just extension
-testing. The user has many web apps (Beam, Setsail, Conduit, client portals)
-that need similar "attach-to-my-real-browser" QA.
+- `main` @ `037899d` — "v0.2 — QA ergonomics: annotated snapshots, responsive,
+  chain, record/replay"
+- `main` @ `5533bca` — "Initial commit — ghax v0.1"
 
-The user's handle is **G** (historically "G Hacks" before they knew ghacks.net
-existed). They want a collection of open-source tools under a single brand.
-Name chosen: **`ghax`**. Style references gstack (Garry Tan's collection).
+The flagship attach / drive / extension-introspection loop works end-to-end
+against a live Edge session. Verified on the Beam extension
+(`hligjpiaogkblpkobldladoohgknedge`): SW eval, `chrome.storage.local` dump,
+interactive snapshot on the dashboard.
 
-## What exists now (this folder)
+## Repo layout (as of this handoff)
 
-- `README.md` — repo intro
-- `design/plan/01-vision.md` — who/what/why
-- `design/plan/02-architecture.md` — Bun + daemon + Playwright + raw CDP
-- `design/plan/03-commands.md` — full command surface for v1
-- `design/plan/04-roadmap.md` — v0.1 → v1.0 checklists
-- `design/plan/05-session-handoff.md` — this file
-- `docs/` — empty, for user-facing docs when we have them
+```
+ghax/
+  bin/ghax                  shell shim (dist/ghax → fallback bun run src/cli.ts)
+  src/
+    cli.ts                  argv → daemon RPC, handles attach/detach specials
+    daemon.ts               Node http server, Playwright + raw CDP, all handlers
+    browser-launch.ts       browser detection + CDP probe + --launch scratch profile
+    cdp-client.ts           /json/list + CdpTarget WebSocket pool
+    config.ts               state dir resolution (git root → .ghax/ghax.json)
+    buffers.ts              CircularBuffer<T> for console + network
+    snapshot.ts             aria tree → @e<n> refs + cursor-interactive pass
+  dist/
+    ghax                    Bun-compiled CLI binary (~61 MB)
+    ghax-daemon.mjs         Node ESM bundle (~38 KB, externalises playwright)
+  design/plan/              vision, architecture, commands, roadmap, this file
+  package.json              @ghax/cli, Bun 1.3.11, Playwright 1.59.1
+  tsconfig.json             bundler moduleResolution, strict
+```
 
-## What does NOT exist yet
+## Key architectural decisions that already landed
 
-- Any code. Zero `.ts` files. Not scaffolded.
-- `package.json`, `tsconfig.json`, `bun.lock`.
-- `.ghax/` state folder convention (decision — not created).
-- Git repo (this sits inside `kepptic/products/open-source/` which is its
-  own thing; decision needed on whether `ghax` should be its own repo from
-  day 1 or live in a monorepo until v1.0).
+- **CLI = Bun (compiled). Daemon = Node (ESM bundle).** Playwright's
+  `connectOverCDP` hangs under Bun 1.3.x. Node runs it reliably. Build command:
+  `bun build --compile src/cli.ts` + `bun build --target=node --format=esm src/daemon.ts`
+  (Playwright is an external so it resolves from `node_modules/` at runtime).
+- **Daemon HTTP server** uses Node's `http` module, not `Bun.serve` (the daemon
+  runs under Node).
+- **Handler registry** — each command is registered via `register('name', fn)`
+  in `daemon.ts`. Adding a new command = one handler + one CLI case.
+- **Recording** wraps the dispatcher: every cmd except the NEVER_RECORD set
+  (meta, read-only queries) gets appended to `ctx.recording.steps`.
+- **Annotated screenshots** inject an SVG overlay into the page (not absolute
+  divs) to avoid triggering re-layout on React apps.
+- **Extension ID discovery** uses CDP target grouping (parse
+  `chrome-extension://<id>/` out of target URLs in `/json/list`). No
+  `chrome://extensions` parsing needed.
 
-## Reference clone
+## Gotchas discovered while building
 
-gstack repo authorized by user: `https://github.com/garrytan/gstack.git`
+- Bun's `Bun.spawnSync` / `Bun.spawn` are fine in the CLI; don't reach for them
+  in the daemon.
+- `Bun.serve`'s `server.port` type is `number | undefined` — we switched to
+  `http.createServer` anyway, but worth remembering.
+- `page.fill()` is unreliable on controlled React inputs. Our `fill` handler
+  uses the native value setter + dispatched `input`/`change` events.
+- Playwright doesn't expose side-panel pages via `browserContext.pages()`
+  cleanly — we talk to them via raw CDP `Runtime.evaluate` from the
+  `CdpPool`.
+- `chrome.storage.local get` returns JWT / OAuth tokens in plaintext. Don't
+  echo it into public logs.
 
-Clone to `/tmp/ref-gstack/` and mine these files (read-only reference, do
-NOT copy verbatim — rewrite with MIT attribution):
+## What's next (in priority order)
 
-- `.claude/skills/gstack/browse/src/server.ts` — daemon shape
-- `.claude/skills/gstack/browse/src/snapshot.ts` — a11y tree with `@refs`
-- `.claude/skills/gstack/browse/src/buffers.ts` — CircularBuffer
-- `.claude/skills/gstack/browse/src/config.ts` — state file discovery
-- `.claude/skills/gstack/browse/src/cli.ts` — command dispatch style
-- `.claude/skills/gstack/bin/chrome-cdp` — launches Chrome with CDP
-  (adapt for Edge + make it not require quitting the real browser)
+1. **`/ghax-browse` Claude Code skill.** The whole point of ghax is that it
+   becomes the AI's browser hands. A `.claude/skills/ghax-browse.md` with a
+   clear command cheat-sheet, plus auto-registration via
+   `devops-skill-registry` (see `/Users/gr/Documents/DevOps/.claude-skills/`),
+   is the single highest-leverage v0.3 item.
 
-## Decisions needed before coding
+2. **`ghax gif <recording> [out.gif]`.** ffmpeg wrapper. Replay a recording
+   while taking periodic screenshots, composite into a GIF. Turns QA sessions
+   into shareable artefacts. ~1-2 hours.
 
-1. **Monorepo or standalone git repo?** Right now `ghax/` lives under
-   `kepptic/products/open-source/`. Should it be its own git repo from
-   day 1 (cleaner for open-sourcing later) or stay in-tree until v0.1 is
-   validated? My vote: standalone git repo at day 1, committed into the
-   kepptic tree as a submodule until v1.0 ships.
+3. **Shadow-DOM aware clicking.** Some component libraries (Shoelace, custom
+   web components) put interactive elements inside `shadowRoot`. Playwright's
+   `locator` handles open shadow DOM but our cursor-interactive scan doesn't
+   pierce shadow boundaries. Adapt gstack's shadow-aware walk.
 
-2. **Edge vs Chrome for first target?** User works in Edge daily. Start
-   with Edge (`/Applications/Microsoft Edge.app/...`) and add Chrome
-   next. They share the same CDP protocol so it's mostly launcher detection.
+4. **Publish prep.** GitHub Actions matrix (mac/linux/win), CHANGELOG,
+   CONTRIBUTING, flip to public, npm publish `@ghax/cli`.
 
-3. **npm package name?** `ghax` might be available. `@ghax/cli` as
-   scoped is safer. Decide before publishing v1.
+5. **Tests.** A `test/smoke.ts` (attach → goto example.com → snapshot → detach)
+   would catch regressions before they reach the build. Deferred during v0.2
+   because dogfooding covered it manually.
 
-4. **Bun version pin?** gstack pins Bun 1.3.10. Check current Bun.
-   Likely 1.x compatible.
+## Things deliberately NOT done
 
-5. **Extension ID discovery for `ghax ext list`?** Chrome/Edge don't
-   expose a stable API. We parse `chrome://extensions` page text, or
-   use CDP `Target.getTargets` and group by `chrome-extension://<id>/`.
-   Decision: use target grouping — simpler, works without opening
-   chrome://extensions.
+- **Real-profile attach** (copy the user's live Edge profile into a
+  --user-data-dir so cookies/extensions come along). Research required on
+  keychain entitlements — deferred to v0.2+ track. For now, `--launch` uses a
+  scratch profile under `~/.ghax/<kind>-profile/` and the intended flow is to
+  have the user launch their real browser with `--remote-debugging-port=9222`.
 
-## Kickoff plan for next session
+- **Auth tokens on the daemon.** Single-user localhost — no token auth in v0.1
+  or v0.2. Add scoped tokens (mirroring gstack's `token-registry.ts`) if we
+  ever expose the daemon to remote agents.
 
-1. Decide monorepo-vs-standalone (question 1).
-2. Clone gstack to `/tmp/ref-gstack/` for reference.
-3. Scaffold `ghax/` with `package.json`, `tsconfig.json`, `src/`, `bin/`.
-4. Write `src/cli.ts` dispatcher + `ghax attach` (just launcher + CDP
-   connect + state file write). Get to "attached" output.
-5. Write `src/daemon.ts` (Bun.serve) + `ghax status` + `ghax detach`.
-6. Write `src/cdp-client.ts` with target discovery.
-7. Implement `ghax tabs` + `ghax tab <id>` + `ghax goto` + `ghax eval`.
-8. Implement `ghax snapshot -i` (port gstack's algorithm).
-9. `ghax ext list` + `ghax ext sw <id> eval <js>`.
-10. Test it against Beam — reproduce the bug-fix verifications I did
-    this session using `ghax` commands instead of raw Python.
+- **Anti-bot stealth.** We're attaching to the user's real browser. Whatever
+  their fingerprint is, it's already good.
 
-Target for v0.1: steps 1-10 in one focused session, maybe 2-3 hours.
+## Reference reading
 
-## Open questions to revisit later
+- `/tmp/ref-gstack/browse/src/cli.ts` — gstack's CLI (1008 lines, instructive
+  for edge cases we haven't hit yet)
+- `/tmp/ref-gstack/browse/src/server.ts` — gstack's daemon (2474 lines; we're
+  ~800)
+- `/tmp/ref-gstack/browse/src/snapshot.ts` — we ported the core of this
 
-- Does Playwright's `chromium.connectOverCDP()` give us access to extension
-  service worker targets? If yes, use it. If no, raw CDP for SW.
-- How do we handle the "Edge refuses --remote-debugging-port on default
-  profile" dance cleanly? gstack's `chrome-cdp` symlinks the real profile
-  into a separate data dir — but that has caveats (LocalState, crypto
-  keys for cookie decryption). Reproduce or find a cleaner way.
-- Do we want a "pair agent" model eventually (like gstack-pair)? Matters
-  for team / remote-agent scenarios. Not for v1.
+## How to get running in a new session
 
-## Links
-
-- gstack: https://github.com/garrytan/gstack.git
-- Chrome DevTools Protocol: https://chromedevtools.github.io/devtools-protocol/
-- Playwright CDP connect: https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp
-- Beam extension (first dogfood target):
-  `/Users/gr/Documents/DevOps/kepptic/products/apps/beam/apps/extension/`
+```bash
+cd /Users/gr/Documents/DevOps/kepptic/products/open-source/ghax
+# 1. Confirm Edge is on CDP :9222 (or launch it yourself / use --launch)
+curl -s http://127.0.0.1:9222/json/version | head -5
+# 2. Build + attach
+bun install && bun run build
+./dist/ghax attach
+# 3. Drive
+./dist/ghax tabs
+./dist/ghax snapshot -i -a -o /tmp/shot.png
+./dist/ghax ext list
+./dist/ghax detach
+```
