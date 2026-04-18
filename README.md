@@ -151,6 +151,8 @@ wait <selector|ms|--networkidle|--load>
 viewport <WxH>
 responsive [prefix] [--fullPage]
 diff <url1> <url2>
+is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
+storage [local|session] [get|set|remove|clear|keys] [key] [value]
 chain < steps.json
 record start [name] | stop | status
 replay <file>
@@ -165,9 +167,15 @@ ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
 ext sw <ext-id> eval <js>
 ext panel <ext-id> eval <js>
 ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
+ext message <ext-id> <json-payload>
 gesture click <x,y>
+gesture dblclick <x,y>
+gesture scroll <up|down|left|right> [amount]
 gesture key <key>
-qa --url <u> [--url <u> ...] [--urls a,b,c] [--out report.json] [--screenshots <dir>] [--no-screenshots] [--annotate] [--gif <out.gif>]
+qa --url <u> [--url <u> ...] [--urls a,b,c]
+   [--crawl <root> [--depth N] [--limit N]]
+   [--out report.json] [--screenshots <dir>] [--no-screenshots]
+   [--annotate] [--gif <out.gif>]
 ```
 
 Add `--json` on any command for machine-readable output.

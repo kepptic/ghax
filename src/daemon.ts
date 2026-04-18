@@ -435,6 +435,68 @@ register('cookies', async (ctx) => {
   return await page.context().cookies();
 });
 
+register('storage', async (ctx, args) => {
+  const area = String(args[0] ?? 'local');
+  const op = String(args[1] ?? 'get');
+  if (!['local', 'session'].includes(area)) {
+    throw new Error(`Unknown storage area: ${area} (expected local or session)`);
+  }
+  const api = area === 'local' ? 'localStorage' : 'sessionStorage';
+  const page = await activePage(ctx);
+
+  const evalAndReturn = async (expr: string) => {
+    const r = await page.evaluate(expr);
+    return r;
+  };
+
+  switch (op) {
+    case 'get': {
+      const key = args[2] !== undefined ? String(args[2]) : null;
+      if (key === null) {
+        // Dump the whole store.
+        return await evalAndReturn(`(() => {
+          const out = {};
+          for (let i = 0; i < ${api}.length; i++) {
+            const k = ${api}.key(i);
+            if (k) out[k] = ${api}.getItem(k);
+          }
+          return out;
+        })()`);
+      }
+      return await evalAndReturn(`${api}.getItem(${JSON.stringify(key)})`);
+    }
+    case 'set': {
+      const key = args[2] !== undefined ? String(args[2]) : '';
+      const value = args[3] !== undefined ? String(args[3]) : '';
+      if (!key) throw new Error('Usage: storage <area> set <key> <value>');
+      await evalAndReturn(`${api}.setItem(${JSON.stringify(key)}, ${JSON.stringify(value)})`);
+      return { ok: true };
+    }
+    case 'remove': {
+      const key = args[2] !== undefined ? String(args[2]) : '';
+      if (!key) throw new Error('Usage: storage <area> remove <key>');
+      await evalAndReturn(`${api}.removeItem(${JSON.stringify(key)})`);
+      return { ok: true };
+    }
+    case 'clear': {
+      await evalAndReturn(`${api}.clear()`);
+      return { ok: true };
+    }
+    case 'keys': {
+      return await evalAndReturn(`(() => {
+        const out = [];
+        for (let i = 0; i < ${api}.length; i++) {
+          const k = ${api}.key(i);
+          if (k !== null) out.push(k);
+        }
+        return out;
+      })()`);
+    }
+    default:
+      throw new Error(`Unknown storage op: ${op} (expected get/set/remove/clear/keys)`);
+  }
+});
+
 register('viewport', async (ctx, args) => {
   const spec = String(args[0] ?? '');
   const m = spec.match(/^(\d+)x(\d+)$/);
@@ -496,6 +558,38 @@ register('diff', async (ctx, args) => {
   return { diff: out.join('\n'), linesA: la.length, linesB: lb.length };
 });
 
+register('is', async (ctx, args) => {
+  const check = String(args[0] ?? '');
+  const target = String(args[1] ?? '');
+  if (!check || !target) throw new Error('Usage: is <visible|enabled|checked|hidden|disabled> <@ref|selector>');
+  const page = await activePage(ctx);
+  const loc = resolveRef(ctx, target, page);
+  let result: boolean;
+  switch (check) {
+    case 'visible':
+      result = await loc.isVisible();
+      break;
+    case 'hidden':
+      result = await loc.isHidden();
+      break;
+    case 'enabled':
+      result = await loc.isEnabled();
+      break;
+    case 'disabled':
+      result = await loc.isDisabled();
+      break;
+    case 'checked':
+      result = await loc.isChecked();
+      break;
+    case 'editable':
+      result = await loc.isEditable();
+      break;
+    default:
+      throw new Error(`Unknown check: ${check}`);
+  }
+  return { check, target, result };
+});
+
 register('wait', async (ctx, args, opts) => {
   const page = await activePage(ctx);
   if (opts.networkidle) {
@@ -522,20 +616,61 @@ register('wait', async (ctx, args, opts) => {
 
 register('ext.list', async (ctx) => {
   const targets = await ctx.pool.list();
-  const byExt = new Map<string, { id: string; name?: string; targets: CdpTargetInfo[] }>();
+  const byExt = new Map<string, { id: string; targets: CdpTargetInfo[] }>();
   for (const t of targets) {
     if (!t.extensionId) continue;
     const entry = byExt.get(t.extensionId) || { id: t.extensionId, targets: [] };
     entry.targets.push(t);
     byExt.set(t.extensionId, entry);
   }
-  return Array.from(byExt.values()).map((e) => ({
-    id: e.id,
-    targetCount: e.targets.length,
-    // Best-effort name: the title of the first non-"service worker" target.
-    name: e.targets.find((t) => t.type === 'page')?.title || e.targets[0]?.title || '',
-    targets: e.targets.map((t) => ({ id: t.id, type: t.type, title: t.title, url: t.url })),
-  }));
+  // Enrich each extension with manifest-derived fields via its SW (or any
+  // page target if no SW exists — MV2 extensions still have background_page).
+  const entries = Array.from(byExt.values());
+  const out = [] as Array<{
+    id: string;
+    name: string;
+    version: string;
+    targetCount: number;
+    enabled: boolean;
+    targets: Array<{ id: string; type: string; title: string; url: string }>;
+  }>;
+  for (const e of entries) {
+    const probe = e.targets.find((t) => t.type === 'service_worker' && t.webSocketDebuggerUrl)
+      ?? e.targets.find((t) => (t.type === 'background_page' || t.type === 'page') && t.webSocketDebuggerUrl);
+    let name = '';
+    let version = '';
+    if (probe) {
+      try {
+        const target = await ctx.pool.get(probe);
+        await target.send('Runtime.enable');
+        const r = (await target.send('Runtime.evaluate', {
+          expression:
+            '(() => { try { const m = chrome.runtime.getManifest(); return JSON.stringify({n: m.name, v: m.version}); } catch (e) { return "{}"; } })()',
+          returnByValue: true,
+        })) as { result?: { value?: string } };
+        const parsed = JSON.parse(r.result?.value || '{}') as { n?: string; v?: string };
+        name = parsed.n ?? '';
+        version = parsed.v ?? '';
+      } catch {
+        // fall through to fallback below
+      }
+    }
+    if (!name) {
+      name = e.targets.find((t) => t.type === 'page')?.title || e.targets[0]?.title || '';
+    }
+    out.push({
+      id: e.id,
+      name,
+      version,
+      targetCount: e.targets.length,
+      // Chrome's /json/list only surfaces enabled extensions' targets, so
+      // anything we see here is enabled by definition. The field is here
+      // for future compat when we teach ghax to read chrome://extensions.
+      enabled: true,
+      targets: e.targets.map((t) => ({ id: t.id, type: t.type, title: t.title, url: t.url })),
+    });
+  }
+  return out;
 });
 
 register('ext.targets', async (ctx, args) => {
@@ -795,6 +930,42 @@ register('ext.storage', async (ctx, args) => {
   return r.result?.value ?? { ok: true };
 });
 
+register('ext.message', async (ctx, args) => {
+  const extId = String(args[0] ?? '');
+  const payloadRaw = String(args[1] ?? '');
+  if (!extId || !payloadRaw) throw new Error('Usage: ext message <ext-id> <json-payload>');
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadRaw);
+  } catch {
+    // Allow raw strings too — wrap as {data: <string>}
+    payload = payloadRaw;
+  }
+  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
+  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
+  const target = await ctx.pool.get(sws[0]);
+  await target.send('Runtime.enable');
+  // chrome.runtime.sendMessage from inside the SW with a recipient extension
+  // ID round-trips through the extension's own onMessage listeners. For
+  // cross-extension messaging, the SW would need to already be authorised.
+  const expr = `
+    (async () => {
+      try {
+        const resp = await chrome.runtime.sendMessage(${JSON.stringify(extId)}, ${JSON.stringify(payload)});
+        return { ok: true, response: resp === undefined ? null : resp };
+      } catch (e) {
+        return { ok: false, error: String(e && e.message || e) };
+      }
+    })()
+  `;
+  const res = (await target.send('Runtime.evaluate', {
+    expression: expr,
+    awaitPromise: true,
+    returnByValue: true,
+  })) as { result?: { value?: unknown } };
+  return res.result?.value ?? null;
+});
+
 register('ext.panel.eval', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const js = String(args[1] ?? '');
@@ -888,6 +1059,59 @@ register('gesture.key', async (ctx, args) => {
     await session.detach().catch(() => undefined);
   }
   return { ok: true };
+});
+
+register('gesture.dblclick', async (ctx, args) => {
+  const spec = String(args[0] ?? '');
+  if (!spec) throw new Error('Usage: gesture dblclick <x,y>');
+  const [xs, ys] = spec.split(',').map((s) => s.trim());
+  const x = Number(xs);
+  const y = Number(ys);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
+  const page = await activePage(ctx);
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    // clickCount=2 on the second pressed/released is what Chrome treats as a
+    // dblclick — firing pressed/released twice with clickCount=1 is NOT the
+    // same and won't trigger ondblclick handlers.
+    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+  return { ok: true };
+});
+
+register('gesture.scroll', async (ctx, args) => {
+  const dir = String(args[0] ?? '').toLowerCase();
+  const amount = args[1] !== undefined ? Number(args[1]) : 300;
+  if (!['up', 'down', 'left', 'right'].includes(dir)) {
+    throw new Error('Usage: gesture scroll <up|down|left|right> [amount=300]');
+  }
+  if (!Number.isFinite(amount)) throw new Error(`Invalid scroll amount: ${args[1]}`);
+  const page = await activePage(ctx);
+  const session = await page.context().newCDPSession(page);
+  try {
+    // Dispatch on the viewport centre. Magnitude is the wheel delta.
+    const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
+    const x = viewport.width / 2;
+    const y = viewport.height / 2;
+    const deltaX = dir === 'left' ? -amount : dir === 'right' ? amount : 0;
+    const deltaY = dir === 'up' ? -amount : dir === 'down' ? amount : 0;
+    await session.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX,
+      deltaY,
+    });
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+  return { ok: true, direction: dir, amount };
 });
 
 // ─── HTTP server ───────────────────────────────────────────────

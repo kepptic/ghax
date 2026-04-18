@@ -404,6 +404,8 @@ Snapshot & interact:
   viewport <WxH>
   responsive [prefix] [--fullPage]
   diff <url1> <url2>
+  is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
+  storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
   console [--errors] [--last N]
@@ -418,9 +420,12 @@ Extensions (MV3):
   ext sw <ext-id> eval <js>
   ext panel <ext-id> eval <js>
   ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
+  ext message <ext-id> <json-payload>
 
 Real user gestures:
   gesture click <x,y>
+  gesture dblclick <x,y>
+  gesture scroll <up|down|left|right> [amount]
   gesture key <key>
 
 Batch / recording:
@@ -432,6 +437,7 @@ Batch / recording:
 
 Orchestrated:
   qa --url <u> [--url <u> ...] [--urls a,b,c]
+     [--crawl <root> [--depth N] [--limit N]]
      [--out report.json] [--screenshots <dir>] [--no-screenshots]
      [--annotate] [--gif <out.gif>]
   gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
@@ -483,7 +489,23 @@ async function main(): Promise<number> {
       case 'viewport':
       case 'responsive':
       case 'diff':
+      case 'storage':
         return await makeSimple(verb)(parseArgs(rest));
+
+      case 'is': {
+        const parsed = parseArgs(rest);
+        return await withDaemon(async (port) => {
+          const data = (await rpc(port, 'is', parsed.positional, flagsToOpts(parsed.flags))) as {
+            check: string; target: string; result: boolean;
+          };
+          if (parsed.flags.json) {
+            console.log(JSON.stringify(data, null, 2));
+          } else {
+            console.log(data.result ? 'true' : 'false');
+          }
+          return data.result ? EXIT.OK : EXIT.USAGE;
+        });
+      }
 
       case 'fill': {
         const parsed = parseArgs(rest);
@@ -641,6 +663,20 @@ async function dispatchExt(rest: string[]): Promise<number> {
         printResult(data, Boolean(parsed.flags.json));
         return EXIT.OK;
       });
+    case 'message': {
+      // ghax ext message <ext-id> <json-payload>
+      const extId = parsed.positional[0];
+      const payload = parsed.positional.slice(1).join(' ');
+      if (!extId || !payload) {
+        console.error('Usage: ghax ext message <ext-id> <json-payload>');
+        return EXIT.USAGE;
+      }
+      return withDaemon(async (port) => {
+        const data = await rpc(port, 'ext.message', [extId, payload], flagsToOpts(parsed.flags));
+        printResult(data, Boolean(parsed.flags.json));
+        return EXIT.OK;
+      });
+    }
     default:
       console.error(`Unknown ext sub: ${sub}`);
       return EXIT.USAGE;
@@ -816,12 +852,36 @@ async function cmdQa(parsed: ParsedArgs): Promise<number> {
       }
     }
   }
+
+  const crawlRoot = parsed.flags.crawl as string | undefined;
+  const crawlDepth = parsed.flags.depth ? Number(parsed.flags.depth) : 1;
+  const crawlLimit = parsed.flags.limit ? Number(parsed.flags.limit) : 20;
+
+  if (crawlRoot) {
+    const crawled = await crawlUrls(crawlRoot, { depth: crawlDepth, limit: crawlLimit });
+    console.log(`crawl discovered ${crawled.length} URLs under ${crawlRoot}`);
+    urls.push(...crawled);
+  }
+
   if (urls.length === 0) {
     console.error('Usage: ghax qa --url <u> [--url <u> ...] [--out <report.json>] [--screenshots <dir>]');
     console.error('       ghax qa --urls a.com,b.com');
+    console.error('       ghax qa --crawl https://example.com [--depth 1] [--limit 20]');
     console.error('       echo \'["a","b"]\' | ghax qa --out report.json');
     return EXIT.USAGE;
   }
+
+  // Dedupe while preserving order.
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const u of urls) {
+    if (!seen.has(u)) {
+      seen.add(u);
+      deduped.push(u);
+    }
+  }
+  urls.length = 0;
+  urls.push(...deduped);
 
   const outPath = (parsed.flags.out as string | undefined) || '/tmp/ghax-qa-report.json';
   const shotsDir = (parsed.flags.screenshots as string | undefined) || (parsed.flags['no-screenshots'] ? null : `/tmp/ghax-qa-shots-${Date.now()}`);
@@ -954,6 +1014,80 @@ async function cmdQa(parsed: ParsedArgs): Promise<number> {
   });
 }
 
+async function crawlUrls(root: string, opts: { depth: number; limit: number }): Promise<string[]> {
+  const origin = new URL(root).origin;
+  const found = new Set<string>();
+
+  const fromSitemap = await fetchSitemap(`${origin}/sitemap.xml`);
+  if (fromSitemap.length > 0) {
+    for (const u of fromSitemap) {
+      try {
+        if (new URL(u).origin === origin) found.add(u);
+      } catch {
+        // ignore malformed
+      }
+      if (found.size >= opts.limit) break;
+    }
+    return Array.from(found);
+  }
+
+  const queue: Array<{ url: string; depth: number }> = [{ url: root, depth: 0 }];
+  const visited = new Set<string>();
+  while (queue.length > 0 && found.size < opts.limit) {
+    const { url, depth } = queue.shift()!;
+    if (visited.has(url)) continue;
+    visited.add(url);
+    found.add(url);
+    if (depth >= opts.depth) continue;
+    const links = await scrapeLinks(url, origin);
+    for (const link of links) {
+      if (!visited.has(link)) queue.push({ url: link, depth: depth + 1 });
+      if (found.size + queue.length >= opts.limit) break;
+    }
+  }
+  return Array.from(found).slice(0, opts.limit);
+}
+
+async function fetchSitemap(url: string): Promise<string[]> {
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return [];
+    const body = await resp.text();
+    const matches = body.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/g);
+    const out: string[] = [];
+    for (const m of matches) out.push(m[1].trim());
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function scrapeLinks(url: string, origin: string): Promise<string[]> {
+  try {
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'user-agent': 'ghax-qa-crawler/0.4' },
+    });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const hrefs = new Set<string>();
+    const matches = html.matchAll(/<a\s+[^>]*href=["']([^"'#]+)["'][^>]*>/gi);
+    for (const m of matches) {
+      try {
+        const abs = new URL(m[1], url).href;
+        if (new URL(abs).origin === origin) {
+          hrefs.add(abs.split('#')[0]);
+        }
+      } catch {
+        // skip malformed href
+      }
+    }
+    return Array.from(hrefs);
+  } catch {
+    return [];
+  }
+}
+
 async function cmdGif(parsed: ParsedArgs): Promise<number> {
   const recFile = parsed.positional[0];
   const outGif = parsed.positional[1] ?? `/tmp/ghax-${Date.now()}.gif`;
@@ -1064,8 +1198,12 @@ async function dispatchGesture(rest: string[]): Promise<number> {
   switch (sub) {
     case 'click':
       return makeSimple('gesture.click')(parsed);
+    case 'dblclick':
+      return makeSimple('gesture.dblclick')(parsed);
     case 'key':
       return makeSimple('gesture.key')(parsed);
+    case 'scroll':
+      return makeSimple('gesture.scroll')(parsed);
     default:
       console.error(`Unknown gesture: ${sub}`);
       return EXIT.USAGE;
