@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "ghax test extension",
+  "version": "0.0.1",
+  "description": "Minimal MV3 extension for exercising ghax ext hot-reload against.",
+  "permissions": ["storage", "scripting", "tabs"],
+  "host_permissions": ["https://example.com/*", "https://example.org/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://example.com/*", "https://example.org/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ghax test extension"
+  }
+}
