@@ -1,15 +1,23 @@
-# ghax — session handoff (2026-04-18, end of v0.3 session)
+# ghax — session handoff (2026-04-18, end of v0.4 kick-off)
 
 Start here when you pick this back up in a new session.
 
 ## Where we are
 
-v0.1, v0.2, and v0.3 shipped + pushed to https://github.com/kepptic/ghax (private).
+v0.1, v0.2, v0.3, v1.0-hardening, and the first half of v0.4 are
+shipped + pushed to https://github.com/kepptic/ghax (private).
 
-- `main` @ `277cadf` — "v0.3 — hot-reload, shadow DOM, gif, skills, CI, contributor docs"
-- `main` @ `5f93acf` — "docs(plan): mark v0.1 + v0.2 shipped; refresh session handoff"
-- `main` @ `037899d` — "v0.2 — QA ergonomics"
-- `main` @ `5533bca` — "Initial commit — ghax v0.1"
+Recent commits (oldest → newest):
+
+- `5533bca` — Initial commit — ghax v0.1
+- `037899d` — v0.2 — QA ergonomics
+- `5f93acf` — docs(plan): mark v0.1 + v0.2 shipped
+- `277cadf` — v0.3 — hot-reload, shadow DOM, gif, skills, CI
+- `ccacb05` — docs(plan): mark v0.3 shipped
+- `b6834ce` — docs(plan): pause open-source track
+- `e41ab7d` — test: smoke harness + MV3 fixture; doc cleanup
+- (this session) — load-extension / data-dir pass-through, scripted
+  hot-reload smoke, shadow-DOM selector fix, `ghax qa` v1
 
 The flagship attach / drive / extension-introspection loop works end-to-end
 against a live Edge session. Hot-reload, gif rendering, and shadow-DOM aware
@@ -54,7 +62,7 @@ ghax/
   re-inject failures).
 - **Shadow-DOM aware cursor scan** — `snapshot.ts`'s cursor-interactive
   pass now recursively walks open shadow roots and emits Playwright
-  pierce selectors (`host >>> inner`).
+  Playwright chain selectors (`host >> inner`).
 - **`ghax gif <recording> [out.gif]` [--delay ms] [--scale px]** — drives
   a replay, screenshots between steps, stitches via ffmpeg's 2-pass
   palette flow. Fails gracefully if ffmpeg isn't on PATH.
@@ -95,21 +103,27 @@ announce) is **paused**. The scaffolding we already laid down
 (LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CHANGELOG, CI) stays — it
 makes the eventual flip cheap.
 
-## What's next (internal hardening only)
+## What's next
 
-1. **Smoke-test harness.** `test/smoke.ts` that attaches, runs a
-   handful of reads + writes, detaches. Wire into CI so we catch
-   daemon-boot regressions before they hit a human. Currently the CI
-   only typechecks + compiles — it doesn't verify the daemon actually
-   starts.
-2. **Live hot-reload verification.** One-shot: build a throwaway
-   extension that declares `content_scripts`, install it in Edge,
-   run `ghax ext hot-reload <id>` against it, confirm the re-inject
-   path works. Never run this against a Beam/Autotask/KaseyaOne tab
-   mid-work — it's fine functionally but it disturbs the running
-   extension's state.
-3. **Real-profile attach research.** Still on the wishlist. Not blocking
-   anything.
+The internal-hardening items from the previous handoff are done:
+
+- [x] `test/smoke.ts` — 25 checks, runs locally in ~10s.
+- [x] Live hot-reload verification — `test/hot-reload-smoke.ts`
+      launches a scratch Edge with the fixture and verifies both the
+      SW version bump AND the content-script banner refresh without a
+      tab reload. Fully scripted, isolated from the user's daily Edge.
+- [x] `ghax attach --launch --load-extension <path> --data-dir <path>`
+      — enables scripted extension loading.
+
+v0.4 is underway:
+
+- [x] `ghax qa` v1 — orchestrated QA pass over an explicit URL list
+      with optional screenshots, annotate, and gif.
+- [ ] `ghax qa` v2 — auto-infer URLs from a root's sitemap or main
+      nav. `--crawl <root> --depth N`.
+- [ ] `ghax profile` — perf / memory snapshot of a page or extension.
+- [ ] Real-profile attach — still on the wishlist.
+- [ ] Skill acceptance eval harness — carryover from v0.3.
 
 ## How to get running in a new session
 

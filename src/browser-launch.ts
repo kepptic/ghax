@@ -136,7 +136,7 @@ export interface LaunchResult {
 
 export async function launchBrowser(
   binary: BrowserBinary,
-  opts: { port?: number; dataDir?: string } = {},
+  opts: { port?: number; dataDir?: string; loadExtension?: string | string[] } = {},
 ): Promise<LaunchResult> {
   const port = opts.port ?? 9222;
   const dataDir = opts.dataDir ?? profileDirFor(binary.kind);
@@ -149,6 +149,22 @@ export async function launchBrowser(
     '--no-default-browser-check',
     '--disable-features=IsolateOrigins,site-per-process',
   ];
+
+  if (opts.loadExtension) {
+    // `--load-extension` accepts a comma-separated list. `--disable-extensions-except`
+    // silences the other (chrome-store-installed) extensions in the scratch
+    // profile so the user sees only their unpacked dev extension.
+    const paths = (Array.isArray(opts.loadExtension) ? opts.loadExtension : [opts.loadExtension])
+      .map((p) => path.resolve(p));
+    for (const p of paths) {
+      if (!fs.existsSync(path.join(p, 'manifest.json'))) {
+        throw new Error(`--load-extension: no manifest.json in ${p}`);
+      }
+    }
+    const joined = paths.join(',');
+    args.push(`--load-extension=${joined}`);
+    args.push(`--disable-extensions-except=${joined}`);
+  }
 
   const proc = Bun.spawn([binary.path, ...args], {
     stdout: 'ignore',

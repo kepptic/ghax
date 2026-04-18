@@ -168,6 +168,40 @@ c('responsive writes three screenshots', async () => {
   }
 });
 
+c('snapshot cursor scan pierces open shadow DOM', async () => {
+  // Navigate fresh to a known page and inject a custom element with an open
+  // shadow root using only safe DOM APIs, then assert the cursor pass emits
+  // a selector with `>>>` (the Playwright pierce combinator).
+  await run(['goto', 'https://example.com']);
+  await run(['eval', [
+    '(() => {',
+    '  const host = document.createElement("div");',
+    '  host.id = "ghax-shadow-host";',
+    '  const root = host.attachShadow({ mode: "open" });',
+    '  const inner = document.createElement("div");',
+    '  inner.style.cursor = "pointer";',
+    '  inner.setAttribute("tabindex", "0");',
+    '  inner.textContent = "Shadow click target";',
+    '  root.appendChild(inner);',
+    '  document.body.appendChild(host);',
+    '})()',
+  ].join(' ')]);
+  const snap = await run(['snapshot', '-C', '--json']);
+  const result = parseJson<{ text: string; count: number }>(snap.stdout);
+  // Cursor-interactive render tags shadow-DOM finds with the `shadow` reason.
+  assert(
+    /\[shadow[^\]]*\]/.test(result.text),
+    `expected at least one [shadow,...] cursor entry, got:\n${result.text.slice(0, 500)}`,
+  );
+  // Also verify the click path works: resolve the @c ref and click it via
+  // Playwright, which would fail without pierce-selector support.
+  const match = result.text.match(/@(c\d+) \[shadow/);
+  assert(match, 'could not locate @c<n> ref for shadow element');
+  // The click assertion — we're just verifying it doesn't throw. If the
+  // pierce selector weren't valid, Playwright would error with "no element".
+  await run(['click', `@${match[1]}`]);
+});
+
 c('click @e<n> resolves against the last snapshot', async () => {
   // Need a fresh snapshot because viewport/responsive don't touch refs,
   // but click resolves the last ref map regardless of subsequent commands.

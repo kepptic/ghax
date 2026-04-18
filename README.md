@@ -17,7 +17,8 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 - **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role + name,
   not fragile CSS selectors. Cursor-interactive pass for Radix / Headless UI
   popovers that never land in the a11y tree, and **shadow-DOM aware** —
-  walks open shadow roots and emits `host >>> inner` pierce selectors for
+  walks open shadow roots and emits Playwright chain selectors
+  (`host >> inner`) for
   custom-element-heavy apps (Lit, Shoelace, web components).
 - **Annotated snapshots** (`-a`): red overlay boxes + `@e<n>` labels drawn
   onto a full-page screenshot — useful when an LLM needs to "see" the refs.
@@ -129,7 +130,7 @@ See [`design/plan/03-commands.md`](./design/plan/03-commands.md) for the full
 planned surface. Commands shipped today:
 
 ```
-attach [--port N] [--browser edge|chrome] [--launch]
+attach [--port N] [--browser edge|chrome] [--launch] [--load-extension <path>] [--data-dir <path>]
 status [--json]
 detach
 restart
@@ -166,6 +167,7 @@ ext panel <ext-id> eval <js>
 ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
 gesture click <x,y>
 gesture key <key>
+qa --url <u> [--url <u> ...] [--urls a,b,c] [--out report.json] [--screenshots <dir>] [--no-screenshots] [--annotate] [--gif <out.gif>]
 ```
 
 Add `--json` on any command for machine-readable output.
@@ -177,8 +179,11 @@ See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
 - **v0.1** — flagship `ghax browse` working against real browsers. ✓
 - **v0.2** — annotated snapshots, responsive, diff, chain, record/replay. ✓
 - **v0.3** — hot-reload, shadow-DOM, gif, Claude Code skills, CI. ✓
-- **v1.0** (current) — internal hardening: smoke tests, live hot-reload
-  verification. Public release paused.
+- **v1.0** — internal hardening: smoke tests, live hot-reload
+  verification, `--load-extension` pass-through. ✓
+- **v0.4** (current) — orchestrated tools on top of browse. `ghax qa`
+  shipped; `ghax profile` next.
+- Public release (npm publish, docs site, announce) paused by decision.
 
 ## Security
 

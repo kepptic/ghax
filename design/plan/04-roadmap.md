@@ -52,7 +52,7 @@ instead of hand-written Python.
 - [x] CircularBuffer console/network buffers (5k each)
 - [x] `ghax gif <recording> [out.gif]` — ffmpeg wrapper (2-pass palette)
 - [x] Shadow-DOM aware clicking (cursor-interactive walks open shadow
-      roots, emits `host >>> inner` pierce selectors)
+      roots, emits `host >> inner` Playwright chain selectors)
 
 ## v0.3 — Claude Code skills + MV3 hot-reload ✓ shipped 2026-04-18
 
@@ -178,10 +178,18 @@ release track is on hold.
 
 - [x] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
 - [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
-- [ ] `test/smoke.ts` — attach → handful of reads + writes → detach,
-      wired into CI
-- [ ] Live smoke-test of `ghax ext hot-reload` on a throwaway extension
-      (never run against a live Beam session mid-work)
+- [x] `test/smoke.ts` — 24-check harness against a live browser. Runs
+      locally only (CI has no browser); commit `e41ab7d`.
+- [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
+      hot-reload verification.
+- [x] `ghax attach --launch --load-extension <path>` — scripted
+      fixture loading without browser-UI steps.
+- [x] `test/hot-reload-smoke.ts` — fully scripted hot-reload probe:
+      launch scratch browser → load fixture → confirm SW → hot-reload
+      → assert SW version bumps.
+- [ ] Shadow-DOM smoke check in `test/smoke.ts`.
+- [ ] Skill acceptance eval harness (v0.3 carryover — needs Claude API
+      integration, scoped for its own session).
 
 ### Paused (revisit when ready to open-source)
 
@@ -190,11 +198,27 @@ release track is on hold.
 - [ ] Docs site — `ghax.dev` or GitHub Pages
 - [ ] v1.0 tag + announce (HN, X, dev.to)
 
-## Future tools in the `ghax` collection (no timeline)
+## v0.4 — beyond the browse primitive (in progress)
+
+Flagship `ghax browse` is now solid. v0.4 starts layering orchestrated
+tools on top of it. The MVP layout: each tool is a new top-level verb
+that composes existing daemon handlers.
+
+- [x] `ghax qa` — orchestrated QA pass. Flow: attach → goto each URL →
+      `snapshot -i` → capture console errors + HTTP >=400 responses →
+      emit `qa-report.json`. Flags: `--url` (repeatable), `--urls`
+      (comma form), positional URLs, or JSON on stdin. `--out`,
+      `--screenshots`, `--annotate`, `--gif`. First iteration — no
+      smart nav inference (user provides URL list).
+- [ ] `ghax qa` v2: infer URL list from the sitemap / main-nav links
+      of a root URL. `--crawl <root> --depth N`.
+- [ ] `ghax profile [--duration N]` — perf / memory snapshot of the
+      active tab or an extension target. Uses CDP `Performance.*` +
+      `HeapProfiler.takeHeapSnapshot`. Writes `.ghax/profiles/<ts>.json`.
+
+## Future tools (no timeline)
 
 - `ghax ship` — opinionated ship workflow (commit + push + PR + deploy hook)
-- `ghax qa` — orchestrated QA pass on a web app (attach + walk flows + gif)
 - `ghax review` — PR review against the diff
 - `ghax canary` — attach + watch prod for regressions after deploy
-- `ghax profile` — perf / memory snapshot of a page or extension
 - `ghax pair` — share browser access with another agent (like gstack pair)
