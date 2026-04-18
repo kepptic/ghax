@@ -69,9 +69,11 @@ async function rpc<T = unknown>(port: number, cmd: string, args: unknown[] = [],
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cmd, args, opts }),
   });
-  const body = (await resp.json()) as { ok: boolean; data?: T; error?: string };
+  const body = (await resp.json()) as { ok: boolean; data?: T; error?: string; exitCode?: number };
   if (!body.ok) {
-    throw new Error(body.error || `RPC ${cmd} failed`);
+    const err: Error & { exit?: number } = new Error(body.error || `RPC ${cmd} failed`);
+    if (typeof body.exitCode === 'number') err.exit = body.exitCode;
+    throw err;
   }
   return body.data as T;
 }
@@ -404,6 +406,7 @@ Extensions (MV3):
   ext list
   ext targets <ext-id>
   ext reload <ext-id>
+  ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
   ext sw <ext-id> eval <js>
   ext panel <ext-id> eval <js>
   ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
@@ -418,6 +421,7 @@ Batch / recording:
   record stop
   record status
   replay <file>
+  gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
 
 Add --json for machine-readable output on any command.
 `;
@@ -500,6 +504,9 @@ async function main(): Promise<number> {
       case 'replay':
         return await cmdReplay(parseArgs(rest));
 
+      case 'gif':
+        return await cmdGif(parseArgs(rest));
+
       default:
         console.error(`Unknown command: ${verb}\n\nRun 'ghax --help' for usage.`);
         return EXIT.USAGE;
@@ -527,8 +534,53 @@ async function dispatchExt(rest: string[]): Promise<number> {
       return makeSimple('ext.list')(parsed);
     case 'targets':
       return makeSimple('ext.targets')(parsed);
-    case 'reload':
-      return makeSimple('ext.reload')(parsed);
+    case 'reload': {
+      return withDaemon(async (port) => {
+        const data = (await rpc(port, 'ext.reload', parsed.positional, flagsToOpts(parsed.flags))) as {
+          ok?: boolean; hint?: string | null;
+        };
+        if (parsed.flags.json) {
+          console.log(JSON.stringify(data, null, 2));
+        } else {
+          console.log('reloaded');
+          if (data?.hint) console.error(`hint: ${data.hint}`);
+        }
+        return EXIT.OK;
+      });
+    }
+    case 'hot-reload': {
+      return withDaemon(async (port) => {
+        const data = (await rpc(port, 'ext.hot-reload', parsed.positional, flagsToOpts(parsed.flags))) as {
+          ok: boolean;
+          swVersion: string;
+          previousVersion: string;
+          tabs: Array<{ tabId: number; url?: string; status: 'ok' | 'error'; error?: string }>;
+          reinjected: number;
+          failed: number;
+          skipped: boolean;
+          durationMs: number;
+        };
+        if (parsed.flags.json) {
+          console.log(JSON.stringify(data, null, 2));
+        } else {
+          const vtag = data.swVersion && data.previousVersion && data.swVersion !== data.previousVersion
+            ? `${data.previousVersion} → ${data.swVersion}`
+            : (data.swVersion || 'unknown');
+          if (data.skipped) {
+            console.log(`reloaded (no content scripts or --no-inject), SW version=${vtag}, ${data.durationMs}ms`);
+          } else {
+            console.log(`re-injected into ${data.reinjected} of ${data.reinjected + data.failed} tabs, SW version=${vtag}, ${data.durationMs}ms`);
+            if (parsed.flags.verbose) {
+              for (const t of data.tabs) {
+                const tag = t.status === 'ok' ? '✓' : '✗';
+                console.log(`  ${tag} tab ${t.tabId}${t.url ? ` (${t.url})` : ''}${t.error ? ` — ${t.error}` : ''}`);
+              }
+            }
+          }
+        }
+        return data.failed > 0 ? 6 : EXIT.OK;
+      });
+    }
     case 'sw': {
       // ghax ext sw <ext-id> <op> [...]
       const extId = parsed.positional[0];
@@ -689,6 +741,106 @@ async function cmdReplay(parsed: ParsedArgs): Promise<number> {
         return EXIT.CDP_ERROR;
       }
     }
+    return EXIT.OK;
+  });
+}
+
+async function cmdGif(parsed: ParsedArgs): Promise<number> {
+  const recFile = parsed.positional[0];
+  const outGif = parsed.positional[1] ?? `/tmp/ghax-${Date.now()}.gif`;
+  const delayMs = parsed.flags.delay ? Number(parsed.flags.delay) : 1000;
+  const scale = parsed.flags.scale ? Number(parsed.flags.scale) : 800;
+  if (!recFile) {
+    console.error('Usage: ghax gif <recording-file> [out.gif] [--delay ms] [--scale px]');
+    return EXIT.USAGE;
+  }
+  // Fail fast if ffmpeg isn't on PATH — we'd otherwise rack up frames for nothing.
+  const probe = Bun.spawnSync(['ffmpeg', '-version'], { stdout: 'ignore', stderr: 'ignore' });
+  if (probe.exitCode !== 0) {
+    console.error('ghax gif: ffmpeg not found on PATH. Install via `brew install ffmpeg` (macOS) or your distro equivalent.');
+    return EXIT.CDP_ERROR;
+  }
+
+  let steps: ChainStep[];
+  try {
+    const doc = JSON.parse(fs.readFileSync(recFile, 'utf-8'));
+    steps = (doc.steps ?? doc) as ChainStep[];
+  } catch (err: any) {
+    console.error(`ghax gif: invalid recording — ${err.message}`);
+    return EXIT.USAGE;
+  }
+  if (steps.length === 0) {
+    console.error('ghax gif: recording has no steps');
+    return EXIT.USAGE;
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join('/tmp', 'ghax-gif-'));
+  console.log(`rendering ${steps.length} steps → ${outGif}`);
+
+  return withDaemon(async (port) => {
+    let frame = 0;
+    const frameFile = () => path.join(tmpDir, `frame-${String(frame).padStart(4, '0')}.png`);
+
+    // Capture initial state.
+    await rpc(port, 'screenshot', [], { path: frameFile(), fullPage: false });
+    frame++;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      try {
+        await rpc(port, step.cmd, step.args ?? [], step.opts ?? {});
+      } catch (err: any) {
+        console.error(`step ${i + 1} (${step.cmd}) failed: ${err.message}`);
+        return EXIT.CDP_ERROR;
+      }
+      // Wait for layout to settle — most UI transitions finish within ~200ms,
+      // but animations (Framer, Radix) can still be painting at the moment
+      // executeScript returns.
+      await new Promise((r) => setTimeout(r, 250));
+      await rpc(port, 'screenshot', [], { path: frameFile(), fullPage: false });
+      frame++;
+    }
+
+    // ffmpeg: 2-pass palette for clean GIF colors.
+    const palette = path.join(tmpDir, 'palette.png');
+    const framePattern = path.join(tmpDir, 'frame-%04d.png');
+    const framerate = Math.max(1, Math.round(1000 / delayMs));
+    const paletteGen = Bun.spawnSync([
+      'ffmpeg', '-y',
+      '-framerate', String(framerate),
+      '-i', framePattern,
+      '-vf', `scale=${scale}:-1:flags=lanczos,palettegen`,
+      palette,
+    ], { stdout: 'ignore', stderr: 'pipe' });
+    if (paletteGen.exitCode !== 0) {
+      console.error('ffmpeg palettegen failed:', paletteGen.stderr.toString().split('\n').slice(-5).join('\n'));
+      return EXIT.CDP_ERROR;
+    }
+    const render = Bun.spawnSync([
+      'ffmpeg', '-y',
+      '-framerate', String(framerate),
+      '-i', framePattern,
+      '-i', palette,
+      '-lavfi', `scale=${scale}:-1:flags=lanczos [x]; [x][1:v] paletteuse`,
+      '-loop', '0',
+      outGif,
+    ], { stdout: 'ignore', stderr: 'pipe' });
+    if (render.exitCode !== 0) {
+      console.error('ffmpeg render failed:', render.stderr.toString().split('\n').slice(-5).join('\n'));
+      return EXIT.CDP_ERROR;
+    }
+
+    // Cleanup temp frames unless --keep-frames for debugging.
+    if (!parsed.flags.keepFrames) {
+      try {
+        for (const f of fs.readdirSync(tmpDir)) fs.unlinkSync(path.join(tmpDir, f));
+        fs.rmdirSync(tmpDir);
+      } catch {
+        // best-effort
+      }
+    }
+    const stat = fs.statSync(outGif);
+    console.log(`✓ ${outGif} (${Math.round(stat.size / 1024)}KB, ${frame} frames)`);
     return EXIT.OK;
   });
 }

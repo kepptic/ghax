@@ -545,18 +545,194 @@ register('ext.targets', async (ctx, args) => {
   return ts.map((t) => ({ id: t.id, type: t.type, title: t.title, url: t.url }));
 });
 
+class DaemonError extends Error {
+  constructor(message: string, public exitCode: number) {
+    super(message);
+  }
+}
+
 register('ext.reload', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext reload <ext-id>');
   const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
+  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
   const target = await ctx.pool.get(sws[0]);
   await target.send('Runtime.enable');
-  await target.send('Runtime.evaluate', {
-    expression: 'chrome.runtime.reload()',
-    awaitPromise: true,
-  });
-  return { ok: true };
+  // Read content_scripts so we can warn — reload disconnects us before the promise resolves.
+  let manifestCs: unknown[] = [];
+  try {
+    const r = (await target.send('Runtime.evaluate', {
+      expression: 'JSON.stringify(chrome.runtime.getManifest().content_scripts || [])',
+      returnByValue: true,
+    })) as { result?: { value?: string } };
+    manifestCs = JSON.parse(r.result?.value || '[]') as unknown[];
+  } catch {
+    // non-fatal; hint relies on it but reload itself doesn't
+  }
+  // Fire-and-forget: reload kills the WebSocket before the promise resolves.
+  target.send('Runtime.evaluate', { expression: 'chrome.runtime.reload()' }).catch(() => undefined);
+  // Remove stale target from pool so next call re-connects.
+  ctx.pool.close();
+  return {
+    ok: true,
+    hint: manifestCs.length > 0
+      ? `Extension declares ${manifestCs.length} content_scripts — run 'ghax ext hot-reload ${extId}' to also refresh them in open tabs.`
+      : null,
+  };
+});
+
+interface ManifestContentScript {
+  matches: string[];
+  js?: string[];
+  css?: string[];
+  run_at?: string;
+  all_frames?: boolean;
+}
+
+async function findSwTarget(pool: CdpPool, extId: string): Promise<CdpTargetInfo | null> {
+  const targets = await pool.findByExtensionId(extId, 'service_worker');
+  return targets[0] ?? null;
+}
+
+async function waitForSw(pool: CdpPool, extId: string, timeoutMs: number): Promise<CdpTargetInfo> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const t = await findSwTarget(pool, extId);
+    if (t?.webSocketDebuggerUrl) return t;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new DaemonError(`Service worker for ${extId} did not return within ${timeoutMs}ms`, 5);
+}
+
+register('ext.hot-reload', async (ctx, args, opts) => {
+  const startedAt = Date.now();
+  const extId = String(args[0] ?? '');
+  if (!extId) throw new Error('Usage: ext hot-reload <ext-id>');
+  const waitSeconds = opts.wait === undefined ? 5 : Number(opts.wait);
+  const noInject = Boolean(opts.noInject ?? opts['no-inject']);
+  const verbose = Boolean(opts.verbose);
+
+  const sw = await findSwTarget(ctx.pool, extId);
+  if (!sw?.webSocketDebuggerUrl) throw new DaemonError(`Extension ${extId} has no service worker target`, 3);
+
+  // Step 1–3: read the manifest before reload.
+  const oldTarget = await ctx.pool.get(sw);
+  await oldTarget.send('Runtime.enable');
+  let contentScripts: ManifestContentScript[] = [];
+  let oldVersion = '';
+  try {
+    const r = (await oldTarget.send('Runtime.evaluate', {
+      expression:
+        'JSON.stringify({v: chrome.runtime.getManifest().version, cs: chrome.runtime.getManifest().content_scripts || []})',
+      returnByValue: true,
+    })) as { result?: { value?: string } };
+    const parsed = JSON.parse(r.result?.value || '{}') as { v?: string; cs?: ManifestContentScript[] };
+    oldVersion = parsed.v ?? '';
+    contentScripts = parsed.cs ?? [];
+  } catch (err: any) {
+    throw new DaemonError(`Could not read manifest: ${err.message}`, 4);
+  }
+
+  // Step 4: fire reload without awaiting — the SW disconnects before the promise resolves.
+  oldTarget.send('Runtime.evaluate', { expression: 'chrome.runtime.reload()' }).catch(() => undefined);
+  // Drop the stale WebSocket; a new one will open on the new SW target.
+  ctx.pool.close();
+
+  // Step 5–6: wait, then re-discover the new SW target.
+  await new Promise((r) => setTimeout(r, waitSeconds * 1000));
+  const newSw = await waitForSw(ctx.pool, extId, waitSeconds * 2000);
+  const newTarget = await ctx.pool.get(newSw);
+  await newTarget.send('Runtime.enable');
+
+  // Read the new version for reporting.
+  let newVersion = '';
+  try {
+    const r = (await newTarget.send('Runtime.evaluate', {
+      expression: 'chrome.runtime.getManifest().version',
+      returnByValue: true,
+    })) as { result?: { value?: string } };
+    newVersion = r.result?.value || '';
+  } catch {
+    // non-fatal
+  }
+
+  if (noInject || contentScripts.length === 0) {
+    return {
+      ok: true,
+      swVersion: newVersion,
+      previousVersion: oldVersion,
+      tabs: [],
+      reinjected: 0,
+      failed: 0,
+      skipped: true,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  // Step 7: for each content_scripts entry, inject into matching tabs.
+  interface InjectResult {
+    tabId: number;
+    url?: string;
+    status: 'ok' | 'error';
+    error?: string;
+  }
+  const allResults: InjectResult[] = [];
+  for (const cs of contentScripts) {
+    if (!cs.matches || cs.matches.length === 0) continue;
+    const jsFiles = cs.js ?? [];
+    const cssFiles = cs.css ?? [];
+    // Build one eval expression that does the query + per-tab injection and returns a result array.
+    const expr = `
+      (async () => {
+        const tabs = await chrome.tabs.query({ url: ${JSON.stringify(cs.matches)} });
+        const out = [];
+        for (const t of tabs) {
+          try {
+            ${jsFiles.length > 0
+              ? `await chrome.scripting.executeScript({ target: { tabId: t.id${cs.all_frames ? ', allFrames: true' : ''} }, files: ${JSON.stringify(jsFiles)} });`
+              : ''}
+            ${cssFiles.length > 0
+              ? `await chrome.scripting.insertCSS({ target: { tabId: t.id${cs.all_frames ? ', allFrames: true' : ''} }, files: ${JSON.stringify(cssFiles)} });`
+              : ''}
+            out.push({ tabId: t.id, url: t.url, status: 'ok' });
+          } catch (e) {
+            out.push({ tabId: t.id, url: t.url, status: 'error', error: String(e && e.message || e) });
+          }
+        }
+        return JSON.stringify(out);
+      })()
+    `;
+    const r = (await newTarget.send('Runtime.evaluate', {
+      expression: expr,
+      awaitPromise: true,
+      returnByValue: true,
+    })) as { result?: { value?: string }; exceptionDetails?: unknown };
+    if (r.exceptionDetails) {
+      throw new DaemonError(`hot-reload inject failed: ${JSON.stringify(r.exceptionDetails)}`, 4);
+    }
+    const results = JSON.parse(r.result?.value || '[]') as InjectResult[];
+    allResults.push(...results);
+    if (verbose) {
+      // Verbose output is surfaced via log — the structured response carries the per-tab detail.
+      // Structured logging happens through the main log stream which the CLI doesn't see,
+      // so we just include verbose=true in the response; CLI rendering handles display.
+    }
+  }
+
+  const reinjected = allResults.filter((r) => r.status === 'ok').length;
+  const failed = allResults.filter((r) => r.status === 'error').length;
+
+  return {
+    ok: failed === 0,
+    swVersion: newVersion,
+    previousVersion: oldVersion,
+    tabs: allResults,
+    reinjected,
+    failed,
+    skipped: false,
+    durationMs: Date.now() - startedAt,
+    ...(verbose ? { verbose: true } : {}),
+  };
 });
 
 register('ext.sw.eval', async (ctx, args) => {
@@ -823,7 +999,8 @@ async function main() {
         json(res, 200, { ok: true, data });
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
-        json(res, 500, { ok: false, error: err.message || String(err) });
+        const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
+        json(res, 500, { ok: false, error: err.message || String(err), ...(exitCode !== undefined ? { exitCode } : {}) });
       }
       return;
     }

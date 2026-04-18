@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - name: Install deps
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+  build:
+    needs: typecheck
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: bun install --frozen-lockfile
+      - name: Build
+        run: bun run build
+      - name: Verify binaries (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          set -e
+          ./dist/ghax --help | head -5
+          test -f dist/ghax-daemon.mjs
+      - name: Verify binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          ./dist/ghax.exe --help | head -5
+          test -f dist/ghax-daemon.mjs
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghax-${{ matrix.os }}
+          path: |
+            dist/ghax*
+            dist/ghax-daemon.mjs
+          retention-days: 14
