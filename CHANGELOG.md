@@ -70,6 +70,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ghax ext list` enriches each entry with manifest-derived `name`,
   `version`, and `enabled` fields.
 - README reflects v0.3+ features and the current v0.4 status.
+- `bun run install-link` / `bun run uninstall-link` — symlink
+  `dist/ghax` into `~/.local/bin` so the binary resolves from any
+  shell + any Claude Code session without the caller qualifying the
+  path. Idempotent, reversible.
 
 ### Fixed
 

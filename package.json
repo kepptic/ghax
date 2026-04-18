@@ -13,7 +13,9 @@
     "build": "bun build --compile src/cli.ts --outfile dist/ghax && bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core && chmod +x dist/ghax",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "test:smoke": "bun run test/smoke.ts"
+    "test:smoke": "bun run test/smoke.ts",
+    "install-link": "mkdir -p ~/.local/bin && ln -sf \"$PWD/dist/ghax\" ~/.local/bin/ghax && echo 'linked → ~/.local/bin/ghax'",
+    "uninstall-link": "rm -f ~/.local/bin/ghax && echo 'unlinked ~/.local/bin/ghax'"
   },
   "dependencies": {
     "playwright": "^1.58.2"

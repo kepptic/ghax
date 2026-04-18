@@ -38,8 +38,19 @@ exposes MV3 internals that no other tool surfaces cleanly.
 
 ## Prerequisites
 
-The user's browser needs `--remote-debugging-port=9222`. Most likely
-already running on their daily driver. Verify with:
+### 1. `ghax` on PATH
+
+Verify with `which ghax`. On this machine it's symlinked as
+`~/.local/bin/ghax → <repo>/dist/ghax`. If missing:
+
+```bash
+cd /Users/gr/Documents/DevOps/kepptic/products/open-source/ghax
+bun run build && bun run install-link
+```
+
+### 2. Browser listening on CDP
+
+Verify with:
 
 ```bash
 curl -s http://127.0.0.1:9222/json/version | head -3
