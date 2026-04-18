@@ -347,6 +347,59 @@ c('ext list entries carry version field', async () => {
   assert(anyWithVersion, `no extension reported a version in ${JSON.stringify(exts.map((e) => ({ id: e.id, v: e.version })))}`);
 });
 
+c('profile captures Performance metrics', async () => {
+  const r = await run(['profile', '--json']);
+  const data = parseJson<{
+    reportPath: string;
+    start: { metrics: Record<string, number> };
+    deltas: Record<string, number> | null;
+  }>(r.stdout);
+  assert(Object.keys(data.start.metrics).length > 0, 'expected non-empty metrics map');
+  assert(fs.existsSync(data.reportPath), `report file missing: ${data.reportPath}`);
+  fs.unlinkSync(data.reportPath);
+});
+
+c('ext sw logs subscription returns an array', async () => {
+  const listRaw = await run(['ext', 'list', '--json']);
+  const exts = parseJson<Array<{ id: string; targets: Array<{ type: string }> }>>(listRaw.stdout);
+  const withSw = exts.find((e) => e.targets.some((t) => t.type === 'service_worker'));
+  if (!withSw) {
+    console.log('  (no extensions with a service worker — skipping sw logs)');
+    return;
+  }
+  const r = await run(['ext', 'sw', withSw.id, 'logs', '--last', '5', '--json']);
+  const entries = parseJson<unknown[]>(r.stdout);
+  assert(Array.isArray(entries), 'ext sw logs should return an array');
+});
+
+c('ext popup/options report "no page open" when closed', async () => {
+  const listRaw = await run(['ext', 'list', '--json']);
+  const exts = parseJson<Array<{ id: string }>>(listRaw.stdout);
+  if (exts.length === 0) return;
+  // Popup/options pages are transient — usually NOT open. We expect the
+  // handler to throw a clean error rather than crash.
+  const r = await run(['ext', 'popup', exts[0].id, 'eval', '1+1'], { allowFailure: true });
+  // Either a handler threw (exit != 0) because no popup is open, or — rarely
+  // — there IS a popup page and eval returned "2". Both outcomes are
+  // acceptable here; we're asserting the command path is wired up.
+  assert(
+    r.exitCode === 0 || /no popup page open|No popup|exit/i.test(r.stderr + r.stdout),
+    `popup eval unexpected output: ${r.stdout}${r.stderr}`,
+  );
+});
+
+c('diff-state diffs two JSON files', async () => {
+  const a = `/tmp/ghax-smoke-diff-a-${Date.now()}.json`;
+  const b = `/tmp/ghax-smoke-diff-b-${Date.now()}.json`;
+  fs.writeFileSync(a, JSON.stringify({ x: 1, y: 2 }));
+  fs.writeFileSync(b, JSON.stringify({ x: 1, y: 3, z: 4 }));
+  const r = await run(['diff-state', a, b, '--json']);
+  const data = parseJson<{ diffs: Array<{ path: string; kind: string }>; added: number; changed: number }>(r.stdout);
+  assert(data.changed === 1 && data.added === 1, `diff counts off: ${JSON.stringify(data)}`);
+  fs.unlinkSync(a);
+  fs.unlinkSync(b);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

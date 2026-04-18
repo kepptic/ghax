@@ -212,40 +212,45 @@ that composes existing daemon handlers.
       smart nav inference (user provides URL list).
 - [x] `ghax qa --crawl <root> [--depth N] [--limit N]` — sitemap.xml
       first, falls back to same-origin link scraping.
-- [ ] `ghax profile [--duration N]` — perf / memory snapshot of the
-      active tab or an extension target. Uses CDP `Performance.*` +
-      `HeapProfiler.takeHeapSnapshot`. Writes `.ghax/profiles/<ts>.json`.
+- [x] `ghax profile [--duration N] [--heap] [--extension <id>]` — CDP
+      `Performance.getMetrics` snapshot for active tab or extension
+      SW, optional heap dump, writes `.ghax/profiles/<ts>.json`.
 
-### Unimplemented items from `03-commands.md` (fill-in pass)
+### Unimplemented items from `03-commands.md` — all shipped
 
-Re-read the original command surface doc: several items from the v1
-design were never implemented. Grouped by leverage:
-
-High leverage (shipped):
+Re-read the original command surface doc; every item is now
+implemented:
 
 - [x] `ghax ext list` → `version`, `name`, `enabled` fields
 - [x] `ghax storage [local|session] [get|set|remove|clear|keys] [key] [value]`
 - [x] `ghax is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>`
 - [x] `ghax ext message <ext-id> <json>` — sendMessage wrapper
 - [x] `ghax gesture dblclick <x,y>` + `ghax gesture scroll <dir> [amount]`
+- [x] `ghax console --follow` / `ghax network --follow` — SSE streaming
+      (daemon `/sse/console`, `/sse/network`)
+- [x] `ghax ext sw <id> logs [--follow]` — dedicated SW console buffer,
+      auto-resubscribes after hot-reload
+- [x] `ghax ext popup <id>` + `ghax ext options <id>` — shared
+      eval-in-extension-page helper matches popup.html / options.html
+- [x] `ghax diff-state <before.json> <after.json>` — RFC-6901-style
+      JSON diff; added / removed / changed tags
 
-Medium leverage:
+## Future tools — shipped 2026-04-18
 
-- [ ] `ghax console --follow` / `ghax network --follow` — streaming
-      tail mode (SSE or chunked HTTP from the daemon)
-- [ ] `ghax ext sw <id> logs [--follow]` — dedicated SW console tail
-- [ ] `ghax ext popup <id>` + `ghax ext options <id>` — interact with
-      popup and options pages (mirrors `ghax ext panel`)
+- [x] `ghax ship` — opinionated commit + push + PR workflow
+      (typecheck + build gate, `--dry-run`, skippable stages)
+- [x] `ghax review` — Claude-ready review prompt wrapping the diff;
+      stdout only (pipe to `claude`)
+- [x] `ghax canary <url>` — periodic prod health check; rolling log in
+      `.ghax/canary-<host>.log`, structured JSON report on exit
+- [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
+      deferred to v0.5)
 
-Lower leverage:
+## v0.5 — outstanding
 
-- [ ] `ghax diff-state <before> <after>` — diff two snapshots
-      (storage, console, etc.). `chain` + `eval` already covers most
-      of this use case.
-
-## Future tools (no timeline)
-
-- `ghax ship` — opinionated ship workflow (commit + push + PR + deploy hook)
-- `ghax review` — PR review against the diff
-- `ghax canary` — attach + watch prod for regressions after deploy
-- `ghax pair` — share browser access with another agent (like gstack pair)
+- [ ] Multi-tenant `ghax pair` — bearer-token auth on the daemon, URL
+      allowlist per token, bind to a scoped interface (Tailscale ts0 or
+      0.0.0.0 with explicit opt-in). Defers because any bug on the RPC
+      surface is remotely exploitable.
+- [ ] Skill acceptance eval harness — needs Claude API integration,
+      scoped for its own session (v0.3 carryover).

@@ -271,6 +271,61 @@ async function cmdRestart(parsed: ParsedArgs): Promise<number> {
 
 // ─── Generic RPC commands ──────────────────────────────────────
 
+/**
+ * Stream Server-Sent Events from the daemon. One event per line, each line
+ * a JSON payload. Returns exit code 0 on user interrupt (SIGINT / Ctrl-C),
+ * non-zero on connection error.
+ *
+ * Daemon-side sends `:ping\n\n` every 15s; those lines start with `:` and
+ * are skipped here.
+ */
+async function streamSse(port: number, path: string): Promise<number> {
+  const controller = new AbortController();
+  const handleSigint = () => controller.abort();
+  process.on('SIGINT', handleSigint);
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: controller.signal,
+      headers: { accept: 'text/event-stream' },
+    });
+    if (!resp.ok || !resp.body) {
+      console.error(`ghax: SSE ${path} failed (${resp.status})`);
+      return EXIT.CDP_ERROR;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx = buf.indexOf('\n\n');
+      while (idx >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6);
+          try {
+            const obj = JSON.parse(payload);
+            console.log(JSON.stringify(obj));
+          } catch {
+            console.log(payload);
+          }
+        }
+        idx = buf.indexOf('\n\n');
+      }
+    }
+    return EXIT.OK;
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return EXIT.OK;
+    console.error(`ghax: SSE error: ${err.message}`);
+    return EXIT.CDP_ERROR;
+  } finally {
+    process.removeListener('SIGINT', handleSigint);
+  }
+}
+
 async function withDaemon<T>(fn: (port: number) => Promise<T>): Promise<T> {
   const state = readState(cfg);
   if (!state || !(await daemonHealthy(state))) {
@@ -419,6 +474,8 @@ Extensions (MV3):
   ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
   ext sw <ext-id> eval <js>
   ext panel <ext-id> eval <js>
+  ext popup <ext-id> eval <js>
+  ext options <ext-id> eval <js>
   ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
   ext message <ext-id> <json-payload>
 
@@ -440,6 +497,14 @@ Orchestrated:
      [--crawl <root> [--depth N] [--limit N]]
      [--out report.json] [--screenshots <dir>] [--no-screenshots]
      [--annotate] [--gif <out.gif>]
+  profile [--duration sec] [--heap] [--extension <ext-id>]
+  diff-state <before.json> <after.json>
+  canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
+
+Dev workflow:
+  ship [--message "..."] [--no-check] [--no-build] [--no-pr] [--dry-run]
+  review [--base origin/main] [--diff]
+  pair [status]
   gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
 
 Add --json for machine-readable output on any command.
@@ -521,8 +586,13 @@ async function main(): Promise<number> {
       }
 
       case 'console':
-      case 'network':
-        return await makeSimple(verb)(parseArgs(rest));
+      case 'network': {
+        const parsed = parseArgs(rest);
+        if (parsed.flags.follow) {
+          return await withDaemon((port) => streamSse(port, `/sse/${verb}`));
+        }
+        return await makeSimple(verb)(parsed);
+      }
 
       case 'ext':
         return await dispatchExt(rest);
@@ -544,6 +614,24 @@ async function main(): Promise<number> {
 
       case 'qa':
         return await cmdQa(parseArgs(rest));
+
+      case 'profile':
+        return await makeSimple('profile')(parseArgs(rest));
+
+      case 'diff-state':
+        return await cmdDiffState(parseArgs(rest));
+
+      case 'ship':
+        return await cmdShip(parseArgs(rest));
+
+      case 'canary':
+        return await cmdCanary(parseArgs(rest));
+
+      case 'review':
+        return await cmdReview(parseArgs(rest));
+
+      case 'pair':
+        return await cmdPair(parseArgs(rest));
 
       default:
         console.error(`Unknown command: ${verb}\n\nRun 'ghax --help' for usage.`);
@@ -625,6 +713,7 @@ async function dispatchExt(rest: string[]): Promise<number> {
       const op = parsed.positional[1];
       if (!extId || !op) {
         console.error('Usage: ghax ext sw <ext-id> eval <js>');
+        console.error('       ghax ext sw <ext-id> logs [--last N] [--errors] [--follow]');
         return EXIT.USAGE;
       }
       if (op === 'eval') {
@@ -635,25 +724,38 @@ async function dispatchExt(rest: string[]): Promise<number> {
           return EXIT.OK;
         });
       }
-      console.error(`Unknown ext sw op: ${op}`);
-      return EXIT.USAGE;
-    }
-    case 'panel': {
-      const extId = parsed.positional[0];
-      const op = parsed.positional[1];
-      if (!extId || !op) {
-        console.error('Usage: ghax ext panel <ext-id> eval <js>');
-        return EXIT.USAGE;
-      }
-      if (op === 'eval') {
-        const js = parsed.positional.slice(2).join(' ');
+      if (op === 'logs') {
+        if (parsed.flags.follow) {
+          return withDaemon((port) => streamSse(port, `/sse/ext-sw-logs/${encodeURIComponent(extId)}`));
+        }
         return withDaemon(async (port) => {
-          const data = await rpc(port, 'ext.panel.eval', [extId, js], flagsToOpts(parsed.flags));
+          const data = await rpc(port, 'ext.sw.logs', [extId], flagsToOpts(parsed.flags));
           printResult(data, Boolean(parsed.flags.json));
           return EXIT.OK;
         });
       }
-      console.error(`Unknown ext panel op: ${op}`);
+      console.error(`Unknown ext sw op: ${op}`);
+      return EXIT.USAGE;
+    }
+    case 'panel':
+    case 'popup':
+    case 'options': {
+      const extId = parsed.positional[0];
+      const op = parsed.positional[1];
+      if (!extId || !op) {
+        console.error(`Usage: ghax ext ${sub} <ext-id> eval <js>`);
+        return EXIT.USAGE;
+      }
+      if (op === 'eval') {
+        const js = parsed.positional.slice(2).join(' ');
+        const handlerName = `ext.${sub}.eval`;
+        return withDaemon(async (port) => {
+          const data = await rpc(port, handlerName, [extId, js], flagsToOpts(parsed.flags));
+          printResult(data, Boolean(parsed.flags.json));
+          return EXIT.OK;
+        });
+      }
+      console.error(`Unknown ext ${sub} op: ${op}`);
       return EXIT.USAGE;
     }
     case 'storage':
@@ -1012,6 +1114,454 @@ async function cmdQa(parsed: ParsedArgs): Promise<number> {
 
     return report.urlsOk === report.urlsAttempted ? EXIT.OK : EXIT.CDP_ERROR;
   });
+}
+
+/**
+ * diff-state: structural JSON diff between two snapshot files.
+ *
+ * Walks both trees in parallel, emitting entries in JSON-pointer form
+ * (RFC 6901-ish — slash-separated paths). Added / removed / changed
+ * leaves are tagged; object-vs-object and array-vs-array recurse.
+ * Arrays compare element-wise (no LCS) because snapshot diffs usually
+ * want positional awareness.
+ */
+interface DiffEntry {
+  path: string;
+  kind: 'added' | 'removed' | 'changed';
+  before?: unknown;
+  after?: unknown;
+}
+
+function diffValues(path: string, a: unknown, b: unknown, out: DiffEntry[]): void {
+  if (a === b) return;
+  const aKind = kindOf(a);
+  const bKind = kindOf(b);
+  if (aKind !== bKind) {
+    out.push({ path, kind: 'changed', before: a, after: b });
+    return;
+  }
+  if (aKind === 'object') {
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const keys = new Set([...Object.keys(ao), ...Object.keys(bo)]);
+    for (const k of keys) {
+      const sub = `${path}/${k.replace(/~/g, '~0').replace(/\//g, '~1')}`;
+      if (!(k in ao)) out.push({ path: sub, kind: 'added', after: bo[k] });
+      else if (!(k in bo)) out.push({ path: sub, kind: 'removed', before: ao[k] });
+      else diffValues(sub, ao[k], bo[k], out);
+    }
+    return;
+  }
+  if (aKind === 'array') {
+    const aa = a as unknown[];
+    const ba = b as unknown[];
+    const max = Math.max(aa.length, ba.length);
+    for (let i = 0; i < max; i++) {
+      const sub = `${path}/${i}`;
+      if (i >= aa.length) out.push({ path: sub, kind: 'added', after: ba[i] });
+      else if (i >= ba.length) out.push({ path: sub, kind: 'removed', before: aa[i] });
+      else diffValues(sub, aa[i], ba[i], out);
+    }
+    return;
+  }
+  // Scalars: direct inequality = changed.
+  if (a !== b) out.push({ path, kind: 'changed', before: a, after: b });
+}
+
+function kindOf(v: unknown): 'object' | 'array' | 'scalar' | 'null' | 'undefined' {
+  if (v === null) return 'null';
+  if (v === undefined) return 'undefined';
+  if (Array.isArray(v)) return 'array';
+  if (typeof v === 'object') return 'object';
+  return 'scalar';
+}
+
+async function cmdDiffState(parsed: ParsedArgs): Promise<number> {
+  const [beforePath, afterPath] = parsed.positional;
+  if (!beforePath || !afterPath) {
+    console.error('Usage: ghax diff-state <before.json> <after.json> [--json]');
+    return EXIT.USAGE;
+  }
+  let before: unknown, after: unknown;
+  try {
+    before = JSON.parse(fs.readFileSync(beforePath, 'utf-8'));
+  } catch (err: any) {
+    console.error(`ghax diff-state: cannot read ${beforePath}: ${err.message}`);
+    return EXIT.USAGE;
+  }
+  try {
+    after = JSON.parse(fs.readFileSync(afterPath, 'utf-8'));
+  } catch (err: any) {
+    console.error(`ghax diff-state: cannot read ${afterPath}: ${err.message}`);
+    return EXIT.USAGE;
+  }
+  const diffs: DiffEntry[] = [];
+  diffValues('', before, after, diffs);
+  if (parsed.flags.json) {
+    console.log(JSON.stringify({ diffs, added: diffs.filter((d) => d.kind === 'added').length, removed: diffs.filter((d) => d.kind === 'removed').length, changed: diffs.filter((d) => d.kind === 'changed').length }, null, 2));
+  } else if (diffs.length === 0) {
+    console.log('(no differences)');
+  } else {
+    for (const d of diffs) {
+      const p = d.path || '/';
+      if (d.kind === 'added') console.log(`+ ${p} = ${JSON.stringify(d.after)}`);
+      else if (d.kind === 'removed') console.log(`- ${p} = ${JSON.stringify(d.before)}`);
+      else console.log(`~ ${p}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`);
+    }
+  }
+  return diffs.length === 0 ? EXIT.OK : EXIT.OK;
+}
+
+// ─── ghax ship ────────────────────────────────────────────────
+//
+// Opinionated commit + push + PR. Each step is skippable via --no-<step>
+// so power users can opt out. No --amend, no force push.
+
+function sh(cmd: string[], opts: { cwd?: string; allowFailure?: boolean } = {}): { ok: boolean; stdout: string; stderr: string } {
+  const proc = Bun.spawnSync(cmd, {
+    cwd: opts.cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const out = {
+    ok: proc.exitCode === 0,
+    stdout: proc.stdout.toString(),
+    stderr: proc.stderr.toString(),
+  };
+  if (!out.ok && !opts.allowFailure) {
+    console.error(`ghax ship: ${cmd.join(' ')} failed (${proc.exitCode})`);
+    if (out.stderr) console.error(out.stderr);
+  }
+  return out;
+}
+
+async function cmdShip(parsed: ParsedArgs): Promise<number> {
+  const msg = parsed.flags.message as string | undefined;
+  const skipCheck = Boolean(parsed.flags['no-check']);
+  const skipBuild = Boolean(parsed.flags['no-build']);
+  const skipPr = Boolean(parsed.flags['no-pr']);
+  const dry = Boolean(parsed.flags['dry-run']);
+
+  // Verify we're in a clean-enough git repo.
+  const root = sh(['git', 'rev-parse', '--show-toplevel'], { allowFailure: true });
+  if (!root.ok) {
+    console.error('ghax ship: not inside a git repository');
+    return EXIT.USAGE;
+  }
+  const repoRoot = root.stdout.trim();
+
+  // Status check.
+  const status = sh(['git', 'status', '--porcelain'], { cwd: repoRoot });
+  if (!status.ok) return EXIT.CDP_ERROR;
+  const dirty = status.stdout.trim().length > 0;
+
+  if (!dirty) {
+    console.log('ghax ship: working tree clean — nothing to commit');
+  } else {
+    console.log(status.stdout);
+  }
+
+  // Typecheck + build (skippable).
+  if (!skipCheck) {
+    console.log('→ typecheck');
+    const tc = sh(['bun', 'run', 'typecheck'], { cwd: repoRoot });
+    if (!tc.ok) {
+      console.error(tc.stderr);
+      return EXIT.USAGE;
+    }
+  }
+  if (!skipBuild) {
+    console.log('→ build');
+    const bld = sh(['bun', 'run', 'build'], { cwd: repoRoot });
+    if (!bld.ok) {
+      console.error(bld.stderr);
+      return EXIT.USAGE;
+    }
+  }
+
+  if (dry) {
+    console.log('(dry-run — stopping before git mutations)');
+    return EXIT.OK;
+  }
+
+  // Stage + commit only if dirty.
+  if (dirty) {
+    sh(['git', 'add', '-A'], { cwd: repoRoot });
+    const commitArgs = ['git', 'commit'];
+    if (msg) commitArgs.push('--message', msg);
+    else commitArgs.push('--message', `ghax ship ${new Date().toISOString()}`);
+    const c = sh(commitArgs, { cwd: repoRoot });
+    if (!c.ok) {
+      console.error(c.stderr || c.stdout);
+      return EXIT.USAGE;
+    }
+    console.log(c.stdout.split('\n').slice(0, 3).join('\n'));
+  }
+
+  // Determine current branch.
+  const branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot }).stdout.trim();
+  const isMain = branch === 'main' || branch === 'master';
+
+  // Push.
+  console.log(`→ push origin ${branch}`);
+  const push = sh(['git', 'push', '-u', 'origin', branch], { cwd: repoRoot });
+  if (!push.ok) {
+    console.error(push.stderr || push.stdout);
+    return EXIT.CDP_ERROR;
+  }
+  console.log((push.stderr || push.stdout).trim());
+
+  // PR creation (only off main, gh must be available).
+  if (!skipPr && !isMain) {
+    const ghProbe = sh(['gh', '--version'], { allowFailure: true });
+    if (!ghProbe.ok) {
+      console.error('ghax ship: gh CLI not found — skipping PR step (--no-pr to silence)');
+    } else {
+      console.log('→ gh pr create --fill');
+      const pr = sh(['gh', 'pr', 'create', '--fill'], { cwd: repoRoot, allowFailure: true });
+      if (!pr.ok) {
+        if (/already exists/.test(pr.stderr)) {
+          const view = sh(['gh', 'pr', 'view', '--json', 'url', '--jq', '.url'], { cwd: repoRoot, allowFailure: true });
+          if (view.ok) console.log(`PR already exists: ${view.stdout.trim()}`);
+        } else {
+          console.error(pr.stderr || pr.stdout);
+          return EXIT.CDP_ERROR;
+        }
+      } else {
+        console.log(pr.stdout.trim());
+      }
+    }
+  }
+
+  return EXIT.OK;
+}
+
+// ─── ghax canary ──────────────────────────────────────────────
+//
+// Keep attaching, polling a URL every interval seconds. Each cycle
+// snapshots, captures console errors, and records HTTP failures. Writes
+// a rolling log to .ghax/canary-<host>.log, plus a structured JSON
+// report on exit (or every --report-every cycles).
+
+interface CanaryCycle {
+  at: string;
+  url: string;
+  ok: boolean;
+  loadMs: number;
+  consoleErrors: number;
+  failedRequests: number;
+  notes?: string[];
+}
+
+async function cmdCanary(parsed: ParsedArgs): Promise<number> {
+  const url = parsed.positional[0];
+  if (!url) {
+    console.error('Usage: ghax canary <url> [--interval 60] [--max 3600] [--out <report.json>]');
+    return EXIT.USAGE;
+  }
+  const intervalSec = parsed.flags.interval ? Number(parsed.flags.interval) : 60;
+  const maxSec = parsed.flags.max ? Number(parsed.flags.max) : 3600;
+  const outPath = (parsed.flags.out as string | undefined) ?? null;
+  const failFast = Boolean(parsed.flags['fail-fast']);
+  const cfg = resolveConfig();
+  const logPath = `${cfg.stateDir}/canary-${new URL(url).hostname.replace(/[^a-z0-9.-]/gi, '_')}.log`;
+
+  return withDaemon(async (port) => {
+    const startedAt = Date.now();
+    const cycles: CanaryCycle[] = [];
+    let aborted = false;
+    const onInt = () => {
+      aborted = true;
+      console.log('\n(interrupted — writing partial report)');
+    };
+    process.on('SIGINT', onInt);
+
+    ensureStateDir(cfg);
+
+    while (!aborted && Date.now() - startedAt < maxSec * 1000) {
+      const cycleStart = Date.now();
+      const cycle: CanaryCycle = {
+        at: new Date(cycleStart).toISOString(),
+        url,
+        ok: true,
+        loadMs: 0,
+        consoleErrors: 0,
+        failedRequests: 0,
+      };
+      try {
+        const nav = (await rpc(port, 'goto', [url])) as { url: string };
+        await new Promise((r) => setTimeout(r, 400));
+        cycle.loadMs = Date.now() - cycleStart;
+        if (nav.url !== url && !nav.url.startsWith(url)) {
+          cycle.notes = [`redirected to ${nav.url}`];
+        }
+        const cErr = (await rpc(port, 'console', [], { last: 500 })) as Array<{ level: string; timestamp: number }>;
+        cycle.consoleErrors = cErr.filter((e) => e.level === 'error' && e.timestamp >= cycleStart).length;
+        const nErr = (await rpc(port, 'network', [], { last: 500 })) as Array<{ status?: number; timestamp: number }>;
+        cycle.failedRequests = nErr.filter((e) => e.timestamp >= cycleStart && e.status !== undefined && e.status >= 400).length;
+        cycle.ok = cycle.consoleErrors === 0 && cycle.failedRequests === 0;
+      } catch (err: any) {
+        cycle.ok = false;
+        cycle.notes = [`rpc error: ${err.message}`];
+      }
+      cycles.push(cycle);
+      const line = `[${cycle.at}] ${cycle.ok ? 'OK' : 'FAIL'} ${url} load=${cycle.loadMs}ms console=${cycle.consoleErrors} net=${cycle.failedRequests}${cycle.notes ? ' — ' + cycle.notes.join(', ') : ''}`;
+      console.log(line);
+      try {
+        fs.appendFileSync(logPath, line + '\n');
+      } catch {
+        // best-effort
+      }
+      if (!cycle.ok && failFast) {
+        aborted = true;
+        break;
+      }
+      if (aborted) break;
+      // Sleep in small increments so SIGINT is responsive.
+      const sleepUntil = Date.now() + intervalSec * 1000;
+      while (!aborted && Date.now() < sleepUntil) {
+        await new Promise((r) => setTimeout(r, Math.min(250, sleepUntil - Date.now())));
+      }
+    }
+
+    process.removeListener('SIGINT', onInt);
+    const report = {
+      url,
+      startedAt: new Date(startedAt).toISOString(),
+      endedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      cycles,
+      okCycles: cycles.filter((c) => c.ok).length,
+      failCycles: cycles.filter((c) => !c.ok).length,
+    };
+    if (outPath) {
+      fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+      console.log(`report → ${outPath}`);
+    }
+    console.log(`canary done — ${report.okCycles}/${cycles.length} cycles ok`);
+    return report.failCycles > 0 ? EXIT.CDP_ERROR : EXIT.OK;
+  });
+}
+
+// ─── ghax review ──────────────────────────────────────────────
+//
+// Emit a Claude-ready review prompt wrapping the branch's diff vs a base.
+// No API calls — stdout only, user pipes to claude or pastes.
+
+async function cmdReview(parsed: ParsedArgs): Promise<number> {
+  const base = (parsed.flags.base as string | undefined) ?? 'origin/main';
+  const rootCmd = sh(['git', 'rev-parse', '--show-toplevel'], { allowFailure: true });
+  if (!rootCmd.ok) {
+    console.error('ghax review: not inside a git repository');
+    return EXIT.USAGE;
+  }
+  const repoRoot = rootCmd.stdout.trim();
+  const branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot }).stdout.trim();
+  const diff = sh(['git', 'diff', `${base}...HEAD`], { cwd: repoRoot });
+  if (!diff.ok) {
+    console.error(diff.stderr);
+    return EXIT.USAGE;
+  }
+  if (!diff.stdout.trim()) {
+    console.error(`ghax review: no diff between ${base} and ${branch}`);
+    return EXIT.OK;
+  }
+
+  const log = sh(['git', 'log', '--oneline', `${base}..HEAD`], { cwd: repoRoot });
+
+  if (parsed.flags.diff) {
+    console.log(diff.stdout);
+    return EXIT.OK;
+  }
+
+  const lines = [
+    `# Code review request`,
+    ``,
+    `**Branch:** \`${branch}\` (base: \`${base}\`)`,
+    ``,
+    `## Commits`,
+    ``,
+    '```',
+    log.stdout.trim() || '(no commits on this branch)',
+    '```',
+    ``,
+    `## Instructions`,
+    ``,
+    `Review the diff below. Call out:`,
+    ``,
+    `- Correctness bugs — off-by-ones, null-deref, race conditions, wrong API usage.`,
+    `- Security — injection, path traversal, unsafe deserialisation, secret leakage.`,
+    `- Resource leaks — unclosed sockets, forgotten timers, unbounded caches.`,
+    `- API / contract changes that callers will need to adapt to.`,
+    `- Anything that looks intentionally hacky or temporary.`,
+    ``,
+    `Do NOT pad the review with style nits unless they affect clarity.`,
+    `If the diff is clean, say so plainly.`,
+    ``,
+    `## Diff`,
+    ``,
+    '```diff',
+    diff.stdout,
+    '```',
+  ];
+  console.log(lines.join('\n'));
+  return EXIT.OK;
+}
+
+// ─── ghax pair ────────────────────────────────────────────────
+//
+// Share ghax with a remote agent. v0 is deliberately conservative:
+// print setup instructions for the SSH-tunnel path (no auth changes
+// required — the remote side reaches into localhost via a forwarded
+// port). A proper multi-tenant token-auth mode is a v0.5 item and
+// will alter the daemon's security surface, which wants its own
+// careful session.
+//
+// For the SSH path, the user runs:
+//
+//   ssh -N -L <localport>:127.0.0.1:<daemonport> remote-host
+//
+// …then the remote agent talks to 127.0.0.1:<localport> on its side
+// as if it were local. No daemon changes needed.
+
+async function cmdPair(parsed: ParsedArgs): Promise<number> {
+  const sub = parsed.positional[0] ?? 'status';
+  switch (sub) {
+    case 'status':
+    case 'info': {
+      const state = readState(cfg);
+      if (!state) {
+        console.log('not attached — run `ghax attach` first');
+        return EXIT.NOT_ATTACHED;
+      }
+      const lines = [
+        'ghax pair — v0 (SSH-tunnel mode)',
+        '',
+        `Local daemon: 127.0.0.1:${state.port} (pid ${state.pid})`,
+        `Browser:      ${state.browserKind}`,
+        '',
+        'To share with a remote agent:',
+        '',
+        `  # On the machine where the remote agent runs, tunnel in:`,
+        `  ssh -N -L ${state.port}:127.0.0.1:${state.port} $(whoami)@<this-host>`,
+        '',
+        `  # Then on that remote agent's machine, point its ghax CLI at`,
+        `  # the tunneled port — standard localhost RPC, no auth changes.`,
+        '',
+        'A proper multi-tenant token-auth mode is deferred to v0.5.',
+        'Raised because:',
+        '  - RPC surface is large; any bug is now remotely exploitable.',
+        '  - We need URL allowlists per token.',
+        '  - Need to decide bind semantics (0.0.0.0 vs Tailscale ts0).',
+      ];
+      console.log(lines.join('\n'));
+      return EXIT.OK;
+    }
+    default:
+      console.error(`ghax pair: unknown sub-command ${sub}`);
+      console.error('       ghax pair status | info');
+      return EXIT.USAGE;
+  }
 }
 
 async function crawlUrls(root: string, opts: { depth: number; limit: number }): Promise<string[]> {

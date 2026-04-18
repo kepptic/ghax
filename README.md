@@ -176,6 +176,17 @@ qa --url <u> [--url <u> ...] [--urls a,b,c]
    [--crawl <root> [--depth N] [--limit N]]
    [--out report.json] [--screenshots <dir>] [--no-screenshots]
    [--annotate] [--gif <out.gif>]
+profile [--duration sec] [--heap] [--extension <ext-id>]
+diff-state <before.json> <after.json>
+canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
+ship [--message "..."] [--no-check] [--no-build] [--no-pr] [--dry-run]
+review [--base origin/main] [--diff]
+pair [status]
+
+# Live tail (SSE)
+console --follow
+network --follow
+ext sw <id> logs --follow
 ```
 
 Add `--json` on any command for machine-readable output.
@@ -189,8 +200,10 @@ See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
 - **v0.3** — hot-reload, shadow-DOM, gif, Claude Code skills, CI. ✓
 - **v1.0** — internal hardening: smoke tests, live hot-reload
   verification, `--load-extension` pass-through. ✓
-- **v0.4** (current) — orchestrated tools on top of browse. `ghax qa`
-  shipped; `ghax profile` next.
+- **v0.4** — orchestrated layer (`qa`, `profile`, `diff-state`,
+  `ship`, `canary`, `review`, `pair`) + SSE tail mode on console /
+  network / ext sw logs + `ext popup` / `ext options` / `ext message`. ✓
+- **v0.5** — multi-tenant token-auth pair mode, skill-eval harness.
 - Public release (npm publish, docs site, announce) paused by decision.
 
 ## Security
