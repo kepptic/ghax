@@ -141,65 +141,108 @@ export async function snapshot(
 
   // Auto-enable cursor scan when interactive mode is on — many React apps
   // (Radix, Headless UI) build popovers from plain divs with cursor:pointer.
+  // The scan walks both light DOM and any open shadow roots it encounters,
+  // emitting Playwright-compatible pierce selectors (`host >>> inner`) when
+  // it crosses a shadow boundary.
   const wantCursor = opts.cursorInteractive || opts.interactive;
   if (wantCursor) {
     try {
       const cursorElements = await target.evaluate(() => {
         const STANDARD = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'DETAILS']);
         const results: Array<{ selector: string; text: string; reason: string }> = [];
-        for (const el of Array.from(document.querySelectorAll('*'))) {
-          if (STANDARD.has(el.tagName)) continue;
-          if (!(el as HTMLElement).offsetParent && el.tagName !== 'BODY') continue;
+
+        // Build a selector path for an element that may be inside nested open
+        // shadow roots. Each shadow boundary becomes a `>>>` in the output.
+        const selectorFor = (el: Element): string => {
+          const chunks: string[] = [];
+          let current: Element | null = el;
+          while (current && current !== document.documentElement) {
+            const segment: string[] = [];
+            let walker: Element | null = current;
+            // Walk up through the current shadow tree (or light tree) until
+            // we hit a shadow root or the document root.
+            while (walker) {
+              const parent: Element | null = walker.parentElement;
+              if (!parent) {
+                // parentElement is null across a shadow boundary; fall through
+                // to handle the shadow root separately.
+                break;
+              }
+              const siblings = Array.from(parent.children);
+              const idx = siblings.indexOf(walker) + 1;
+              segment.unshift(`${walker.tagName.toLowerCase()}:nth-child(${idx})`);
+              walker = parent;
+            }
+            chunks.unshift(segment.join(' > '));
+            // Cross the shadow boundary if this node lives in a shadow root.
+            const root = current.getRootNode();
+            if (root instanceof ShadowRoot && root.host) {
+              current = root.host;
+            } else {
+              current = null;
+            }
+          }
+          return chunks.join(' >>> ');
+        };
+
+        const isInFloating = (el: Element): boolean => {
+          let p: Element | null = el;
+          while (p && p !== document.documentElement) {
+            const ps = getComputedStyle(p);
+            const floating = (ps.position === 'fixed' || ps.position === 'absolute') &&
+              parseInt(ps.zIndex || '0', 10) >= 10;
+            const portal = p.hasAttribute('data-radix-popper-content-wrapper') ||
+              p.hasAttribute('data-radix-portal') ||
+              p.hasAttribute('data-floating-ui-portal') ||
+              p.getAttribute('role') === 'listbox' ||
+              p.getAttribute('role') === 'menu';
+            if (floating || portal) return true;
+            p = p.parentElement;
+          }
+          return false;
+        };
+
+        const consider = (el: Element, inShadow: boolean) => {
+          if (STANDARD.has(el.tagName)) return;
+          if (!(el as HTMLElement).offsetParent && el.tagName !== 'BODY') return;
           const style = getComputedStyle(el);
           const cursorPointer = style.cursor === 'pointer';
           const onclick = el.hasAttribute('onclick');
           const tabindex = el.hasAttribute('tabindex') && parseInt(el.getAttribute('tabindex')!, 10) >= 0;
           const hasRole = el.hasAttribute('role');
-
-          const inFloating = (() => {
-            let p: Element | null = el;
-            while (p && p !== document.documentElement) {
-              const ps = getComputedStyle(p);
-              const floating = (ps.position === 'fixed' || ps.position === 'absolute') &&
-                parseInt(ps.zIndex || '0', 10) >= 10;
-              const portal = p.hasAttribute('data-radix-popper-content-wrapper') ||
-                p.hasAttribute('data-radix-portal') ||
-                p.hasAttribute('data-floating-ui-portal') ||
-                p.getAttribute('role') === 'listbox' ||
-                p.getAttribute('role') === 'menu';
-              if (floating || portal) return true;
-              p = p.parentElement;
-            }
-            return false;
-          })();
+          const inFloating = isInFloating(el);
 
           if (!cursorPointer && !onclick && !tabindex) {
             if (inFloating && hasRole) {
               const r = el.getAttribute('role');
-              if (!['option', 'menuitem', 'menuitemcheckbox', 'menuitemradio'].includes(r || '')) continue;
-            } else continue;
+              if (!['option', 'menuitem', 'menuitemcheckbox', 'menuitemradio'].includes(r || '')) return;
+            } else return;
           }
-          if (hasRole && !inFloating) continue;
+          if (hasRole && !inFloating) return;
 
-          const parts: string[] = [];
-          let cur: Element | null = el;
-          while (cur && cur !== document.documentElement) {
-            const par: Element | null = cur.parentElement;
-            if (!par) break;
-            const siblings = Array.from(par.children);
-            const idx = siblings.indexOf(cur) + 1;
-            parts.unshift(`${cur.tagName.toLowerCase()}:nth-child(${idx})`);
-            cur = par;
-          }
           const text = (el as HTMLElement).innerText?.trim().slice(0, 80) || el.tagName.toLowerCase();
           const reasons: string[] = [];
+          if (inShadow) reasons.push('shadow');
           if (inFloating) reasons.push('popover');
           if (cursorPointer) reasons.push('cursor:pointer');
           if (onclick) reasons.push('onclick');
           if (tabindex) reasons.push(`tabindex=${el.getAttribute('tabindex')}`);
           if (hasRole) reasons.push(`role=${el.getAttribute('role')}`);
-          results.push({ selector: parts.join(' > '), text, reason: reasons.join(', ') });
-        }
+          results.push({ selector: selectorFor(el), text, reason: reasons.join(', ') });
+        };
+
+        // Recursive walker: visits every element in the document, descending
+        // into open shadow roots (closed shadow roots are deliberately skipped
+        // — `el.shadowRoot` is null for closed mode, and we can't force entry).
+        const walk = (root: Document | ShadowRoot, inShadow: boolean) => {
+          for (const el of Array.from(root.querySelectorAll('*'))) {
+            consider(el, inShadow);
+            const sr = (el as HTMLElement).shadowRoot;
+            if (sr) walk(sr, true);
+          }
+        };
+        walk(document, false);
+
         return results;
       });
 
