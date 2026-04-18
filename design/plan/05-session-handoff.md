@@ -84,24 +84,32 @@ ghax/
   profile. Plan is to investigate LaunchServices + keychain entitlements
   on macOS before attempting to copy the real Edge profile.
 
-## What's next (v1.0 path)
+## Direction locked in 2026-04-18
 
-1. **Decide repo visibility + org.** Currently private under
-   `kepptic`. For open-source release, flip to public — optionally
-   re-home to a personal account or a dedicated `ghax` org. User
-   decision.
-2. **Publish to npm.** Need to decide: publish `@ghax/cli` under the
-   `ghax` org on npm (safer) or `ghax` unscoped (user already verified
-   both are free). Set up an NPM_TOKEN secret in GitHub Actions and a
-   release workflow triggered on tags.
-3. **Smoke-test harness.** Tiny `test/smoke.ts` that attaches, runs a
-   handful of reads + writes, detaches. Fold into CI so we catch
-   daemon-boot regressions before they hit a human.
-4. **Docs site.** GitHub Pages or `ghax.dev`. Can be almost-entirely
-   auto-generated from the in-tree markdown + README.
-5. **Announce.** HN / X / dev.to. Point at the MV3 hot-reload loop and
-   the @ref-driven snapshot story as the differentiator from
-   gstack browse and playwright-cli.
+- **Repo stays private.** Remains under `kepptic` on GitHub.
+- **Not publishing to npm yet.** Binary distribution via `bun run build`
+  + the compiled `dist/ghax` is sufficient for internal use.
+
+Open-source release (public repo, `@ghax/cli` on npm, docs site,
+announce) is **paused**. The scaffolding we already laid down
+(LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, CHANGELOG, CI) stays — it
+makes the eventual flip cheap.
+
+## What's next (internal hardening only)
+
+1. **Smoke-test harness.** `test/smoke.ts` that attaches, runs a
+   handful of reads + writes, detaches. Wire into CI so we catch
+   daemon-boot regressions before they hit a human. Currently the CI
+   only typechecks + compiles — it doesn't verify the daemon actually
+   starts.
+2. **Live hot-reload verification.** One-shot: build a throwaway
+   extension that declares `content_scripts`, install it in Edge,
+   run `ghax ext hot-reload <id>` against it, confirm the re-inject
+   path works. Never run this against a Beam/Autotask/KaseyaOne tab
+   mid-work — it's fine functionally but it disturbs the running
+   extension's state.
+3. **Real-profile attach research.** Still on the wishlist. Not blocking
+   anything.
 
 ## How to get running in a new session
 

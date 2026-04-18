@@ -170,12 +170,23 @@ hot-reload` under "after modifying a Chrome extension" with the one-line
 recipe `ghax ext hot-reload <id>`. Claude will reach for it the moment it
 sees `pnpm --filter ... build` complete on an extension target.
 
-## v1.0 — open source release
+## v1.0 — internal hardening (open source release paused)
+
+Current stance (2026-04-18): **repo stays private under `kepptic`**, **no
+npm publish**. Everything below is internal-use hardening; the public
+release track is on hold.
 
 - [x] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
 - [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
-- [ ] Make repo public, re-export under a personal / kepptic org decision
-- [ ] `bunx ghax` zero-install usage (publish `@ghax/cli` to npm)
+- [ ] `test/smoke.ts` — attach → handful of reads + writes → detach,
+      wired into CI
+- [ ] Live smoke-test of `ghax ext hot-reload` on a throwaway extension
+      (never run against a live Beam session mid-work)
+
+### Paused (revisit when ready to open-source)
+
+- [ ] Flip repo to public
+- [ ] `bunx ghax` zero-install (`npm publish @ghax/cli`)
 - [ ] Docs site — `ghax.dev` or GitHub Pages
 - [ ] v1.0 tag + announce (HN, X, dev.to)
 
