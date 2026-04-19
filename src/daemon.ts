@@ -131,29 +131,68 @@ async function activePage(ctx: Ctx): Promise<Page> {
 }
 
 const BODY_CAP_BYTES = 32 * 1024;
+// Cap concurrent body reads so a traffic burst doesn't blow memory —
+// each pending read buffers the full response before we truncate, and
+// large images/video matched by an overly-broad glob would pile up. 8
+// is plenty for interactive API debug; bursts past this queue.
+const BODY_CAP_CONCURRENCY = 8;
+let bodyInflight = 0;
+const bodyQueue: Array<() => void> = [];
+
+function acquireBodySlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const release = () => {
+      bodyInflight--;
+      const next = bodyQueue.shift();
+      if (next) next();
+    };
+    const start = () => {
+      bodyInflight++;
+      resolve(release);
+    };
+    if (bodyInflight < BODY_CAP_CONCURRENCY) start();
+    else bodyQueue.push(start);
+  });
+}
 
 /**
- * Fire-and-forget body capture. We call this from the sync `response`
- * handler and don't await it — the event handler returns immediately,
- * and the body lands on the entry whenever Playwright finishes reading
- * it. Bodies beyond BODY_CAP_BYTES get truncated with a marker so large
- * downloads don't blow the rolling buffer memory.
+ * Fire-and-forget body capture. Called from the sync `response` handler;
+ * returns immediately. The body lands on the entry whenever Playwright
+ * finishes reading it. Bodies beyond BODY_CAP_BYTES truncate with a
+ * marker. A small semaphore limits concurrent reads so we don't buffer
+ * hundreds of large responses in RAM during a traffic spike.
  */
 function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Response): void {
-  resp
-    .text()
-    .then((body) => {
-      if (body.length > BODY_CAP_BYTES) {
-        entry.responseBody = body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`;
-        entry.responseBodyTruncated = true;
-      } else {
-        entry.responseBody = body;
-      }
-    })
-    .catch(() => {
-      // Response body may be unavailable (opaque CORS, navigation frame
-      // already gone, etc.). Leave the field undefined; not a capture error.
-    });
+  acquireBodySlot().then((release) => {
+    resp
+      .text()
+      .then((body) => {
+        if (body.length > BODY_CAP_BYTES) {
+          entry.responseBody = body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`;
+          entry.responseBodyTruncated = true;
+        } else {
+          entry.responseBody = body;
+        }
+      })
+      .catch(() => {
+        // Response body may be unavailable (opaque CORS, navigation frame
+        // already gone, etc.). Leave the field undefined; not an error.
+      })
+      .finally(release);
+  });
+}
+
+/**
+ * Convert a simple glob (just `*` wildcards) to an anchored RegExp.
+ * Matches full strings; `*` expands to `.*`. No support for `**`
+ * (would be identical to `*` under this semantics anyway) or `?`.
+ */
+function globToRegExp(pattern: string): RegExp {
+  if (pattern === '*' || pattern === '') return /.*/;
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*');
+  return new RegExp('^' + escaped + '$');
 }
 
 async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
@@ -208,14 +247,9 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
         e.responseAt = Date.now();
         e.duration = e.responseAt - e.timestamp;
 
-        // Body capture (opt-in at attach time via GHAX_CAPTURE_BODIES).
-        // Async, best-effort: we don't block the response event, and we
-        // ignore failures (bodies for opaque cross-origin responses,
-        // navigation frames already gone, etc.).
         if (ctx.captureBodiesRe && ctx.captureBodiesRe.test(resp.url())) {
           const ct = (resp.headers()['content-type'] ?? '').toLowerCase();
-          const textLike = /json|text|javascript|xml|html|css|graphql/.test(ct);
-          if (textLike) {
+          if (/json|text|javascript|xml|html|css|graphql/.test(ct)) {
             captureBodyAsync(e, resp);
           }
         }
@@ -496,28 +530,47 @@ register('xpath', async (ctx, args, opts) => {
   if (!expr) throw new Error('Usage: xpath <expression>');
   const limit = opts.limit ? Number(opts.limit) : 50;
   const page = await activePage(ctx);
-  const locator = page.locator(`xpath=${expr}`);
-  const count = await locator.count();
-  const matches: Array<{
-    index: number;
-    tag: string;
-    text: string;
-    box: { x: number; y: number; width: number; height: number } | null;
-  }> = [];
-  for (let i = 0; i < Math.min(count, limit); i++) {
-    const el = locator.nth(i);
-    const [text, tag, box] = await Promise.all([
-      el.textContent().catch(() => ''),
-      el.evaluate((node) => (node as Element).tagName?.toLowerCase() ?? 'node').catch(() => '?'),
-      el.boundingBox().catch(() => null),
-    ]);
-    matches.push({
-      index: i,
-      tag,
-      text: (text ?? '').trim().replace(/\s+/g, ' ').slice(0, 120),
-      box,
-    });
-  }
+  // Single page.evaluate instead of per-match CDP round-trips — 50+
+  // locator.nth()/textContent()/boundingBox()/evaluate() calls collapse
+  // into one. Uses document.evaluate directly; getBoundingClientRect is
+  // viewport-relative, same as Playwright's locator.boundingBox().
+  const { count, matches } = await page.evaluate(
+    ({ expr, limit }: { expr: string; limit: number }) => {
+      const result = document.evaluate(
+        expr,
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
+      );
+      const count = result.snapshotLength;
+      const matches: Array<{
+        index: number;
+        tag: string;
+        text: string;
+        box: { x: number; y: number; width: number; height: number } | null;
+      }> = [];
+      for (let i = 0; i < Math.min(count, limit); i++) {
+        const node = result.snapshotItem(i);
+        if (!node) continue;
+        const el = node as Element;
+        const rect = typeof (el as Element).getBoundingClientRect === 'function'
+          ? (el as Element).getBoundingClientRect()
+          : null;
+        const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
+        matches.push({
+          index: i,
+          tag: (el.tagName ?? 'node').toLowerCase(),
+          text,
+          box: rect && rect.width > 0 && rect.height > 0
+            ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+            : null,
+        });
+      }
+      return { count, matches };
+    },
+    { expr, limit },
+  );
   return { count, returned: matches.length, matches };
 });
 
@@ -1953,17 +2006,7 @@ async function main() {
     consoleBuf: new CircularBuffer<ConsoleEntry>(BUFFER_CAP),
     networkBuf: new CircularBuffer<NetworkEntry>(BUFFER_CAP),
     sourceMapCache: new SourceMapCache(),
-    captureBodiesRe: captureBodiesPattern
-      ? captureBodiesPattern === '*' || captureBodiesPattern === ''
-        ? /.*/
-        : new RegExp(
-            '^' +
-              captureBodiesPattern
-                .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-                .replace(/\*/g, '.*') +
-              '$',
-          )
-      : null,
+    captureBodiesRe: captureBodiesPattern !== null ? globToRegExp(captureBodiesPattern) : null,
     activePageId: null,
     refs: new Map(),
     instrumented: new WeakSet<Page>(),
