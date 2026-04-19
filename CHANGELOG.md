@@ -8,6 +8,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ghax shell` — interactive REPL. Reads commands from stdin, tokenises
+  with shell-ish quoting (single/double quotes, backslash escapes),
+  re-enters the main dispatcher per line. One process for the whole
+  session, so the per-command Bun spawn cost goes away. Measured 1.8x
+  faster for 10-command batches (138ms/cmd vs 247ms/cmd for separate
+  invocations). Works as a pipe (`cat script.txt | ghax shell`) or
+  interactively (TTY prompt, history, Ctrl-D to exit). `exit`/`quit`
+  stop the loop; `#` lines are comments.
+- Disconnect recovery. The daemon now listens for
+  `browser.on('disconnected')` and self-shuts cleanly when the user's
+  browser quits or a scratch browser crashes. State file gets cleared,
+  next `ghax attach` is fresh. CLI-side, "browser has been closed" /
+  "Target page has been closed" errors get rewritten to
+  "browser has disconnected — run `ghax attach` to reconnect" instead
+  of surfacing as a raw Playwright stack trace.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>]
   [--shot <path>]` — live-injection fix-preview. Composable wrapper over
   `page.evaluate` + `page.screenshot` for the "mutate the live page,
