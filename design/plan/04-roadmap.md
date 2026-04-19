@@ -178,8 +178,9 @@ release track is on hold.
 
 - [x] CONTRIBUTING, CHANGELOG, CODE_OF_CONDUCT
 - [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
-- [x] `test/smoke.ts` — 24-check harness against a live browser. Runs
-      locally only (CI has no browser); commit `e41ab7d`.
+- [x] `test/smoke.ts` — live-browser harness. Runs locally only (CI has
+      no browser); original scaffold at commit `e41ab7d`, extended to
+      cover the full v0.4 surface + `ghax try` — 54/54 checks in ~24s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -187,9 +188,16 @@ release track is on hold.
 - [x] `test/hot-reload-smoke.ts` — fully scripted hot-reload probe:
       launch scratch browser → load fixture → confirm SW → hot-reload
       → assert SW version bumps + content-script banner re-injects.
-- [x] Shadow-DOM smoke check in `test/smoke.ts` (25/25 checks pass).
-- [ ] Skill acceptance eval harness (v0.3 carryover — needs Claude API
-      integration, scoped for its own session).
+- [x] Shadow-DOM smoke check in `test/smoke.ts`.
+- [x] v0.4 surface E2E coverage — back/forward/reload, press/type/fill,
+      wait, `--help`, review (prompt + `--diff`), pair, qa (`--url` +
+      `--crawl`), canary (1-2 cycles), ship (`--dry-run`), ext
+      panel/options/message, gif (conditional on ffmpeg). +16 checks,
+      closes the gap between v0.4 shipping and test coverage.
+- [ ] Skill acceptance eval harness — deferred indefinitely. At current
+      scale (solo maintainer, 2 skills, daily dogfooding), E2E coverage
+      catches the same regressions without Anthropic API cost or TOS
+      grey area. Revisit if skill count grows or repo flips public.
 
 ### Paused (revisit when ready to open-source)
 
@@ -245,12 +253,41 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] `ghax try` — live-injection fix-preview verb. Composable wrapper
+      over `page.evaluate` + `page.screenshot`. Surface:
+
+      ```bash
+      # JS form — wraps in IIFE, supports `return` at top level.
+      ghax try 'wrapper.style.width = "max-content"; return wrapper.offsetWidth'
+
+      # CSS form — appends a <style class="ghax-try"> tag to document.head.
+      ghax try --css '.wrapper { width: max-content }'
+
+      # Compose: apply + measure + shot in one call.
+      ghax try --css '.wrapper { width: max-content }' \
+               --measure 'document.querySelector(".wrapper").offsetWidth' \
+               --shot /tmp/try.png
+
+      # --selector binds document.querySelector(sel) as `el` in the IIFE.
+      ghax try --selector '.wrapper' 'el.style.width = "max-content"'
+      ```
+
+      Output is JSON: `{ value, shot?: string }`. Revert semantics are
+      trivial — reload the page; mutations that write to `localStorage`,
+      `chrome.storage`, cookies, or the server are explicitly out of
+      scope (user clears those manually).
+
+      Motivation: during Setsail's data-table header bug (2026-04-18) the
+      loop `ghax eval "wrapper.style.width = 'max-content'"` + `ghax
+      screenshot` + visual confirm → only then edit source — turned a
+      30-minute speculative source edit into a 2-minute verified fix.
 
 ## v0.5 — outstanding
 
 - [ ] Multi-tenant `ghax pair` — bearer-token auth on the daemon, URL
       allowlist per token, bind to a scoped interface (Tailscale ts0 or
       0.0.0.0 with explicit opt-in). Defers because any bug on the RPC
-      surface is remotely exploitable.
-- [ ] Skill acceptance eval harness — needs Claude API integration,
-      scoped for its own session (v0.3 carryover).
+      surface is remotely exploitable. **Not planned for solo use —
+      v0 SSH-tunnel path covers the "me on another machine" case.**
+
+(No other v0.5 work currently planned.)

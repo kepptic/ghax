@@ -445,6 +445,7 @@ Tab:
   goto <url>
   back | forward | reload
   eval <js>
+  try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
   screenshot [<@ref|selector>] [--path <p>] [--fullPage]
@@ -545,6 +546,7 @@ async function main(): Promise<number> {
       case 'tab':
       case 'goto':
       case 'eval':
+      case 'try':
       case 'click':
       case 'press':
       case 'type':

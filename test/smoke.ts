@@ -1,5 +1,5 @@
 /**
- * ghax smoke test — drive a real running browser through the v0.1–v0.3
+ * ghax smoke test — drive a real running browser through the v0.1–v0.4
  * command surface and assert each step lands.
  *
  * Requirements:
@@ -13,7 +13,8 @@
  *
  * Deliberately non-destructive. Doesn't hot-reload anything, doesn't
  * write to chrome.storage of any real extension, doesn't use the
- * --launch path (which would spawn a fresh browser window).
+ * --launch path (which would spawn a fresh browser window). `ship` is
+ * exercised via --dry-run so no commits/pushes happen.
  */
 
 import * as fs from 'fs';
@@ -398,6 +399,249 @@ c('diff-state diffs two JSON files', async () => {
   assert(data.changed === 1 && data.added === 1, `diff counts off: ${JSON.stringify(data)}`);
   fs.unlinkSync(a);
   fs.unlinkSync(b);
+});
+
+// ─── v0.4 surface additions ─────────────────────────────────────
+
+c('--help lists the expected verbs', async () => {
+  const r = await run(['--help']);
+  for (const verb of ['attach', 'goto', 'snapshot', 'click', 'qa', 'ship', 'review', 'canary', 'pair', 'gif']) {
+    assert(r.stdout.includes(verb), `--help missing verb: ${verb}`);
+  }
+});
+
+c('back / forward / reload navigate history', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['goto', 'https://example.org']);
+  const here1 = (await run(['eval', 'location.hostname'])).stdout.trim();
+  assert(here1 === 'example.org', `expected example.org, got ${here1}`);
+  await run(['back']);
+  await run(['wait', '500']);
+  const here2 = (await run(['eval', 'location.hostname'])).stdout.trim();
+  assert(here2 === 'example.com', `back should land on example.com, got ${here2}`);
+  await run(['forward']);
+  await run(['wait', '500']);
+  const here3 = (await run(['eval', 'location.hostname'])).stdout.trim();
+  assert(here3 === 'example.org', `forward should land on example.org, got ${here3}`);
+  await run(['reload']);
+  await run(['wait', '500']);
+  const here4 = (await run(['eval', 'location.hostname'])).stdout.trim();
+  assert(here4 === 'example.org', `reload should stay on example.org, got ${here4}`);
+});
+
+c('wait <ms> pauses then returns', async () => {
+  const t0 = Date.now();
+  await run(['wait', '250']);
+  const elapsed = Date.now() - t0;
+  assert(elapsed >= 200, `wait 250 returned too fast: ${elapsed}ms`);
+});
+
+c('press sends a key to the focused element', async () => {
+  await run(['goto', 'data:text/html,<input id=i autofocus>']);
+  await run(['wait', '300']);
+  await run(['eval', 'document.getElementById("i").focus()']);
+  await run(['press', 'a']);
+  await run(['press', 'b']);
+  await run(['press', 'c']);
+  const val = (await run(['eval', 'document.getElementById("i").value'])).stdout.trim();
+  assert(val === 'abc' || val.endsWith('abc'), `press should produce abc, got ${JSON.stringify(val)}`);
+});
+
+c('type streams text into focused element', async () => {
+  await run(['goto', 'data:text/html,<input id=j autofocus>']);
+  await run(['wait', '300']);
+  await run(['eval', 'document.getElementById("j").focus()']);
+  await run(['type', 'hello']);
+  const val = (await run(['eval', 'document.getElementById("j").value'])).stdout.trim();
+  assert(val === 'hello' || val.endsWith('hello'), `type should produce hello, got ${JSON.stringify(val)}`);
+});
+
+c('fill writes into a resolved input', async () => {
+  await run(['goto', 'data:text/html,<input id=k>']);
+  await run(['wait', '300']);
+  await run(['fill', '#k', 'ghax-fill-value']);
+  const val = (await run(['eval', 'document.getElementById("k").value'])).stdout.trim();
+  assert(val === 'ghax-fill-value', `fill should produce ghax-fill-value, got ${JSON.stringify(val)}`);
+});
+
+c('pair status prints tunnel instructions while attached', async () => {
+  const r = await run(['pair']);
+  assert(/pair/i.test(r.stdout), `pair output missing header: ${r.stdout.slice(0, 120)}`);
+  assert(/ssh/i.test(r.stdout), `pair output should mention ssh: ${r.stdout.slice(0, 200)}`);
+  assert(/127\.0\.0\.1/.test(r.stdout), `pair output should mention localhost: ${r.stdout.slice(0, 200)}`);
+});
+
+c('review emits a Claude-ready prompt or exits cleanly on no-diff', async () => {
+  // `ghax review` vs origin/main. Either it has a diff (prints prompt) or it
+  // doesn't (prints "no diff" to stderr + exit 0). Both are acceptable shapes.
+  const r = await run(['review'], { allowFailure: true });
+  const out = r.stdout + r.stderr;
+  const hasPrompt = /# Code review request/.test(out) && /## Diff/.test(out);
+  const hasNoDiffNotice = /no diff/i.test(out);
+  assert(
+    hasPrompt || hasNoDiffNotice,
+    `review output neither a prompt nor a no-diff notice: ${out.slice(0, 200)}`,
+  );
+});
+
+c('review --diff falls back to raw diff output', async () => {
+  // Force a guaranteed diff by comparing HEAD to HEAD~1. Nearly all repos
+  // have at least one prior commit; if they don't, accept the no-diff path.
+  const hasPrior = Bun.spawnSync(['git', 'rev-parse', 'HEAD~1'], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+  if (!hasPrior) {
+    console.log('  (no HEAD~1 — skipping diff check)');
+    return;
+  }
+  const r = await run(['review', '--diff', '--base', 'HEAD~1'], { allowFailure: true });
+  // Raw diff should be either a unified diff or the no-diff stderr message.
+  assert(
+    /^(diff --git|index |---|\+\+\+)/m.test(r.stdout) || /no diff/i.test(r.stderr),
+    `review --diff output unexpected: ${r.stdout.slice(0, 120)} / ${r.stderr.slice(0, 120)}`,
+  );
+});
+
+c('qa --url writes a structured JSON report', async () => {
+  const outPath = `/tmp/ghax-qa-smoke-${Date.now()}.json`;
+  await run(['qa', '--url', 'https://example.com', '--out', outPath, '--no-screenshots']);
+  assert(fs.existsSync(outPath), `qa report missing: ${outPath}`);
+  const report = JSON.parse(fs.readFileSync(outPath, 'utf-8')) as {
+    urlsAttempted: number;
+    urlsOk: number;
+    pages: Array<{ url: string; refCount: number }>;
+  };
+  assert(report.urlsAttempted === 1, `qa urlsAttempted: ${report.urlsAttempted}`);
+  assert(report.urlsOk === 1, `qa urlsOk: ${report.urlsOk}`);
+  assert(report.pages.length === 1, `qa pages: ${report.pages.length}`);
+  assert(report.pages[0].url === 'https://example.com', `qa page url: ${report.pages[0].url}`);
+  fs.unlinkSync(outPath);
+});
+
+c('qa --crawl discovers and visits URLs under a root', async () => {
+  const outPath = `/tmp/ghax-qa-crawl-${Date.now()}.json`;
+  // example.com has one page; crawl surfaces just the root. We assert the
+  // crawl line fires and the report has at least one page — enough to prove
+  // the crawl path is wired up without depending on an N-page fixture.
+  const r = await run(['qa', '--crawl', 'https://example.com', '--limit', '3', '--out', outPath, '--no-screenshots']);
+  assert(/crawl discovered/i.test(r.stdout), `expected crawl line in stdout: ${r.stdout.slice(0, 200)}`);
+  assert(fs.existsSync(outPath), `qa crawl report missing: ${outPath}`);
+  const report = JSON.parse(fs.readFileSync(outPath, 'utf-8')) as { urlsAttempted: number };
+  assert(report.urlsAttempted >= 1, `qa crawl urlsAttempted: ${report.urlsAttempted}`);
+  fs.unlinkSync(outPath);
+});
+
+c('canary runs 1+ cycles with short interval/max', async () => {
+  const outPath = `/tmp/ghax-canary-smoke-${Date.now()}.json`;
+  // interval=1 max=2 → at least one cycle, at most two.
+  const r = await run(['canary', 'https://example.com', '--interval', '1', '--max', '2', '--out', outPath], {
+    allowFailure: true, // exits non-zero if any cycle fails
+  });
+  assert(fs.existsSync(outPath), `canary report missing: ${outPath}`);
+  const report = JSON.parse(fs.readFileSync(outPath, 'utf-8')) as {
+    cycles: Array<{ ok: boolean }>;
+    okCycles: number;
+    failCycles: number;
+  };
+  assert(report.cycles.length >= 1, `canary cycles: ${report.cycles.length}`);
+  assert(/canary done/.test(r.stdout), `expected "canary done" line: ${r.stdout.slice(-200)}`);
+  fs.unlinkSync(outPath);
+});
+
+c('ship --dry-run stops before any git mutation', async () => {
+  // Safe: --dry-run, plus --no-check --no-build to avoid running the full
+  // toolchain just to prove the wiring works.
+  const r = await run(['ship', '--dry-run', '--no-check', '--no-build'], { allowFailure: true });
+  assert(/dry-run/.test(r.stdout), `ship --dry-run should mention dry-run: ${r.stdout.slice(0, 200)}`);
+});
+
+c('ext panel/options eval handle "no page open" cleanly', async () => {
+  const listRaw = await run(['ext', 'list', '--json']);
+  const exts = parseJson<Array<{ id: string }>>(listRaw.stdout);
+  if (exts.length === 0) {
+    console.log('  (no extensions — skipping ext panel/options)');
+    return;
+  }
+  for (const sub of ['panel', 'options'] as const) {
+    const r = await run(['ext', sub, exts[0].id, 'eval', '1+1'], { allowFailure: true });
+    assert(
+      r.exitCode === 0 || /no .* page open|No .* page|not open|undefined/i.test(r.stderr + r.stdout),
+      `ext ${sub} eval unexpected output: ${r.stdout}${r.stderr}`,
+    );
+  }
+});
+
+c('ext message rejects missing args with usage', async () => {
+  const r = await run(['ext', 'message'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'ext message with no args should exit non-zero');
+  assert(/Usage: ghax ext message/.test(r.stderr), `expected usage line: ${r.stderr.slice(0, 200)}`);
+});
+
+c('try --css injects a tagged <style> node', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '300']);
+  await run(['try', '--css', 'body { background: rgb(255, 0, 0) !important; }']);
+  const bg = (await run(['eval', 'getComputedStyle(document.body).backgroundColor'])).stdout.trim();
+  assert(bg === 'rgb(255, 0, 0)', `try --css should paint body red, got ${bg}`);
+  const styleCount = (await run(['eval', 'document.querySelectorAll("style.ghax-try").length'])).stdout.trim();
+  assert(styleCount === '1', `expected 1 ghax-try style tag, got ${styleCount}`);
+  // Cleanup: reload to flush the injected style so downstream checks see clean state.
+  await run(['reload']);
+  await run(['wait', '300']);
+});
+
+c('try <js> returns a value via IIFE wrap', async () => {
+  const r = await run(['try', '1 + 41', '--json']);
+  const data = parseJson<{ value: unknown }>(r.stdout);
+  assert(data.value === 42, `try 1+41 → ${JSON.stringify(data)}`);
+});
+
+c('try --selector binds `el` + --measure observes post-mutation state', async () => {
+  await run(['goto', 'data:text/html,<div id=w style="width:50px">x</div>']);
+  await run(['wait', '300']);
+  const r = await run([
+    'try',
+    'el.style.width = "300px"',
+    '--selector', '#w',
+    '--measure', 'document.querySelector("#w").offsetWidth',
+    '--json',
+  ]);
+  const data = parseJson<{ value: number }>(r.stdout);
+  assert(data.value === 300, `try --measure should report 300, got ${data.value}`);
+});
+
+c('try --shot writes a screenshot', async () => {
+  const shotPath = `/tmp/ghax-try-shot-${Date.now()}.png`;
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '300']);
+  const r = await run(['try', '--css', 'body { background: lime; }', '--shot', shotPath, '--json']);
+  const data = parseJson<{ shot?: string }>(r.stdout);
+  assert(data.shot === shotPath, `try --shot path mismatch: ${data.shot}`);
+  assert(fs.existsSync(shotPath), `try screenshot missing: ${shotPath}`);
+  assert(fs.statSync(shotPath).size > 500, 'try screenshot suspiciously small');
+  fs.unlinkSync(shotPath);
+});
+
+c('gif renders a GIF from a recording (if ffmpeg available)', async () => {
+  const ffmpeg = Bun.spawnSync(['ffmpeg', '-version'], { stdout: 'ignore', stderr: 'ignore' });
+  if (ffmpeg.exitCode !== 0) {
+    console.log('  (ffmpeg not on PATH — skipping gif check)');
+    return;
+  }
+  // Minimal 2-step recording — goto + a short wait.
+  const recPath = `/tmp/ghax-gif-rec-${Date.now()}.json`;
+  const outPath = `/tmp/ghax-gif-smoke-${Date.now()}.gif`;
+  const rec = {
+    startedAt: new Date().toISOString(),
+    steps: [
+      { cmd: 'goto', args: ['https://example.com'] },
+      { cmd: 'wait', args: ['500'] },
+    ],
+  };
+  fs.writeFileSync(recPath, JSON.stringify(rec));
+  await run(['gif', recPath, outPath, '--delay', '500', '--scale', '400']);
+  assert(fs.existsSync(outPath), `gif missing: ${outPath}`);
+  assert(fs.statSync(outPath).size > 500, `gif suspiciously small: ${fs.statSync(outPath).size}B`);
+  fs.unlinkSync(recPath);
+  fs.unlinkSync(outPath);
 });
 
 c('detach shuts the daemon', async () => {
