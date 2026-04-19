@@ -595,6 +595,181 @@ c('console --source-maps resolves bundled frames to original sources', async () 
   }
 });
 
+c('source-maps: falls back silently when script has no map comment', async () => {
+  // Serve a bundle with NO sourceMappingURL comment. Console --source-maps
+  // should return the frame unchanged (no bundledUrl field).
+  const bundled = 'throw new Error("ghax-sm-nomap");';
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/') {
+        return new Response('<!doctype html><html><body><script src="bundle.js"></script></body></html>',
+          { headers: { 'content-type': 'text/html' } });
+      }
+      if (url.pathname === '/bundle.js') {
+        return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
+      }
+      return new Response('not found', { status: 404 });
+    },
+  });
+  try {
+    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['wait', '500']);
+    const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
+    const entries = parseJson<Array<{ text: string; stack?: Array<{ url: string; bundledUrl?: string }> }>>(r.stdout);
+    const ours = entries.find((e) => e.text.includes('ghax-sm-nomap'));
+    assert(ours, 'pageerror not captured');
+    // Stack present but NOT resolved (no bundledUrl field on any frame).
+    if (ours.stack) {
+      assert(
+        !ours.stack.some((f) => f.bundledUrl !== undefined),
+        'expected unresolved stack (no map), got resolved frames',
+      );
+    }
+  } finally {
+    server.stop();
+  }
+});
+
+c('source-maps: falls back silently on invalid map JSON', async () => {
+  const bundled = 'throw new Error("ghax-sm-badmap");\n//# sourceMappingURL=bundle.js.map';
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/') return new Response('<!doctype html><html><body><script src="bundle.js"></script></body></html>', { headers: { 'content-type': 'text/html' } });
+      if (url.pathname === '/bundle.js') return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
+      if (url.pathname === '/bundle.js.map') return new Response('{not valid json at all}', { headers: { 'content-type': 'application/json' } });
+      return new Response('not found', { status: 404 });
+    },
+  });
+  try {
+    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['wait', '500']);
+    const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
+    const entries = parseJson<Array<{ text: string; stack?: Array<{ bundledUrl?: string }> }>>(r.stdout);
+    const ours = entries.find((e) => e.text.includes('ghax-sm-badmap'));
+    assert(ours, 'pageerror not captured');
+    // Invalid JSON → parse throws → silent fallback → no bundledUrl on frames.
+    if (ours.stack) {
+      assert(
+        !ours.stack.some((f) => f.bundledUrl !== undefined),
+        'bad map JSON should have fallen back to bundled frames',
+      );
+    }
+  } finally {
+    server.stop();
+  }
+});
+
+c('xpath: empty result set returns count=0, matches=[]', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '200']);
+  const r = await run(['xpath', '//nonexistent-tag-ghax', '--json']);
+  const data = parseJson<{ count: number; returned: number; matches: unknown[] }>(r.stdout);
+  assert(data.count === 0, `expected count=0, got ${data.count}`);
+  assert(data.returned === 0, `expected returned=0, got ${data.returned}`);
+  assert(Array.isArray(data.matches) && data.matches.length === 0, 'matches should be empty array');
+});
+
+c('xpath: invalid expression throws a clean error', async () => {
+  await run(['goto', 'https://example.com']);
+  const r = await run(['xpath', 'not a valid xpath /// /!@#'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'invalid xpath should exit non-zero');
+  assert(
+    /xpath|expression|SYNTAX|invalid/i.test(r.stderr + r.stdout),
+    `expected error mentioning xpath, got: ${(r.stderr + r.stdout).slice(0, 200)}`,
+  );
+});
+
+c('xpath --limit caps returned matches', async () => {
+  await run(['goto', 'data:text/html,<a>1</a><a>2</a><a>3</a><a>4</a><a>5</a>']);
+  await run(['wait', '200']);
+  const r = await run(['xpath', '//a', '--limit', '2', '--json']);
+  const data = parseJson<{ count: number; returned: number; matches: unknown[] }>(r.stdout);
+  assert(data.count === 5, `expected count=5 (all anchors), got ${data.count}`);
+  assert(data.returned === 2, `expected returned=2 (limit), got ${data.returned}`);
+  assert(data.matches.length === 2, `matches.length=${data.matches.length}`);
+});
+
+c('box: element not in layout throws a clean error', async () => {
+  await run(['goto', 'data:text/html,<div id=hidden style="display:none">x</div>']);
+  await run(['wait', '200']);
+  const r = await run(['box', '#hidden'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'box on hidden element should exit non-zero');
+  assert(
+    /not visible|not in layout|box/i.test(r.stderr + r.stdout),
+    `expected clean error about layout, got: ${(r.stderr + r.stdout).slice(0, 200)}`,
+  );
+});
+
+c('network --status 404 exact match filters correctly', async () => {
+  // Server that returns 404 for a specific path and 200 for the root.
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/missing') return new Response('not found', { status: 404 });
+      return new Response('<!doctype html><html><body><img src="/missing"></body></html>', { headers: { 'content-type': 'text/html' } });
+    },
+  });
+  try {
+    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['wait', '500']);
+    const r = await run(['network', '--status', '404', '--last', '50', '--json']);
+    const entries = parseJson<Array<{ status: number; url: string }>>(r.stdout);
+    assert(entries.length >= 1, `expected at least one 404, got ${entries.length}`);
+    assert(entries.every((e) => e.status === 404), 'all entries should be 404');
+  } finally {
+    server.stop();
+  }
+});
+
+c('network --status 400-499 range matches 4xx', async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/gone') return new Response('gone', { status: 410 });
+      if (url.pathname === '/err') return new Response('server err', { status: 500 });
+      return new Response('<!doctype html><html><body><img src="/gone"><img src="/err"></body></html>', { headers: { 'content-type': 'text/html' } });
+    },
+  });
+  try {
+    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['wait', '500']);
+    const r = await run(['network', '--status', '400-499', '--last', '50', '--json']);
+    const entries = parseJson<Array<{ status: number }>>(r.stdout);
+    assert(entries.some((e) => e.status === 410), 'expected the 410 entry');
+    assert(!entries.some((e) => e.status === 500), 'range 400-499 should NOT include 500');
+  } finally {
+    server.stop();
+  }
+});
+
+c('network --status invalid argument fails with a helpful message', async () => {
+  const r = await run(['network', '--status', 'banana'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'invalid --status should exit non-zero');
+  assert(
+    /Bad --status|Expected 404, 4xx, or 400-499/i.test(r.stderr + r.stdout),
+    `expected helpful error, got: ${(r.stderr + r.stdout).slice(0, 200)}`,
+  );
+});
+
+c('console --errors + --dedup + --source-maps combined', async () => {
+  // All three flags together; just assert the command succeeds and returns
+  // grouped shape. Exhaustive correctness is covered by individual checks.
+  await run(['goto', 'https://example.com']);
+  await run(['eval', 'for (let i = 0; i < 3; i++) console.error("ghax-combined-flags-probe")']);
+  await run(['wait', '200']);
+  const r = await run(['console', '--errors', '--dedup', '--source-maps', '--last', '20', '--json']);
+  const groups = parseJson<Array<{ text: string; count: number }>>(r.stdout);
+  const ours = groups.find((g) => g.text.includes('ghax-combined-flags-probe'));
+  assert(ours, 'combined flags did not return our entry');
+  assert(ours.count >= 3, `expected count>=3 from 3 emits, got ${ours.count}`);
+});
+
 c('shell mode tokenises quoted args correctly', async () => {
   // `ghax try --css 'body { color: red }' ...` needs single-quote
   // preservation so the CSS doesn't get split on whitespace. If the

@@ -52,6 +52,22 @@ export class CircularBuffer<T> {
     return this.toArray().filter(pred);
   }
 
+  /**
+   * Iterate from newest to oldest and return the first entry matching
+   * `pred`, or undefined if none. Doesn't allocate — walks the ring
+   * directly. Use this for "stamp response onto the most recent matching
+   * request" patterns instead of `toArray()`-and-scan-reversed. On a
+   * 5000-entry buffer at 100 req/s, the diff is O(n) per event vs O(1)
+   * in the typical case where the match sits at the tail.
+   */
+  findMostRecent(pred: (v: T) => boolean): T | undefined {
+    for (let i = this._size - 1; i >= 0; i--) {
+      const entry = this.buffer[(this.head + i) % this.capacity] as T;
+      if (pred(entry)) return entry;
+    }
+    return undefined;
+  }
+
   get length(): number {
     return this._size;
   }

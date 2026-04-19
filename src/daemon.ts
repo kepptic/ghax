@@ -235,25 +235,21 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
     for (const l of ctx.networkListeners) l(entry);
   });
   page.on('response', (resp) => {
-    // Best-effort: stamp status + response headers + arrival time onto the
-    // most recent matching request entry. Duration is (responseAt - timestamp).
-    const arr = ctx.networkBuf.toArray();
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const e = arr[i];
-      if (e.url === resp.url() && e.status === undefined) {
-        e.status = resp.status();
-        e.statusText = resp.statusText();
-        e.responseHeaders = resp.headers();
-        e.responseAt = Date.now();
-        e.duration = e.responseAt - e.timestamp;
+    // Stamp status + response headers + arrival time onto the most recent
+    // matching request entry. Duration is (responseAt - timestamp).
+    const respUrl = resp.url();
+    const e = ctx.networkBuf.findMostRecent((x) => x.url === respUrl && x.status === undefined);
+    if (!e) return;
+    e.status = resp.status();
+    e.statusText = resp.statusText();
+    e.responseHeaders = resp.headers();
+    e.responseAt = Date.now();
+    e.duration = e.responseAt - e.timestamp;
 
-        if (ctx.captureBodiesRe && ctx.captureBodiesRe.test(resp.url())) {
-          const ct = (resp.headers()['content-type'] ?? '').toLowerCase();
-          if (/json|text|javascript|xml|html|css|graphql/.test(ct)) {
-            captureBodyAsync(e, resp);
-          }
-        }
-        break;
+    if (ctx.captureBodiesRe && ctx.captureBodiesRe.test(respUrl)) {
+      const ct = (resp.headers()['content-type'] ?? '').toLowerCase();
+      if (/json|text|javascript|xml|html|css|graphql/.test(ct)) {
+        captureBodyAsync(e, resp);
       }
     }
   });
@@ -1853,6 +1849,10 @@ const NEVER_RECORD = new Set([
   'record.start', 'record.stop', 'record.status',
   'status', 'health',
   'tabs', 'console', 'network', 'cookies', 'text', 'html',
+  // Read-only queries that don't change page state — replay would re-fire
+  // the measurement, not the action, and waste time. Add every new
+  // read-only handler here.
+  'find', 'is', 'perf', 'xpath', 'box',
 ]);
 
 register('record.start', async (ctx, args) => {
