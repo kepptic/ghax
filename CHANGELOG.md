@@ -8,6 +8,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ghax xpath <expression> [--limit N]` — query the page's DOM with an
+  XPath expression, return every matching element with its tag, text
+  preview, and bounding box. XPath is also usable via Playwright's
+  `xpath=...` prefix in every selector-accepting command (`click`,
+  `fill`, `screenshot`, `is`, etc.).
+- `ghax box <@ref|selector>` — return `{x, y, width, height}` of the
+  first matching element. Resolves snapshot refs (`@e3`, `@c1`) or any
+  selector form.
+- `ghax attach --capture-bodies[=<url-glob>]` — opt-in response-body
+  capture. Without a pattern, captures every JSON/text-like response
+  (application/json, text/\*, javascript, xml, html, css, graphql)
+  up to 32KB each. With a glob (e.g. `'*/api/*'`), restricts to
+  matching URLs so browsing doesn't blow memory on images or chunks.
+  Bodies past 32KB truncate with a `[truncated N bytes]` marker.
+  Included in HAR export when the content is available.
 - `ghax console --source-maps` — resolve bundled stack frames back to their
   original source locations via the page's source maps. Each captured
   `pageerror` already parses its stack; with `--source-maps`, every frame

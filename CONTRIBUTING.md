@@ -18,7 +18,7 @@ ghax/
     buffers.ts              CircularBuffer<T>, ConsoleEntry, NetworkEntry, parseStack().
     snapshot.ts             aria tree → @e<n> refs, cursor-interactive + shadow-DOM pass.
   test/
-    smoke.ts                Live-browser harness (67 checks, ~30s).
+    smoke.ts                Live-browser harness (70 checks, ~30s).
     cross-browser.ts        Iterate every detected Chromium browser; run smoke on each.
     benchmark.ts            Headless CLI benchmark vs gstack-browse, playwright-cli, agent-browser.
     hot-reload-smoke.ts     Scripted MV3 hot-reload probe against test/fixtures/test-extension/.
@@ -90,7 +90,7 @@ bun run test:benchmark    # compare per-command latency vs gstack-browse / playw
 ```
 
 The smoke test requires a running Chromium-family browser on
-`--remote-debugging-port=9222`. It attaches, runs **67 non-destructive
+`--remote-debugging-port=9222`. It attaches, runs **70 non-destructive
 commands** (navigation, snapshots, interaction, extensions, orchestrated
 verbs, `try`, `perf`, console dedup, network status/HAR, new-window
 workflow, `shell` mode tokenising), and detaches. Takes ~30s end-to-end.

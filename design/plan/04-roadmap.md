@@ -182,7 +182,8 @@ release track is on hold.
       no browser); original scaffold at commit `e41ab7d`, extended to
       cover the full v0.4 surface + `ghax try` + attach ergonomics +
       background-window workflow + debugging tier 1 + shell/disconnect
-      quality-of-life + source-map resolution — 67/67 checks in ~30s.
+      quality-of-life + source-map resolution + tier 3 finishers
+      (xpath, box, capture-bodies) — 70/70 checks in ~34s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -255,6 +256,29 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] Tier 3 debugging finishers — XPath surface, bounding box,
+      response-body capture.
+
+      `ghax xpath <expression> [--limit N]` — query matches from the
+      page's DOM with text preview + tag + box per hit. XPath already
+      worked in selector args (via Playwright's `xpath=...` prefix);
+      this is the dedicated *enumeration* form for previewing before
+      acting.
+
+      `ghax box <@ref|selector>` — returns `{x, y, width, height}`.
+      Works on snapshot refs (`@e3`, `@c1`) and any selector form.
+
+      `ghax attach --capture-bodies[=<glob>]` — opt-in response-body
+      capture. Pattern is glob-ish (`*` → any): `--capture-bodies`
+      alone captures everything JSON/text-like, `--capture-bodies='*/api/*'`
+      only matching URLs. 32KB per-body cap with truncation marker.
+      Daemon reads the pattern from `GHAX_CAPTURE_BODIES` env; zero
+      runtime cost when the flag isn't passed. Captured bodies
+      automatically flow into HAR export for Charles / devtools /
+      WebPageTest consumption.
+
+      Smoke 67 → 70 (xpath match shape, box on selector, box on
+      ref). Cross-browser: Edge 70/70, Chrome 70/70.
 - [x] `ghax console --source-maps` — source-map resolution for
       bundled stack frames. New `src/source-maps.ts` holds a
       `SourceMapCache` on the daemon ctx; per-frame resolution fetches

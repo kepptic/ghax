@@ -7,7 +7,7 @@ instead of spinning up sandboxed copies.
 **Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
 layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
 `review`, `pair`, `try`) and a background-window workflow
-(`find`, `new-window`, `tab --quiet`) for multi-agent use. 67/67 smoke
+(`find`, `new-window`, `tab --quiet`) for multi-agent use. 70/70 smoke
 checks on Edge + Chrome. Repo is private under `kepptic` for now;
 open-source release paused.
 
@@ -162,8 +162,10 @@ planned surface. Commands shipped today:
 ```
 attach [--port N] [--browser edge|chrome|chromium|brave|arc] [--launch]
        [--headless] [--load-extension <path>] [--data-dir <path>]
+       [--capture-bodies[=<url-glob>]]
        # Without --port, scans :9222-9230. Multiple running → picker.
        # With --launch and no --port, auto-picks first free port in range.
+       # --capture-bodies records JSON/text response bodies (32KB cap).
 status [--json]
 detach
 restart
@@ -188,6 +190,8 @@ viewport <WxH>
 responsive [prefix] [--fullPage]
 diff <url1> <url2>
 is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
+xpath <expression> [--limit N]    # list matching elements with text + box
+box <@ref|selector>               # bounding box {x, y, width, height}
 storage [local|session] [get|set|remove|clear|keys] [key] [value]
 chain < steps.json
 record start [name] | stop | status

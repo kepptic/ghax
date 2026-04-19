@@ -139,4 +139,9 @@ export interface NetworkEntry {
   requestHeaders?: Record<string, string>;
   responseHeaders?: Record<string, string>;
   responseAt?: number;  // timestamp response arrived (for duration calc)
+  // Only present when the daemon was started with GHAX_CAPTURE_BODIES and
+  // the response's content-type matched (json / text / xml / etc.). Capped
+  // at 32KB; longer bodies carry a "[truncated …]" marker at the end.
+  responseBody?: string;
+  responseBodyTruncated?: boolean;
 }
