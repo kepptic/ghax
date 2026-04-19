@@ -1,14 +1,15 @@
 //! Verb dispatch table. Mirrors the `switch (verb)` block in `src/cli.ts`.
 //!
-//! Phase 1 scope: every "trivial" verb (45 of them) plus the ext/gesture/record
-//! subcommand families. Medium verbs (attach/detach/status/restart/qa/canary/
-//! review/ship/pair) and complex ones (shell, console --follow, network --follow)
-//! are stubs that print a "phase 2/3" message and exit non-zero.
+//! Phase 1 + 2 scope: every trivial verb plus medium verbs (attach, detach,
+//! restart, status, qa, canary, review, ship, pair, diff-state, chain, replay,
+//! gif). Phase 3 verbs that need SSE or REPL (shell, console --follow,
+//! network --follow, ext sw logs --follow) still stub out to the Bun CLI.
 
 use crate::args::{self, Parsed};
 use crate::output;
 use crate::rpc::{self, RpcError};
 use crate::state::{self, Config};
+use crate::{attach, canary, qa, review, ship, small};
 use anyhow::Result;
 use serde_json::{json, Value};
 
@@ -43,10 +44,22 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
 }
 
 fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
+    // Phase 2 medium verbs — wired into per-module commands.
     match verb {
-        "attach" | "detach" | "restart" | "status" => return Ok(stub(verb, "phase 2")),
-        "qa" | "canary" | "review" | "ship" | "pair" | "gif" | "chain" | "replay"
-        | "diff-state" => return Ok(stub(verb, "phase 2")),
+        "attach" => return attach::cmd_attach(&args::parse(rest), cfg),
+        "detach" => return attach::cmd_detach(cfg),
+        "restart" => return attach::cmd_restart(&args::parse(rest), cfg),
+        "status" => return small::cmd_status(rest),
+        "pair" => return small::cmd_pair(rest),
+        "diff-state" => return small::cmd_diff_state(rest),
+        "chain" => return small::cmd_chain(rest),
+        "replay" => return small::cmd_replay(rest),
+        "gif" => return small::cmd_gif(rest),
+        "qa" => return qa::cmd_qa(&args::parse(rest)),
+        "canary" => return canary::cmd_canary(&args::parse(rest)),
+        "review" => return review::cmd_review(&args::parse(rest)),
+        "ship" => return ship::cmd_ship(&args::parse(rest)),
+        // Phase 3 (needs SSE / REPL).
         "shell" => return Ok(stub(verb, "phase 3")),
         _ => {}
     }
