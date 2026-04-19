@@ -1,0 +1,12 @@
+# Cross-compile targets for cargo-dist matrix builds.
+# Each is opted in when the host toolchain has the matching rustup target.
+#
+#   rustup target add x86_64-apple-darwin
+#   rustup target add aarch64-apple-darwin
+#   rustup target add x86_64-unknown-linux-gnu
+#   rustup target add aarch64-unknown-linux-gnu
+#   rustup target add x86_64-pc-windows-msvc
+#   rustup target add aarch64-pc-windows-msvc
+
+[build]
+# Use the host triple by default; cargo-dist overrides per matrix job.

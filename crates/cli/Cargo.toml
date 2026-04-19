@@ -1,0 +1,23 @@
+[package]
+name = "ghax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Attach to your real Chrome or Edge via CDP and drive it — Rust CLI."
+
+[[bin]]
+name = "ghax"
+path = "src/main.rs"
+
+[dependencies]
+# Hand-rolled argv parser mirrors TS cli.ts exactly — see args.rs. clap was
+# considered but its strict validation conflicts with the dynamic verb surface
+# (every verb takes a different flag set, and the daemon owns the schema).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps daemon-emitted object key order (matches JSON.stringify in Bun).
+# The parity test diffs byte-for-byte, so alphabetized keys would break it.
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
