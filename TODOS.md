@@ -10,7 +10,65 @@ belong here — either flesh it out or close it.
 
 ## Open
 
-### Split `src/daemon.ts` and `src/cli.ts` by domain
+### Rewrite the CLI in Rust (public-release gate)
+
+**What:** Replace `src/cli.ts` (~2,071 lines) with a Rust crate that
+produces platform-specific binaries via `cargo-dist`. Daemon stays
+Node/Playwright. Full design + phasing in
+[`design/plan/06-rust-cli-rewrite.md`](./design/plan/06-rust-cli-rewrite.md).
+
+**Why:** Distribution. The Bun-compiled CLI is 61MB because it embeds
+the Bun runtime. A stripped Rust binary is ~10MB per platform. This
+is the last concrete friction between current ghax and a public
+release we'd be satisfied shipping.
+
+Secondary wins: ~2-5ms cold start (vs 37ms Bun), no runtime
+dependency, standard `cargo install` / `brew install` distribution,
+no per-platform Bun builds needed (one `cargo build --release --target
+<triple>` per OS × arch).
+
+**Pros:**
+- 6x smaller binary per platform (~10MB vs 61MB)
+- 7-15x faster cold start for single-command invocations
+- Standard Rust cross-compile toolchain via cargo-dist handles
+  macOS/Linux/Windows × x64/ARM in one CI workflow
+- Opens clean install paths: Homebrew tap, `cargo install ghax`, npm
+  wrapper, direct GitHub Release download
+- Rust binary is a more inviting open-source artifact than a 60MB blob
+
+**Cons:**
+- 3-4 days active dev time (per the phasing plan)
+- Dual-language repo during the rewrite window (mitigated by a parity
+  diff test in CI)
+- Contributor pool shifts slightly — JS/TS folks contributing to CLI
+  vs Rust folks. Daemon stays TS so JS contributors still have turf.
+- Node remains a runtime dependency (for daemon) — we can't eliminate
+  it without replacing Playwright, which is out of scope.
+
+**Context:**
+- Decision recorded 2026-04-19 after a perf deep-dive showed the
+  stack is already at its physical floor for single-command
+  invocations (~30ms, dominated by Bun CLI spawn).
+- The design doc covers architecture, dependency choices, per-verb
+  porting plan, distribution story, phasing (4 phases), risks, and
+  success criteria (8 green checks gate the switch).
+- Phase 1 is template work: 45 trivial verbs that are pure RPC +
+  print. Fast.
+- Phase 2 is the real work: attach, qa, canary, ship, review — 8
+  verbs with CLI-side orchestration logic.
+- Phase 3 is SSE + REPL (console/network --follow, ghax shell).
+- Phase 4 flips `bin/ghax` to prefer the Rust binary.
+
+**Depends on / blocked by:** Nothing. The Rust CLI and Bun CLI can
+coexist during the rewrite. Dual-maintenance window lasts ~1-2 weeks.
+
+**Effort:** ~3-4 days active, spread over 2-3 weeks calendar.
+
+**Success criteria:** All 8 gates in `06-rust-cli-rewrite.md` green
+(binary sizes, smoke parity, perf floor, parity diff, Homebrew
+install, docs, cargo-dist release workflow).
+
+### Split `src/daemon.ts` by domain
 
 **What:** Extract handler groups into domain-specific files. Approved in
 plan-eng-review on 2026-04-19.
@@ -27,16 +85,12 @@ plan-eng-review on 2026-04-19.
     viewport, responsive, diff)
   - `src/daemon.ts` keeps: Ctx interface, bootstrap, HTTP server,
     SSE endpoints, shutdown, recording dispatcher
-- `src/cli.ts` (2071 lines) → split similarly:
-  - `src/cli/dispatch.ts` (main dispatch switch)
-  - `src/cli/orchestrated.ts` (cmdQa, cmdShip, cmdCanary, cmdReview,
-    cmdPair, cmdGif)
-  - `src/cli/shell.ts` (cmdShell + tokenizer)
-  - `src/cli/attach.ts` (cmdAttach, cmdDetach, cmdStatus, cmdRestart,
-    spawnDaemon, daemon health)
-  - `src/cli.ts` keeps: main(), HELP constant, parseArgs, rpc, util helpers
 
-**Why:** At 2000+ lines each, navigation cost is real. A second contributor
+> **Note:** `src/cli.ts` split was originally part of this TODO but
+> has been dropped — the Rust CLI rewrite replaces `cli.ts` entirely,
+> so splitting the TypeScript version first would be wasted work.
+
+**Why:** At 2227 lines, navigation cost is real. A second contributor
 would friction looking for "where does goto live." Today it's one file.
 Future debugging sessions also benefit: smaller blast radius per edit,
 cleaner git blame.
@@ -60,10 +114,6 @@ cleaner git blame.
   type) and calls register() at module top level. The bootstrap
   function in daemon.ts then imports the handler modules for side
   effects, triggering all register() calls.
-- For cli.ts, the dispatch() function's switch can move to
-  `src/cli/dispatch.ts` with per-verb handlers imported from
-  sibling files. `makeSimple` and `parseArgs` stay in cli.ts as
-  shared utilities.
 - Cross-browser smoke already covers behavioral equivalence; after
   the split, `bun run test:smoke` + `bun run test:cross-browser`
   should catch any regression.

@@ -202,12 +202,27 @@ release track is on hold.
       catches the same regressions without Anthropic API cost or TOS
       grey area. Revisit if skill count grows or repo flips public.
 
-### Paused (revisit when ready to open-source)
+### Before public release — satisfaction gate
 
-- [ ] Flip repo to public
-- [ ] `bunx ghax` zero-install (`npm publish @ghax/cli`)
+We won't publish until we're satisfied with what users download and
+how they install it. Current blockers:
+
+- [ ] **Rust CLI rewrite.** The 61MB Bun binary is the last
+      distribution concern. A Rust CLI drops to ~10MB per platform,
+      cold start to ~2-5ms, and gives us the standard `cargo-dist` +
+      Homebrew + npm distribution story. Full plan:
+      [`06-rust-cli-rewrite.md`](./06-rust-cli-rewrite.md). Scope: CLI
+      only; daemon stays Node/Playwright. Estimated ~3-4 active dev
+      days.
 - [ ] Docs site — `ghax.dev` or GitHub Pages
+- [ ] `@ghax/cli` npm publish + Homebrew tap
 - [ ] v1.0 tag + announce (HN, X, dev.to)
+
+### Deliberately not planned
+
+- [ ] Flip repo public before satisfaction — we're not publishing
+      something we're not proud of. Public comes after the Rust CLI
+      lands and distribution works cleanly.
 
 ## v0.4 — beyond the browse primitive (in progress)
 
