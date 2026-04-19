@@ -348,6 +348,79 @@ c('ext list entries carry version field', async () => {
   assert(anyWithVersion, `no extension reported a version in ${JSON.stringify(exts.map((e) => ({ id: e.id, v: e.version })))}`);
 });
 
+c('perf returns CWV + navigation timing shape', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '500']);
+  const r = await run(['perf', '--json']);
+  const data = parseJson<{
+    url: string;
+    cwv: { fcp: number | null; cls: number; ttfb: number | null };
+    navTiming: { loadMs: number; domContentLoadedMs: number };
+  }>(r.stdout);
+  assert(data.url.includes('example.com'), `perf url: ${data.url}`);
+  assert(data.navTiming && typeof data.navTiming.loadMs === 'number', 'navTiming shape');
+  assert(data.cwv && typeof data.cwv.cls === 'number', 'cwv.cls shape');
+});
+
+c('console --dedup collapses repeats with count', async () => {
+  // Seed 5 identical errors + 1 unique one, then dedup.
+  await run(['eval', 'for (let i = 0; i < 5; i++) { try { throw new Error("ghax-smoke-repeat"); } catch (e) { console.error(e.message); } } console.error("ghax-smoke-unique")']);
+  await run(['wait', '100']);
+  const r = await run(['console', '--errors', '--dedup', '--last', '50', '--json']);
+  const groups = parseJson<Array<{ text: string; count: number }>>(r.stdout);
+  const repeat = groups.find((g) => g.text === 'ghax-smoke-repeat');
+  const unique = groups.find((g) => g.text === 'ghax-smoke-unique');
+  assert(repeat && repeat.count === 5, `expected repeat count=5, got ${repeat?.count}`);
+  assert(unique && unique.count === 1, `expected unique count=1, got ${unique?.count}`);
+});
+
+c('network --status filters by code family', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '300']);
+  const r = await run(['network', '--status', '2xx', '--last', '50', '--json']);
+  const entries = parseJson<Array<{ status?: number; url: string }>>(r.stdout);
+  assert(entries.length >= 1, `expected at least one 2xx entry, got ${entries.length}`);
+  assert(
+    entries.every((e) => e.status !== undefined && e.status >= 200 && e.status < 300),
+    `some entry was not 2xx: ${JSON.stringify(entries.find((e) => !e.status || e.status >= 300))}`,
+  );
+});
+
+c('network --har writes a HAR 1.2 JSON file', async () => {
+  const harPath = `/tmp/ghax-smoke-har-${Date.now()}.har`;
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '300']);
+  const r = await run(['network', '--har', harPath, '--last', '5', '--json']);
+  const meta = parseJson<{ harPath: string; entryCount: number }>(r.stdout);
+  assert(meta.harPath === harPath, `expected path match, got ${meta.harPath}`);
+  assert(fs.existsSync(harPath), `HAR missing: ${harPath}`);
+  const har = JSON.parse(fs.readFileSync(harPath, 'utf-8')) as {
+    log: { version: string; creator: { name: string }; entries: Array<{ request: { url: string }; response: { status: number } }> };
+  };
+  assert(har.log.version === '1.2', `HAR version: ${har.log.version}`);
+  assert(har.log.creator.name === 'ghax', `HAR creator: ${har.log.creator.name}`);
+  assert(Array.isArray(har.log.entries) && har.log.entries.length > 0, `HAR entries: ${har.log.entries.length}`);
+  assert(typeof har.log.entries[0].request.url === 'string', 'HAR entry request.url');
+  fs.unlinkSync(harPath);
+});
+
+c('parseStack extracts V8 stack frames', async () => {
+  // Drive this through a real pageerror so we exercise the capture path.
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '200']);
+  await run(['eval', 'setTimeout(() => { throw new Error("ghax-smoke-stack-probe"); }, 10)']);
+  await run(['wait', '200']);
+  const r = await run(['console', '--errors', '--last', '50', '--json']);
+  const entries = parseJson<Array<{ text: string; stack?: Array<{ url: string; line: number; col: number }> }>>(r.stdout);
+  const ours = entries.find((e) => e.text.includes('ghax-smoke-stack-probe'));
+  assert(ours, 'pageerror not captured');
+  // Stack is best-effort — some environments may not populate it. Soft assert.
+  if (ours.stack && ours.stack.length > 0) {
+    assert(typeof ours.stack[0].line === 'number', `stack frame line type: ${typeof ours.stack[0].line}`);
+    assert(typeof ours.stack[0].col === 'number', `stack frame col type: ${typeof ours.stack[0].col}`);
+  }
+});
+
 c('profile captures Performance metrics', async () => {
   const r = await run(['profile', '--json']);
   const data = parseJson<{

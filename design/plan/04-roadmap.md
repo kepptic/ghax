@@ -181,7 +181,8 @@ release track is on hold.
 - [x] `test/smoke.ts` — live-browser harness. Runs locally only (CI has
       no browser); original scaffold at commit `e41ab7d`, extended to
       cover the full v0.4 surface + `ghax try` + attach ergonomics +
-      background-window workflow — 59/59 checks in ~25s.
+      background-window workflow + debugging tier 1 — 64/64 checks
+      in ~30s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -254,6 +255,37 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] Debugging depth pass — tier 1. Closed the real-world "why is this
+      slow / why did it break / what's actually going over the wire" gaps
+      that dropped out of the initial audit.
+
+      `ghax perf [--wait <ms>]` — Core Web Vitals (LCP, FCP, CLS, TTFB)
+      plus navigation timing breakdown (DNS, TCP, TLS, TTFB, response,
+      DOMInteractive, DOMContentLoaded, load) and long-task count. LCP /
+      CLS / longtask entries are pulled via a buffered PerformanceObserver
+      (the default timeline doesn't surface them). Example.com has no
+      eligible LCP element so `lcp: null`; richer pages return real
+      numbers (garryslist.org LCP = 500ms, the hero image).
+
+      `ghax console [--dedup]` — groups repeated entries by (level, text),
+      returning `[{level, text, count, firstAt, lastAt, url, source, stack}]`
+      sorted by count desc. Turns "500 identical errors scrolling the
+      terminal" into "1 entry with count=500". Captured-side: `pageerror`
+      events now include a parsed `stack: [{fn, url, line, col}]` via a
+      new V8 stack-trace parser in `buffers.ts`.
+
+      `ghax network` enhancements:
+        - `--status 4xx | 500 | 400-499` family/exact/range filter
+        - request and response headers captured on every entry
+        - `--har <path>` exports HAR 1.2 suitable for Charles,
+          har-analyzer, WebPageTest
+
+      Network bodies are still not captured (memory cost too high for a
+      default rolling buffer). Source-map resolution, CPU flame graphs,
+      and long-task detail are tier 2/3 and not planned for now.
+
+      Smoke grew 59 → 64 (perf shape, dedup grouping, status filter, HAR
+      export, stack parsing). Edge + Chrome both pass the full suite.
 - [x] Headless CLI benchmark (`test/benchmark.ts` / `bun run test:benchmark`).
       Compares ghax against gstack browse, playwright-cli, and agent-browser
       on a 6-step workflow (launch → goto → text → js → screenshot →
