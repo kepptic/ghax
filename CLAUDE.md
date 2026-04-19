@@ -112,6 +112,26 @@ ghax try --css '.wrapper { width: max-content }' \
 # Revert by reloading the page.
 ```
 
+### Run many commands fast (multi-turn agent sessions)
+
+```bash
+cat <<'EOF' | ghax shell
+goto https://target.com
+wait 500
+snapshot -i
+click @e3
+text
+perf
+exit
+EOF
+```
+
+One process, no per-command spawn cost. ~1.8x faster than separate
+`ghax <cmd>` invocations. For interactive use (TTY), just `ghax shell`
+and type commands at the prompt. `exit`/`quit`/Ctrl-D to leave. Blank
+lines and `#` lines are ignored. Quoting works like a real shell:
+`try --css 'body { color: red }'` passes the whole CSS intact.
+
 ### Share the browser with a user who's actively working
 
 ```bash
@@ -144,7 +164,7 @@ Every change must pass:
 ```bash
 bun run typecheck     # tsc --noEmit
 bun run build         # compile CLI + bundle daemon
-bun run test:smoke    # 64/64 against a live Edge session
+bun run test:smoke    # 66/66 against a live Edge session
 ```
 
 For bigger changes also run:

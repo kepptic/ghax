@@ -7,7 +7,7 @@ instead of spinning up sandboxed copies.
 **Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
 layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
 `review`, `pair`, `try`) and a background-window workflow
-(`find`, `new-window`, `tab --quiet`) for multi-agent use. 64/64 smoke
+(`find`, `new-window`, `tab --quiet`) for multi-agent use. 66/66 smoke
 checks on Edge + Chrome. Repo is private under `kepptic` for now;
 open-source release paused.
 
@@ -47,6 +47,12 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 - **Headless scratch mode** (`ghax attach --launch --headless`): spawn a
   fresh Chromium on an auto-picked port for CI-style runs. Lives in its
   own window so it doesn't touch your daily-driver browser.
+- **Interactive shell** (`ghax shell`): REPL that keeps the CLI process
+  alive between commands. Skips the per-command Bun spawn cost — ~1.8x
+  faster for multi-turn agent sessions. Works piped or interactive.
+- **Disconnect recovery**: if the browser crashes or you close it, the
+  daemon self-shuts cleanly and subsequent commands print a helpful
+  message instead of a raw Playwright stack trace.
 - **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
   widths; `ghax viewport WxH` for one-offs.
 - **Batch + record + render**: pipe JSON to `ghax chain` for scripted flows;
