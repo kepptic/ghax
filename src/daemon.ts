@@ -269,6 +269,75 @@ register('eval', async (ctx, args) => {
   return result;
 });
 
+// ─── try — live-injection fix-preview ──────────────────────────
+//
+// Composable wrapper over page.evaluate + page.screenshot for the
+// "mutate the live page, measure, maybe screenshot" loop. Revert
+// semantics are trivial: reload the page. Any in-memory DOM/CSS
+// mutation dies with navigation.
+//
+// Trust model matches `ghax eval`: the JS is supplied by the operator
+// on their own shell, runs in their own browser. No external input.
+//
+// opts:
+//   js        positional[0] — function body (use `return` for a value)
+//   css       --css          — appended as <style class="ghax-try">
+//   selector  --selector     — binds document.querySelector(sel) as `el`
+//   measure   --measure      — expression evaluated AFTER the mutation;
+//                              its return value wins over the js return.
+//   shot      --shot <path>  — screenshot written at path (viewport only)
+register('try', async (ctx, args, opts) => {
+  const page = await activePage(ctx);
+  const js = args[0] ? String(args[0]) : null;
+  const css = (opts.css as string | undefined) ?? null;
+  const selector = (opts.selector as string | undefined) ?? null;
+  const measure = (opts.measure as string | undefined) ?? null;
+  const shotPath = (opts.shot as string | undefined) ?? null;
+
+  if (!js && !css && !measure && !shotPath) {
+    throw new Error('Usage: try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]');
+  }
+
+  // 1. Inject CSS as a tagged <style> node — easy to find/remove later.
+  if (css) {
+    await page.evaluate((cssText) => {
+      const style = document.createElement('style');
+      style.className = 'ghax-try';
+      style.textContent = cssText;
+      document.head.appendChild(style);
+    }, css);
+  }
+
+  // 2. Run user JS. Wrap in an IIFE as a string so that `return` at the
+  // top level works. Bare expressions auto-get `return (...)` so both
+  // forms do the right thing:
+  //     ghax try '1+2'                         → value: 3
+  //     ghax try 'el.style.color="red"; return el.textContent'
+  // If --selector is passed, the IIFE binds the match as `el`.
+  let value: unknown = null;
+  if (js) {
+    const body = js.includes('return') ? js : `return (${js})`;
+    const sourceWithBinding = selector
+      ? `(() => { const el = document.querySelector(${JSON.stringify(selector)}); ${body} })()`
+      : `(() => { ${body} })()`;
+    value = await page.evaluate(sourceWithBinding);
+  }
+
+  // 3. --measure runs AFTER the mutation so you can observe the effect.
+  if (measure) {
+    value = await page.evaluate(measure);
+  }
+
+  // 4. Optional screenshot.
+  let shot: string | undefined;
+  if (shotPath) {
+    await page.screenshot({ path: shotPath, fullPage: false });
+    shot = shotPath;
+  }
+
+  return { value, ...(shot ? { shot } : {}) };
+});
+
 register('text', async (ctx) => {
   const page = await activePage(ctx);
   const text = await page.evaluate(() => document.body.innerText);
