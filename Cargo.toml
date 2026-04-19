@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/cli"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/kepptic/ghax"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
