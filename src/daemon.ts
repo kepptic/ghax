@@ -26,7 +26,7 @@
 import { chromium, type Browser, type BrowserContext, type Page, type Locator } from 'playwright';
 import { CdpPool, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
-import { CircularBuffer, type ConsoleEntry, type NetworkEntry } from './buffers';
+import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot } from './snapshot';
 import * as fs from 'fs';
@@ -143,12 +143,14 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
     for (const l of ctx.consoleListeners) l(entry);
   });
   page.on('pageerror', (err) => {
+    const stack = parseStack(err.stack);
     const entry: ConsoleEntry = {
       timestamp: Date.now(),
       level: 'error',
       text: `[pageerror] ${err.message}`,
       url: page.url(),
       source: 'tab',
+      ...(stack.length > 0 ? { stack } : {}),
     };
     ctx.consoleBuf.push(entry);
     for (const l of ctx.consoleListeners) l(entry);
@@ -159,17 +161,23 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
       method: req.method(),
       url: req.url(),
       resourceType: req.resourceType(),
+      requestHeaders: req.headers(),
     };
     ctx.networkBuf.push(entry);
     for (const l of ctx.networkListeners) l(entry);
   });
   page.on('response', (resp) => {
-    // Best-effort: stamp status onto the most recent matching request entry.
+    // Best-effort: stamp status + response headers + arrival time onto the
+    // most recent matching request entry. Duration is (responseAt - timestamp).
     const arr = ctx.networkBuf.toArray();
     for (let i = arr.length - 1; i >= 0; i--) {
       const e = arr[i];
       if (e.url === resp.url() && e.status === undefined) {
         e.status = resp.status();
+        e.statusText = resp.statusText();
+        e.responseHeaders = resp.headers();
+        e.responseAt = Date.now();
+        e.duration = e.responseAt - e.timestamp;
         break;
       }
     }
@@ -575,17 +583,142 @@ register('type', async (ctx, args) => {
 
 register('console', async (ctx, _args, opts) => {
   const errorsOnly = Boolean(opts.errors);
+  const dedup = Boolean(opts.dedup);
   const n = opts.last ? Number(opts.last) : 200;
-  const entries = ctx.consoleBuf.last(n);
-  return errorsOnly ? entries.filter((e) => e.level === 'error') : entries;
+  let entries = ctx.consoleBuf.last(n);
+  if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
+  if (!dedup) return entries;
+
+  // Group by (level, text). Duplicates keep the earliest `firstAt`, update
+  // `lastAt`, and increment `count`. Sort by count desc so the loudest
+  // spam rises to the top — exactly what you want when debugging a page
+  // that's emitting the same error 500 times.
+  const groups = new Map<string, {
+    level: ConsoleEntry['level'];
+    text: string;
+    count: number;
+    firstAt: number;
+    lastAt: number;
+    url?: string;
+    source?: ConsoleEntry['source'];
+    stack?: ConsoleEntry['stack'];
+  }>();
+  for (const e of entries) {
+    const key = `${e.level}::${e.text}`;
+    const g = groups.get(key);
+    if (g) {
+      g.count++;
+      g.lastAt = e.timestamp;
+    } else {
+      groups.set(key, {
+        level: e.level,
+        text: e.text,
+        count: 1,
+        firstAt: e.timestamp,
+        lastAt: e.timestamp,
+        url: e.url,
+        source: e.source,
+        stack: e.stack,
+      });
+    }
+  }
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count);
 });
 
 register('network', async (ctx, _args, opts) => {
   const n = opts.last ? Number(opts.last) : 200;
   const pattern = opts.pattern ? new RegExp(String(opts.pattern)) : null;
-  const entries = ctx.networkBuf.last(n);
-  return pattern ? entries.filter((e) => pattern.test(e.url)) : entries;
+  const statusArg = opts.status ? String(opts.status) : null;
+  const harPath = opts.har ? String(opts.har) : null;
+
+  // --status accepts:
+  //   "404"   → exact match
+  //   "4xx"   → any 400s (likewise 3xx, 5xx, etc.)
+  //   "500-599" → range
+  let statusTest: ((s: number | undefined) => boolean) | null = null;
+  if (statusArg) {
+    if (/^\d{3}$/.test(statusArg)) {
+      const exact = Number(statusArg);
+      statusTest = (s) => s === exact;
+    } else if (/^\dxx$/i.test(statusArg)) {
+      const family = Number(statusArg[0]);
+      statusTest = (s) => s !== undefined && Math.floor(s / 100) === family;
+    } else if (/^\d{3}-\d{3}$/.test(statusArg)) {
+      const [lo, hi] = statusArg.split('-').map(Number);
+      statusTest = (s) => s !== undefined && s >= lo && s <= hi;
+    } else {
+      throw new Error(`Bad --status "${statusArg}". Expected 404, 4xx, or 400-499.`);
+    }
+  }
+
+  let entries = ctx.networkBuf.last(n);
+  if (pattern) entries = entries.filter((e) => pattern.test(e.url));
+  if (statusTest) entries = entries.filter((e) => statusTest!(e.status));
+
+  if (harPath) {
+    const har = buildHar(entries);
+    fs.writeFileSync(harPath, JSON.stringify(har, null, 2));
+    return { harPath, entryCount: entries.length };
+  }
+  return entries;
 });
+
+// Minimal HAR 1.2 generator. We don't capture bodies, so content.size comes
+// from Content-Length when available and body text is omitted. Good enough
+// for waterfall + diagnostics tools (Charles, har-analyzer, WebPageTest).
+function buildHar(entries: NetworkEntry[]): unknown {
+  const asHeaders = (h: Record<string, string> | undefined) =>
+    h ? Object.entries(h).map(([name, value]) => ({ name, value })) : [];
+  const queryString = (url: string) => {
+    try {
+      const u = new URL(url);
+      return Array.from(u.searchParams.entries()).map(([name, value]) => ({ name, value }));
+    } catch {
+      return [];
+    }
+  };
+  return {
+    log: {
+      version: '1.2',
+      creator: { name: 'ghax', version: '0.4' },
+      pages: [],
+      entries: entries.map((e) => ({
+        startedDateTime: new Date(e.timestamp).toISOString(),
+        time: e.duration ?? 0,
+        request: {
+          method: e.method,
+          url: e.url,
+          httpVersion: 'HTTP/1.1',
+          headers: asHeaders(e.requestHeaders),
+          queryString: queryString(e.url),
+          cookies: [],
+          headersSize: -1,
+          bodySize: -1,
+        },
+        response: {
+          status: e.status ?? 0,
+          statusText: e.statusText ?? '',
+          httpVersion: 'HTTP/1.1',
+          headers: asHeaders(e.responseHeaders),
+          cookies: [],
+          content: {
+            size: Number(e.responseHeaders?.['content-length'] ?? -1),
+            mimeType: e.responseHeaders?.['content-type'] ?? '',
+          },
+          redirectURL: e.responseHeaders?.['location'] ?? '',
+          headersSize: -1,
+          bodySize: -1,
+        },
+        cache: {},
+        timings: {
+          send: 0,
+          wait: e.duration ?? 0,
+          receive: 0,
+        },
+      })),
+    },
+  };
+}
 
 register('cookies', async (ctx) => {
   const page = await activePage(ctx);
@@ -1439,6 +1572,117 @@ register('profile', async (ctx, _args, opts) => {
   const reportPath = `${base}.json`;
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   return { reportPath, ...report };
+});
+
+// ─── perf — Core Web Vitals + navigation timing ────────────────
+//
+// Reads the page's own performance timeline rather than setting up an
+// observer mid-session. That means results reflect what's happened since
+// page load, which is what users want 99% of the time ("how did this page
+// load just now?").
+//
+// LCP is the most recent `largest-contentful-paint` entry. CLS is the sum
+// of all `layout-shift` values excluding those with `hadRecentInput` (per
+// web-vitals spec). FCP comes from the `paint` entries. TTFB is derived
+// from the single `navigation` entry. INP requires user input to fire, so
+// it's null for headless/scripted sessions and noted as such.
+//
+// Users can pass --wait <ms> to settle late paints (common for SPAs that
+// finish hydrating after the load event). Without --wait we just read
+// whatever's currently in the timeline.
+
+register('perf', async (ctx, _args, opts) => {
+  const waitMs = opts.wait ? Number(opts.wait) : 0;
+  const page = await activePage(ctx);
+  if (waitMs > 0) {
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  const result = await page.evaluate(async () => {
+    const nav = (performance.getEntriesByType('navigation')[0] ?? null) as
+      | PerformanceNavigationTiming
+      | null;
+    const paints = performance.getEntriesByType('paint') as PerformanceEntry[];
+    const fcp = paints.find((p) => p.name === 'first-contentful-paint')?.startTime ?? null;
+    const fp = paints.find((p) => p.name === 'first-paint')?.startTime ?? null;
+
+    // LCP, CLS, and longtask entries don't live in the default performance
+    // timeline buffer — they only surface via a PerformanceObserver set up
+    // with `buffered: true`. Browsers deliver those buffered entries on the
+    // next task, not synchronously, so we set up all three observers and
+    // wait a common window before reading. Inline rather than a helper to
+    // keep the function source trivially serializable for page.evaluate.
+    const lcpBuf: any[] = [];
+    const clsBuf: any[] = [];
+    const longtaskBuf: any[] = [];
+    const startObserver = (type: string, buf: any[]) => {
+      try {
+        const obs = new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) buf.push(e);
+        });
+        obs.observe({ type, buffered: true });
+        return obs;
+      } catch {
+        return null;
+      }
+    };
+    const lcpObs = startObserver('largest-contentful-paint', lcpBuf);
+    const clsObs = startObserver('layout-shift', clsBuf);
+    const ltObs = startObserver('longtask', longtaskBuf);
+    await new Promise((r) => setTimeout(r, 300));
+    lcpObs?.disconnect();
+    clsObs?.disconnect();
+    ltObs?.disconnect();
+    const lcpEntries = lcpBuf as Array<{ renderTime: number; loadTime: number; size: number; url?: string }>;
+    const clsEntries = clsBuf as Array<{ value: number; hadRecentInput: boolean }>;
+    const longTaskEntries = longtaskBuf as Array<{ startTime: number; duration: number }>;
+
+    const lastLcp = lcpEntries[lcpEntries.length - 1];
+    const lcp = lastLcp ? (lastLcp.renderTime || lastLcp.loadTime) : null;
+    const lcpSize = lastLcp ? lastLcp.size : null;
+    const lcpUrl = lastLcp?.url ?? null;
+    const cls = clsEntries.reduce((acc, s) => acc + (s.hadRecentInput ? 0 : s.value), 0);
+    const ttfb = nav ? nav.responseStart - nav.requestStart : null;
+    const longTasks = longTaskEntries.map((t) => ({
+      startTime: t.startTime,
+      duration: t.duration,
+    }));
+    // Navigation timing breakdown — all relative to navigationStart (which
+    // is startTime=0 for the navigation entry).
+    const navTiming = nav
+      ? {
+          redirectMs: nav.redirectEnd - nav.redirectStart,
+          dnsMs: nav.domainLookupEnd - nav.domainLookupStart,
+          tcpMs: nav.connectEnd - nav.connectStart,
+          tlsMs: nav.secureConnectionStart > 0 ? nav.connectEnd - nav.secureConnectionStart : 0,
+          ttfbMs: nav.responseStart - nav.requestStart,
+          responseMs: nav.responseEnd - nav.responseStart,
+          domInteractiveMs: nav.domInteractive,
+          domContentLoadedMs: nav.domContentLoadedEventEnd,
+          loadMs: nav.loadEventEnd,
+          transferSize: nav.transferSize,
+          encodedBodySize: nav.encodedBodySize,
+          decodedBodySize: nav.decodedBodySize,
+        }
+      : null;
+    return {
+      url: location.href,
+      title: document.title,
+      cwv: {
+        lcp,
+        lcpSize,
+        lcpUrl,
+        fcp,
+        fp,
+        cls: Number(cls.toFixed(4)),
+        ttfb,
+        inp: null as number | null, // requires user input to fire; null in headless
+      },
+      navTiming,
+      longTaskCount: longTasks.length,
+      longTaskTotalMs: longTasks.reduce((a, t) => a + t.duration, 0),
+    };
+  });
+  return result;
 });
 
 // ─── Recording ─────────────────────────────────────────────────

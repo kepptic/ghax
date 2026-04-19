@@ -594,8 +594,8 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N]
-  network [--pattern <re>] [--last N]
+  console [--errors] [--last N] [--dedup]  # --dedup groups repeats with count
+  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--har <path>]
   cookies
 
 Extensions (MV3):
@@ -629,6 +629,7 @@ Orchestrated:
      [--out report.json] [--screenshots <dir>] [--no-screenshots]
      [--annotate] [--gif <out.gif>]
   profile [--duration sec] [--heap] [--extension <ext-id>]
+  perf [--wait <ms>]                  # Core Web Vitals + nav timing
   diff-state <before.json> <after.json>
   canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
 
@@ -753,6 +754,9 @@ async function main(): Promise<number> {
 
       case 'profile':
         return await makeSimple('profile')(parseArgs(rest));
+
+      case 'perf':
+        return await makeSimple('perf')(parseArgs(rest));
 
       case 'diff-state':
         return await cmdDiffState(parseArgs(rest));
