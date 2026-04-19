@@ -4,10 +4,12 @@ G's open-source developer toolkit. A collection of CLI tools + Claude Code skill
 that attach to your **real** environment (real browser, real auth, real extensions)
 instead of spinning up sandboxed copies.
 
-**Status**: v0.3 internal-hardening. The flagship `ghax browse` works
-against real Chrome/Edge sessions — including MV3 extension service workers,
-side panels, and seamless hot-reload. Repo is private under `kepptic` for
-now; open-source release paused.
+**Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
+layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
+`review`, `pair`, `try`) and a background-window workflow
+(`find`, `new-window`, `tab --quiet`) for multi-agent use. 64/64 smoke
+checks on Edge + Chrome. Repo is private under `kepptic` for now;
+open-source release paused.
 
 ## What ghax does today
 
@@ -30,7 +32,21 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 - **Real user gestures** via CDP `Input.dispatch*` (needed for APIs like
   `chrome.sidePanel.open()` that refuse synthetic clicks).
 - **Console + network capture** from the moment you attach — rolling 5k-entry
-  buffers, `--errors` and `--pattern` filters.
+  buffers, `--errors` and `--pattern` filters, request+response headers,
+  HAR 1.2 export, stack-frame parsing on page errors, dedup grouping.
+- **Core Web Vitals** (`ghax perf`): LCP (with size + source URL), FCP,
+  CLS, TTFB + full navigation-timing breakdown. Buffered
+  PerformanceObserver so you catch entries that fired before you asked.
+- **Live-injection fix-preview** (`ghax try`): mutate the live page via
+  CSS/JS, optional measurement and screenshot in one call. Revert =
+  reload the page.
+- **Background-window workflow** (`ghax find` / `new-window` /
+  `tab --quiet`): agent gets its own OS window in the same browser +
+  profile, zero focus steal, user keeps working in their other tabs.
+  Multi-agent isolation comes free via `GHAX_STATE_FILE`.
+- **Headless scratch mode** (`ghax attach --launch --headless`): spawn a
+  fresh Chromium on an auto-picked port for CI-style runs. Lives in its
+  own window so it doesn't touch your daily-driver browser.
 - **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
   widths; `ghax viewport WxH` for one-offs.
 - **Batch + record + render**: pipe JSON to `ghax chain` for scripted flows;
@@ -136,15 +152,21 @@ See [`design/plan/03-commands.md`](./design/plan/03-commands.md) for the full
 planned surface. Commands shipped today:
 
 ```
-attach [--port N] [--browser edge|chrome] [--launch] [--load-extension <path>] [--data-dir <path>]
+attach [--port N] [--browser edge|chrome|chromium|brave|arc] [--launch]
+       [--headless] [--load-extension <path>] [--data-dir <path>]
+       # Without --port, scans :9222-9230. Multiple running → picker.
+       # With --launch and no --port, auto-picks first free port in range.
 status [--json]
 detach
 restart
 tabs
-tab <id>
+tab <id> [--quiet]              # --quiet = don't bringToFront (agent mode)
+find <url-substring>            # list matching tabs (pipe into `tab`)
+new-window [url]                # new background window, same profile
 goto <url>
 back | forward | reload
 eval <js>
+try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
 text
 html [<selector>]
 screenshot [<@ref|selector>] [--path p] [--fullPage]
@@ -163,8 +185,8 @@ chain < steps.json
 record start [name] | stop | status
 replay <file>
 gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
-console [--errors] [--last N]
-network [--pattern re] [--last N]
+console [--errors] [--last N] [--dedup]
+network [--pattern re] [--status 4xx|500|400-499] [--last N] [--har <path>]
 cookies
 ext list
 ext targets <ext-id>
@@ -172,6 +194,8 @@ ext reload <ext-id>
 ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
 ext sw <ext-id> eval <js>
 ext panel <ext-id> eval <js>
+ext popup <ext-id> eval <js>
+ext options <ext-id> eval <js>
 ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
 ext message <ext-id> <json-payload>
 gesture click <x,y>
@@ -183,6 +207,7 @@ qa --url <u> [--url <u> ...] [--urls a,b,c]
    [--out report.json] [--screenshots <dir>] [--no-screenshots]
    [--annotate] [--gif <out.gif>]
 profile [--duration sec] [--heap] [--extension <ext-id>]
+perf [--wait <ms>]              # Core Web Vitals + navigation timing
 diff-state <before.json> <after.json>
 canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
 ship [--message "..."] [--no-check] [--no-build] [--no-pr] [--dry-run]
@@ -208,8 +233,16 @@ See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
   verification, `--load-extension` pass-through. ✓
 - **v0.4** — orchestrated layer (`qa`, `profile`, `diff-state`,
   `ship`, `canary`, `review`, `pair`) + SSE tail mode on console /
-  network / ext sw logs + `ext popup` / `ext options` / `ext message`. ✓
-- **v0.5** — multi-tenant token-auth pair mode, skill-eval harness.
+  network / ext sw logs + `ext popup` / `ext options` / `ext message`
+  + attach ergonomics (auto-port, `--headless`, multi-CDP picker)
+  + background-window workflow (`find`, `new-window`, `tab --quiet`)
+  + `ghax try` live-injection preview
+  + debugging depth tier 1 (`perf`, `console --dedup` + stack parsing,
+  `network --status`, `network --har`)
+  + cross-browser smoke harness + headless CLI benchmark. ✓
+- **v0.5** — multi-tenant token-auth pair mode (flagged not-planned for
+  solo use). Skill-eval harness deferred indefinitely in favor of the
+  64-check smoke suite.
 - Public release (npm publish, docs site, announce) paused by decision.
 
 ## Security

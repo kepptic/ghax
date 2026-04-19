@@ -1,20 +1,30 @@
-# ghax — session handoff (2026-04-18, roadmap complete)
+# ghax — session handoff (2026-04-19, v0.4 complete + debugging tier 1)
 
 Start here when you pick this back up in a new session.
 
 ## Where we are
 
 Every roadmap item not explicitly paused (public release) or deferred
-(multi-tenant pair auth, skill-eval harness) is shipped.
+(multi-tenant pair auth, skill-eval harness) is shipped. v0.4 was
+expanded with attach ergonomics, a background-window workflow, `ghax
+try`, and a debugging depth pass.
 
 - v0.1 — flagship `ghax browse` ✓
 - v0.2 — QA ergonomics ✓
 - v0.3 — hot-reload, shadow-DOM, gif, Claude Code skills, CI ✓
 - v1.0 — internal hardening (smoke tests, hot-reload verification) ✓
 - v0.4 — orchestrated layer (`qa`, `profile`, `diff-state`, `ship`,
-  `canary`, `review`, `pair`) + SSE tail mode + spec gaps closed ✓
+  `canary`, `review`, `pair`) + SSE tail mode + spec gaps closed
+  + attach ergonomics (auto-port, `--headless`, multi-CDP picker)
+  + background-window workflow (`find`, `new-window`, `tab --quiet`)
+  + `ghax try` live-injection preview
+  + debugging tier 1 (`perf`, `console --dedup` + stack parsing,
+  `network --status`, `network --har`)
+  + cross-browser smoke harness + headless CLI benchmark ✓
 
-**34/34 smoke checks** pass in ~7s against a live Edge session.
+**64/64 smoke checks** pass in ~30s against a live Edge session.
+Also green on Chrome (64/64 in ~26s) via
+`bun run test:cross-browser`.
 
 ## The full shipped surface
 

@@ -8,6 +8,63 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>]
+  [--shot <path>]` — live-injection fix-preview. Composable wrapper over
+  `page.evaluate` + `page.screenshot` for the "mutate the live page,
+  measure, maybe screenshot" loop. CSS appends `<style class="ghax-try">`;
+  JS is IIFE-wrapped with optional `el` binding; `--measure` runs
+  post-mutation. Revert = reload the page.
+- `ghax perf [--wait <ms>]` — Core Web Vitals + navigation timing. Reads
+  LCP (with size and URL), FCP, FP, CLS, TTFB, INP, long-task count,
+  plus full navTiming breakdown (DNS, TCP, TLS, TTFB, response,
+  DOMInteractive, DOMContentLoaded, load, transfer/encoded/decoded
+  sizes). LCP/CLS/longtask come via a buffered PerformanceObserver — they
+  don't live in the default timeline buffer.
+- `ghax find <url-substring>` — list tabs whose URL contains the
+  substring. Returns `[{id, url, title}]`. Pipe the id into `ghax tab`
+  to attach to a matching tab, or fall through to `new-window`.
+- `ghax new-window [url]` — open a new OS-level window via
+  `Target.createTarget({ newWindow: true, background: true })`. Same
+  profile, so auth + extensions carry over. Does NOT steal focus.
+  Auto-locks the new tab as the daemon's active tab so subsequent
+  commands land in the fresh window without an extra `tab` step.
+- `ghax tab <id> --quiet` — skip `bringToFront`. Lets an agent lock onto
+  a tab without raising the window or stealing focus from whatever
+  the user is actively doing.
+- `ghax attach` ergonomics: auto-port fallback (`--launch` without
+  `--port` scans :9222-9230 and picks the first free one, prints the
+  chosen port on fallback), multi-CDP picker (plain `ghax attach` with
+  multiple live CDPs shows a numbered selector), `--headless` flag
+  (scratch-profile only — spawns with `--headless=new` so extensions
+  still work), and a clearer kind-mismatch error when `--browser chrome`
+  is asked for but only Edge is running.
+- `ghax console --dedup` — groups repeated entries by (level, text)
+  into `[{level, text, count, firstAt, lastAt, url, source, stack}]`
+  sorted by count desc. Turns "500 identical errors" into one row with
+  count=500. On capture, `pageerror` events now include a parsed stack
+  `[{fn, url, line, col}]` via a new V8 stack-trace parser in
+  `buffers.ts`.
+- `ghax network --status <code|family|range>` filter — `--status 404`
+  (exact), `--status 4xx` (family), `--status 400-499` (range).
+- `ghax network --har <path>` — export captured entries as HAR 1.2 JSON
+  consumable by Charles, har-analyzer, WebPageTest, and the Chrome
+  DevTools network panel.
+- Request + response **headers** captured on every network entry (not
+  just URL + status). Response `statusText` and `duration` also
+  captured. Bodies are still not captured by default (memory cost too
+  high for a 5k rolling buffer).
+- `test/cross-browser.ts` + `bun run test:cross-browser` — iterates every
+  Chromium-family browser `detectBrowsers()` finds, launches each
+  headless in a disposable scratch profile, runs the full smoke suite
+  against it, tabulates pass/fail + timing per browser. Arc is filtered
+  out (no CDP). First baseline: Edge 64/64 in 24.3s, Chrome 64/64 in
+  26.5s.
+- `test/benchmark.ts` + `bun run test:benchmark` — headless CLI benchmark
+  against gstack-browse, playwright-cli, and agent-browser on a
+  6-step workflow (launch → goto → text → js → screenshot → snapshot →
+  close). Reports cold (end-to-end) and warm (per-command, session
+  reused) numbers. First baseline: ghax 65ms/cmd, gstack 56ms/cmd,
+  agent-browser 178ms/cmd, playwright-cli 476ms/cmd.
 - `ghax profile [--duration sec] [--heap] [--extension <id>]` — CDP
   `Performance.getMetrics` snapshot for the active tab or an
   extension service worker. Optional duration-based delta capture and
@@ -61,7 +118,8 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   real CDP `Input.dispatch*` gestures.
 - `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
   pass-through for Chrome's `--load-extension` + scratch profile.
-- `test/smoke.ts` — 34-check harness against a live browser.
+- `test/smoke.ts` — 64-check harness against a live browser (grew from
+  24 as the v0.4 + debugging-tier-1 surface landed).
 - `test/hot-reload-smoke.ts` — fully scripted hot-reload verification.
 - `test/fixtures/test-extension/` — minimal MV3 fixture.
 
@@ -69,7 +127,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `ghax ext list` enriches each entry with manifest-derived `name`,
   `version`, and `enabled` fields.
-- README reflects v0.3+ features and the current v0.4 status.
+- `ghax attach` defaults changed: no `--port` now scans :9222-9230 for
+  existing CDPs (multiple → picker, one → attach). With `--launch` and
+  no `--port`, auto-picks the first free port in the same range. Pass
+  `--port <n>` explicitly to opt out of the scan.
+- `ghax attach --browser <kind>` now filters the scan too — so
+  requesting Chrome while Edge runs on :9222 correctly triggers launch
+  (with `--launch`) or a useful error (without it), instead of silently
+  attaching to the wrong browser.
+- `ghax tab <id>` gained a `--quiet` flag to skip `bringToFront`; default
+  behavior unchanged.
+- Network capture now stores request + response headers, response
+  `statusText`, and per-request `duration` in addition to the original
+  URL/status/method/resourceType.
+- README reflects v0.4 features, expanded surface, and new debugging
+  primitives (`perf`, `try`, `console --dedup`, `network --har`).
 - `bun run install-link` / `bun run uninstall-link` — symlink
   `dist/ghax` into `~/.local/bin` so the binary resolves from any
   shell + any Claude Code session without the caller qualifying the

@@ -12,13 +12,21 @@ ghax/
   src/
     cli.ts                  Argv → daemon RPC. Verb dispatcher + attach/detach specials.
     daemon.ts               Node HTTP daemon. Playwright connectOverCDP + raw CDP pool.
-    browser-launch.ts       Browser binary detection + CDP probe + --launch scratch profile.
+    browser-launch.ts       Browser detect + CDP probe + scan/findFreePort + --launch/--headless.
     cdp-client.ts           /json/list target discovery + per-target WebSocket pool.
     config.ts               State file resolution (git root → .ghax/ghax.json).
-    buffers.ts              CircularBuffer<T> for console + network entries.
+    buffers.ts              CircularBuffer<T>, ConsoleEntry, NetworkEntry, parseStack().
     snapshot.ts             aria tree → @e<n> refs, cursor-interactive + shadow-DOM pass.
+  test/
+    smoke.ts                Live-browser harness (64 checks, ~30s).
+    cross-browser.ts        Iterate every detected Chromium browser; run smoke on each.
+    benchmark.ts            Headless CLI benchmark vs gstack-browse, playwright-cli, agent-browser.
+    hot-reload-smoke.ts     Scripted MV3 hot-reload probe against test/fixtures/test-extension/.
+    fixtures/test-extension/  Minimal MV3 fixture for hot-reload verification.
   .claude/skills/           Claude Code skills (auto-register via devops-skill-registry).
   design/plan/              Vision, architecture, commands, roadmap, session handoff.
+  ARCHITECTURE.md           Current architecture summary (for readers).
+  CLAUDE.md                 Project instructions for Claude Code / other agents.
   dist/                     Built binaries (gitignored).
 ```
 
@@ -72,16 +80,30 @@ daemon is a bundle, not a live file. The CLI alone can run via
 
 ## Testing
 
-Two test surfaces:
+Four test surfaces:
 
 ```bash
-bun run typecheck    # bunx tsc --noEmit — runs in CI
-bun run test:smoke   # test/smoke.ts — drives a real browser, NOT in CI
+bun run typecheck         # bunx tsc --noEmit — runs in CI
+bun run test:smoke        # test/smoke.ts — drives a real browser, NOT in CI
+bun run test:cross-browser # run smoke against every installed Chromium (Edge + Chrome, Brave, Chromium if present)
+bun run test:benchmark    # compare per-command latency vs gstack-browse / playwright-cli / agent-browser
 ```
 
 The smoke test requires a running Chromium-family browser on
-`--remote-debugging-port=9222`. It attaches, runs ~24 non-destructive
-commands, and detaches. Takes ~20s end-to-end.
+`--remote-debugging-port=9222`. It attaches, runs **64 non-destructive
+commands** (navigation, snapshots, interaction, extensions, orchestrated
+verbs, `try`, `perf`, console dedup, network status/HAR, new-window
+workflow), and detaches. Takes ~30s end-to-end.
+
+`test:cross-browser` launches each installed browser headless in a
+disposable scratch profile and runs the full smoke against each.
+Confirms the codebase is truly browser-agnostic within the Chromium
+family — no Edge-specific branches.
+
+`test:benchmark` is a reference comparison against the other main CLI
+browser-automation tools. Useful when changing daemon internals or the
+RPC path — the warm per-command number should stay in the same tier as
+gstack-browse.
 
 For MV3 hot-reload specifically, load `test/fixtures/test-extension/`
 as an unpacked extension and follow its README — that's the one bit of
