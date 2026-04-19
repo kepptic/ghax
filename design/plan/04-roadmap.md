@@ -254,6 +254,14 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] Cross-browser smoke harness (`test/cross-browser.ts` / `bun run
+      test:cross-browser`). Iterates every Chromium-family browser
+      detectBrowsers() finds, launches each headless in a disposable
+      scratch profile, runs the full 59-check smoke against it, tabulates.
+      Arc is filtered out (no CDP support in its stock binary).
+      First run (2026-04-19): Edge 59/59 in 21.7s, Chrome 59/59 in 21.0s.
+      Confirms the abstraction is fully browser-agnostic within the
+      Chromium family — zero browser-specific workarounds needed so far.
 - [x] Background-window workflow — `find` / `new-window` / `tab --quiet`
       for the "user keeps browsing while agent works" case. Each agent
       gets its own window (same browser, same profile, so auth + extensions
