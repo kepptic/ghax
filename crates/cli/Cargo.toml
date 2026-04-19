@@ -21,3 +21,7 @@ serde = { version = "1", features = ["derive"] }
 # The parity test diffs byte-for-byte, so alphabetized keys would break it.
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
+# ctrlc: SIGINT handler for `canary` poll loop. Needed because std::thread::sleep
+# is not interruptible — ctrlc sets an AtomicBool that the sleep loop checks every
+# 250 ms (same pattern as the TS canary which uses 250 ms setTimeout ticks).
+ctrlc = { version = "3", features = ["termination"] }

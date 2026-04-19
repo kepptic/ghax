@@ -1,14 +1,20 @@
 //! ghax — Rust CLI entry point.
 //!
-//! Phase 1: argv → daemon RPC → print. Medium and complex verbs (attach,
-//! qa, canary, ship, console --follow, shell) are stubs that route users
-//! back to the Bun CLI for the duration of the rewrite window.
+//! Phase 1 + 2: argv → daemon RPC → print, plus attach + medium verbs.
+//! Phase 3 verbs that need SSE or REPL (shell, console --follow,
+//! network --follow, ext sw logs --follow) still stub out to the Bun CLI.
 
 mod args;
+mod attach;
+mod canary;
 mod dispatch;
 mod help;
 mod output;
+mod qa;
+mod review;
 mod rpc;
+mod ship;
+mod small;
 mod state;
 
 use std::process::ExitCode;
