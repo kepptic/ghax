@@ -600,6 +600,66 @@ c('ext message rejects missing args with usage', async () => {
   assert(/Usage: ghax ext message/.test(r.stderr), `expected usage line: ${r.stderr.slice(0, 200)}`);
 });
 
+c('find <substring> lists tabs whose URL contains it', async () => {
+  // Ensure at least one tab matches — goto example.com first.
+  await run(['goto', 'https://example.com']);
+  const r = await run(['find', 'example', '--json']);
+  const matches = parseJson<Array<{ id: string; url: string }>>(r.stdout);
+  assert(matches.length >= 1, `expected at least one match, got ${matches.length}`);
+  assert(
+    matches.every((m) => m.url.includes('example')),
+    `every match URL should include "example": ${JSON.stringify(matches)}`,
+  );
+  assert(typeof matches[0].id === 'string' && matches[0].id.length > 0, 'match id should be string');
+});
+
+c('new-window opens a background window and auto-locks active tab', async () => {
+  // Snapshot the current tab count so we can assert an increase.
+  const beforeTabs = parseJson<Array<{ id: string }>>((await run(['tabs', '--json'])).stdout);
+  const beforeCount = beforeTabs.length;
+  const beforeActive = beforeTabs.find((t: any) => t.active)?.id;
+
+  const r = await run(['new-window', 'https://example.org', '--json']);
+  const created = parseJson<{ id: string; url: string }>(r.stdout);
+  assert(typeof created.id === 'string' && created.id.length > 0, 'new-window should return an id');
+  assert(/example\.org/.test(created.url), `new-window should land on example.org, got ${created.url}`);
+
+  // Tab count bumps by 1.
+  const afterTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  assert(afterTabs.length === beforeCount + 1, `expected tab count +1, got ${afterTabs.length - beforeCount}`);
+
+  // The daemon's active tab should be the new one, not the previous one.
+  const newActive = afterTabs.find((t) => t.active)?.id;
+  assert(newActive === created.id, `active tab should be new window's id, got ${newActive}`);
+  assert(newActive !== beforeActive, 'active tab should have changed');
+
+  // Subsequent commands operate on the new window — navigate it away.
+  await run(['goto', 'https://example.com']);
+  const here = (await run(['eval', 'location.href'])).stdout.trim();
+  assert(/example\.com/.test(here), `goto after new-window should target new tab, got ${here}`);
+
+  // Cleanup: close the window we created. window.close() only works on
+  // windows opened via script; for CDP-opened windows Chrome allows it too.
+  await run(['eval', 'window.close()'], { allowFailure: true });
+  // After close, subsequent commands need the active tab to point somewhere
+  // valid — re-attach to the original.
+  if (beforeActive) await run(['tab', beforeActive, '--quiet'], { allowFailure: true });
+});
+
+c('tab --quiet skips bringToFront', async () => {
+  // Hard to assert "no focus change" deterministically, so assert the command
+  // path runs cleanly and sets the active pointer.
+  const tabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  if (tabs.length < 1) {
+    console.log('  (no tabs — skipping)');
+    return;
+  }
+  const target = tabs[0].id;
+  const r = await run(['tab', target, '--quiet', '--json']);
+  const data = parseJson<{ id: string }>(r.stdout);
+  assert(data.id === target, `tab --quiet should echo id, got ${data.id}`);
+});
+
 c('try --css injects a tagged <style> node', async () => {
   await run(['goto', 'https://example.com']);
   await run(['wait', '300']);
