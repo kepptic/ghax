@@ -22,8 +22,8 @@ try`, and a debugging depth pass.
   `network --status`, `network --har`)
   + cross-browser smoke harness + headless CLI benchmark ✓
 
-**64/64 smoke checks** pass in ~30s against a live Edge session.
-Also green on Chrome (64/64 in ~26s) via
+**66/66 smoke checks** pass in ~30s against a live Edge session.
+Also green on Chrome (66/66 in ~29.5s) via
 `bun run test:cross-browser`.
 
 ## The full shipped surface

@@ -185,6 +185,39 @@ Multi-agent parallelism comes free from this: each agent uses its own
 creates its own windows. They share the browser process but don't step
 on each other.
 
+## Shell mode (REPL)
+
+`ghax shell` is a thin loop around the same `dispatch(argv)` function
+that `main()` calls. It reads stdin line-by-line, tokenises with
+shell-ish quoting (single/double quotes, backslash escapes — no glob,
+no env expansion), and re-enters dispatch per line.
+
+Why it matters: the per-command Bun spawn cost (~30-40ms for the
+compiled binary plus JS init) dominates the warm benchmark. In shell
+mode that cost happens once, not per command. Measured 138ms/cmd vs
+247ms/cmd across 10-command batches — 1.8x faster for multi-turn
+sessions.
+
+The daemon doesn't care whether commands arrive from fresh CLI
+invocations or from a long-running shell process. Same HTTP RPC,
+same handlers, same state.
+
+## Disconnect recovery
+
+When the user closes their browser (or a scratch browser crashes),
+Playwright fires `browser.on('disconnected')`. The daemon subscribes
+to that event at connect time and calls `shutdown('browser-disconnected')`
+via `setImmediate` to avoid running inside a Playwright event handler.
+
+`shutdown()` clears the state file, unwinds HTTP listeners and the CDP
+pool, and exits. The next `ghax attach` is fresh.
+
+On the CLI side, the main dispatch catch clause rewrites raw Playwright
+disconnect errors — `"browser has been closed"`, `"Target page has been
+closed"`, anything matching `/disconnected/i` — into a one-liner:
+`"browser has disconnected — run \`ghax attach\` to reconnect"`. Exit
+code is `NOT_ATTACHED` so wrapper scripts can branch on it.
+
 ## What lives where
 
 | File | Lines | Purpose |
