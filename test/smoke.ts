@@ -405,9 +405,34 @@ c('diff-state diffs two JSON files', async () => {
 
 c('--help lists the expected verbs', async () => {
   const r = await run(['--help']);
-  for (const verb of ['attach', 'goto', 'snapshot', 'click', 'qa', 'ship', 'review', 'canary', 'pair', 'gif']) {
+  for (const verb of ['attach', 'goto', 'snapshot', 'click', 'qa', 'ship', 'review', 'canary', 'pair', 'gif', 'try']) {
     assert(r.stdout.includes(verb), `--help missing verb: ${verb}`);
   }
+});
+
+c('--help documents --headless and auto-port range', async () => {
+  const r = await run(['--help']);
+  assert(r.stdout.includes('--headless'), '--help missing --headless flag');
+  assert(/scans :9222-9230|auto-picks/i.test(r.stdout), '--help missing auto-port note');
+});
+
+c('attach --browser <kind> reports the kind-mismatch clearly', async () => {
+  // Edge is already attached from earlier checks; the daemon survives across
+  // tests. Requesting a *different* browser without --launch should produce a
+  // helpful kind-mismatch error, NOT the generic "no browser found" message.
+  //
+  // First we need to detach so cmdAttach gets to the scan/filter path. The
+  // final "detach" check at the bottom of the file does a full daemon
+  // teardown — we reuse attach afterwards to restore state.
+  await run(['detach'], { allowFailure: true });
+  const r = await run(['attach', '--browser', 'chromium'], { allowFailure: true });
+  const out = r.stderr + r.stdout;
+  assert(
+    /only .* on :\d+ running|--browser chromium requested/i.test(out),
+    `expected kind-mismatch error, got: ${out.slice(0, 300)}`,
+  );
+  // Re-attach so the rest of the suite can run (this test sits mid-suite).
+  await run(['attach']);
 });
 
 c('back / forward / reload navigate history', async () => {
