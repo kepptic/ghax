@@ -254,6 +254,33 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] Headless CLI benchmark (`test/benchmark.ts` / `bun run test:benchmark`).
+      Compares ghax against gstack browse, playwright-cli, and agent-browser
+      on a 6-step workflow (launch → goto → text → js → screenshot →
+      snapshot → close) against example.com. Claude in Chrome excluded —
+      extension + per-turn API round-trip puts it in a different class
+      (~5-10s/action).
+
+      First baseline run (mac, 2026-04-19):
+
+      Cold (end-to-end, launch+ops+teardown, median 3 runs):
+        ghax            2004ms
+        agent-browser   2008ms
+        playwright-cli  3854ms
+        gstack-browse   6405ms  (5s of that = gstack's `stop` quirk)
+
+      Warm (session reused, 5-cmd loop × 3, per-command):
+        gstack-browse    56ms/cmd
+        ghax             65ms/cmd
+        agent-browser   178ms/cmd
+        playwright-cli  476ms/cmd
+
+      Key finding: ghax and gstack-browse are in the same perf tier for
+      steady-state agent work. playwright-cli has ~7x the per-invocation
+      overhead — each CLI call re-attaches to its saved state. agent-browser
+      is 3x slower per command. Projected 50-op session: ghax 3.2s,
+      gstack 2.8s, agent-browser 9s, playwright-cli 24s, Claude in Chrome
+      4-8 minutes.
 - [x] Cross-browser smoke harness (`test/cross-browser.ts` / `bun run
       test:cross-browser`). Iterates every Chromium-family browser
       detectBrowsers() finds, launches each headless in a disposable
