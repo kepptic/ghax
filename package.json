@@ -14,6 +14,7 @@
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "test:smoke": "bun run test/smoke.ts",
+    "test:capture-bodies": "bun run test/capture-bodies-smoke.ts",
     "test:cross-browser": "bun run test/cross-browser.ts",
     "test:benchmark": "bun run test/benchmark.ts",
     "install-link": "mkdir -p ~/.local/bin && ln -sf \"$PWD/dist/ghax\" ~/.local/bin/ghax && echo 'linked → ~/.local/bin/ghax'",
