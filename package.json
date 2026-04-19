@@ -17,6 +17,7 @@
     "test:capture-bodies": "bun run test/capture-bodies-smoke.ts",
     "test:cross-browser": "bun run test/cross-browser.ts",
     "test:benchmark": "bun run test/benchmark.ts",
+    "test:perf": "bun run test/perf-bench.ts",
     "install-link": "mkdir -p ~/.local/bin && ln -sf \"$PWD/dist/ghax\" ~/.local/bin/ghax && echo 'linked → ~/.local/bin/ghax'",
     "uninstall-link": "rm -f ~/.local/bin/ghax && echo 'unlinked ~/.local/bin/ghax'"
   },

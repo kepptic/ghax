@@ -80,13 +80,15 @@ daemon is a bundle, not a live file. The CLI alone can run via
 
 ## Testing
 
-Four test surfaces:
+Six test surfaces:
 
 ```bash
-bun run typecheck         # bunx tsc --noEmit — runs in CI
-bun run test:smoke        # test/smoke.ts — drives a real browser, NOT in CI
-bun run test:cross-browser # run smoke against every installed Chromium (Edge + Chrome, Brave, Chromium if present)
-bun run test:benchmark    # compare per-command latency vs gstack-browse / playwright-cli / agent-browser
+bun run typecheck           # bunx tsc --noEmit — runs in CI
+bun run test:smoke          # test/smoke.ts — drives a real browser, NOT in CI
+bun run test:capture-bodies # test/capture-bodies-smoke.ts — end-to-end body capture
+bun run test:cross-browser  # run smoke against every installed Chromium (Edge + Chrome, Brave, Chromium if present)
+bun run test:benchmark      # compare per-command latency vs gstack-browse / playwright-cli / agent-browser
+bun run test:perf           # perf budget test — FAILS if P50 regresses past threshold
 ```
 
 The smoke test requires a running Chromium-family browser on
@@ -104,6 +106,12 @@ family — no Edge-specific branches.
 browser-automation tools. Useful when changing daemon internals or the
 RPC path — the warm per-command number should stay in the same tier as
 gstack-browse.
+
+`test:perf` enforces P50 budgets on 13 critical operations + the shell-
+mode fast path + a cold-start workflow. It FAILS on regression. The
+budgets are calibrated against measured steady-state + 30% margin.
+Current floor: ~30ms/cmd for single-invocation (dominated by Bun CLI
+spawn), ~4.4ms/cmd in shell mode.
 
 For MV3 hot-reload specifically, load `test/fixtures/test-extension/`
 as an unpacked extension and follow its README — that's the one bit of
