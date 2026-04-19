@@ -181,8 +181,8 @@ release track is on hold.
 - [x] `test/smoke.ts` — live-browser harness. Runs locally only (CI has
       no browser); original scaffold at commit `e41ab7d`, extended to
       cover the full v0.4 surface + `ghax try` + attach ergonomics +
-      background-window workflow + debugging tier 1 — 64/64 checks
-      in ~30s.
+      background-window workflow + debugging tier 1 + shell/disconnect
+      quality-of-life — 66/66 checks in ~30s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -255,6 +255,26 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] `ghax shell` + disconnect recovery — quality-of-life tier.
+
+      `ghax shell` — interactive REPL. Reads commands from stdin, tokenises
+      them the same way a shell would (quoted strings, escapes), re-enters
+      the main dispatch. One process for the whole session, so the
+      per-command Bun spawn cost disappears. Measured: 10 commands in 1.38s
+      (138ms/cmd) vs 2.47s across separate invocations (247ms/cmd) — 1.8x
+      faster for multi-turn agent sessions, just by not re-spawning. Works
+      both interactively (TTY, prompt, history) and as a scripted pipe.
+
+      Disconnect recovery — daemon listens for `browser.on('disconnected')`
+      (fires when the user closes their browser, or a scratch browser
+      crashes). When it fires, the daemon self-shuts cleanly, clearing the
+      state file. Next `ghax attach` starts fresh. CLI-side error handler
+      catches "browser has been closed" / "Target page has been closed"
+      messages and prints "browser has disconnected — run `ghax attach` to
+      reconnect" instead of a raw Playwright stack trace.
+
+      Smoke 64 → 66 (shell mode execution, shell tokenising with quoted
+      CSS + measure). Edge 66/66 in 30.8s, Chrome 66/66 in 29.5s.
 - [x] Debugging depth pass — tier 1. Closed the real-world "why is this
       slow / why did it break / what's actually going over the wire" gaps
       that dropped out of the initial audit.

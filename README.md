@@ -213,6 +213,7 @@ canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
 ship [--message "..."] [--no-check] [--no-build] [--no-pr] [--dry-run]
 review [--base origin/main] [--diff]
 pair [status]
+shell                             # interactive REPL — skip per-command spawn cost
 
 # Live tail (SSE)
 console --follow

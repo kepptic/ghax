@@ -478,9 +478,42 @@ c('diff-state diffs two JSON files', async () => {
 
 c('--help lists the expected verbs', async () => {
   const r = await run(['--help']);
-  for (const verb of ['attach', 'goto', 'snapshot', 'click', 'qa', 'ship', 'review', 'canary', 'pair', 'gif', 'try']) {
+  for (const verb of ['attach', 'goto', 'snapshot', 'click', 'qa', 'ship', 'review', 'canary', 'pair', 'gif', 'try', 'shell']) {
     assert(r.stdout.includes(verb), `--help missing verb: ${verb}`);
   }
+});
+
+c('shell mode runs piped commands in one process', async () => {
+  // Pipe 3 commands through `ghax shell` stdin; confirm each ran by
+  // checking the combined output contains expected markers. This also
+  // exercises comment handling and the `exit` early-terminator.
+  const script = [
+    '# comment line ignored',
+    '',
+    'goto https://example.com',
+    'eval "document.title"',
+    'exit',
+    'eval "should-not-run"',
+  ].join('\n');
+  const r = await run(['shell'], { stdin: script });
+  assert(/example\.com/.test(r.stdout), `shell mode goto output missing: ${r.stdout.slice(0, 200)}`);
+  assert(/Example Domain/.test(r.stdout), `shell mode eval output missing: ${r.stdout.slice(0, 200)}`);
+  assert(!r.stdout.includes('should-not-run'), `exit failed to stop — post-exit command ran: ${r.stdout.slice(0, 300)}`);
+});
+
+c('shell mode tokenises quoted args correctly', async () => {
+  // `ghax try --css 'body { color: red }' ...` needs single-quote
+  // preservation so the CSS doesn't get split on whitespace. If the
+  // tokeniser breaks, `try` would see mangled flags and fail.
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '200']);
+  const script = [
+    "try --css 'body { background: rgb(0, 128, 0) }' --measure 'getComputedStyle(document.body).backgroundColor'",
+    'reload',
+    'exit',
+  ].join('\n');
+  const r = await run(['shell'], { stdin: script });
+  assert(/rgb\(0, 128, 0\)/.test(r.stdout), `shell quoting broken — CSS didn't paint: ${r.stdout.slice(0, 300)}`);
 });
 
 c('--help documents --headless and auto-port range', async () => {

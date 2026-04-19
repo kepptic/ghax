@@ -1817,6 +1817,21 @@ async function main() {
   const contexts = browser.contexts();
   const context = contexts[0] ?? (await browser.newContext());
 
+  // If the user quits the browser (or it crashes) while we're attached,
+  // Playwright fires `disconnected` on the Browser object. Without this
+  // listener, subsequent commands throw a raw "Target page has been closed"
+  // stack trace. Here we catch the event and shut the daemon cleanly — the
+  // state file gets cleared, and the next `ghax attach` starts fresh.
+  browser.on('disconnected', () => {
+    log('browser disconnected — shutting down daemon');
+    // shutdown() is defined further down in the outer scope via closure;
+    // call it via setImmediate to avoid running inside a Playwright event
+    // handler which can re-enter odd code paths during teardown.
+    setImmediate(() => {
+      void shutdown('browser-disconnected');
+    });
+  });
+
   const ctx: Ctx = {
     browser,
     context,
