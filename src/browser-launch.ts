@@ -124,6 +124,33 @@ export async function probeCdp(port: number = 9222, host: string = '127.0.0.1'):
   }
 }
 
+/**
+ * Scan a port range for live CDP endpoints. Probes each port in parallel
+ * with a 1.5s timeout; returns every port that answered /json/version.
+ * Used by `ghax attach` to auto-discover CDPs across multiple browsers.
+ */
+export async function scanCdpPorts(start: number, count: number): Promise<CdpEndpoint[]> {
+  const probes = Array.from({ length: count }, (_, i) => probeCdp(start + i));
+  const results = await Promise.all(probes);
+  return results.filter((ep): ep is CdpEndpoint => ep !== null);
+}
+
+/**
+ * Find the first port in [start, start+count) with nothing answering CDP.
+ * Returns null if the range is fully occupied (something answering CDP on
+ * every port — which shouldn't realistically happen). Returns a port even
+ * if that port is bound to a non-CDP service; the launch step will then
+ * either succeed (port was free) or fail loudly (port was bound).
+ */
+export async function findFreePort(start: number, count: number): Promise<number | null> {
+  for (let i = 0; i < count; i++) {
+    const port = start + i;
+    const ep = await probeCdp(port);
+    if (!ep) return port;
+  }
+  return null;
+}
+
 export function profileDirFor(kind: BrowserKind): string {
   return path.join(os.homedir(), '.ghax', `${kind}-profile`);
 }
@@ -136,7 +163,12 @@ export interface LaunchResult {
 
 export async function launchBrowser(
   binary: BrowserBinary,
-  opts: { port?: number; dataDir?: string; loadExtension?: string | string[] } = {},
+  opts: {
+    port?: number;
+    dataDir?: string;
+    loadExtension?: string | string[];
+    headless?: boolean;
+  } = {},
 ): Promise<LaunchResult> {
   const port = opts.port ?? 9222;
   const dataDir = opts.dataDir ?? profileDirFor(binary.kind);
@@ -149,6 +181,13 @@ export async function launchBrowser(
     '--no-default-browser-check',
     '--disable-features=IsolateOrigins,site-per-process',
   ];
+
+  // Chromium 109+ takes --headless=new, which is the only headless mode
+  // that supports extensions. The old --headless flag silently ignored
+  // --load-extension, which would break hot-reload tests.
+  if (opts.headless) {
+    args.push('--headless=new');
+  }
 
   if (opts.loadExtension) {
     // `--load-extension` accepts a comma-separated list. `--disable-extensions-except`

@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { resolveConfig, readState, clearState, ensureStateDir, isProcessAlive, type DaemonState } from './config';
-import { probeCdp, detectBrowsers, launchBrowser, launchInstructions, type BrowserKind, type CdpEndpoint } from './browser-launch';
+import { probeCdp, scanCdpPorts, findFreePort, detectBrowsers, launchBrowser, launchInstructions, type BrowserKind, type CdpEndpoint } from './browser-launch';
 
 const EXIT = {
   OK: 0,
@@ -143,10 +143,15 @@ async function spawnDaemon(endpoint: CdpEndpoint, kind: BrowserKind): Promise<Da
 
 // ─── Special commands ──────────────────────────────────────────
 
+// Default range we scan for CDPs and auto-fallback port selection.
+const PORT_BASE = 9222;
+const PORT_RANGE = 9; // 9222..9230 inclusive
+
 async function cmdAttach(parsed: ParsedArgs): Promise<number> {
-  const port = parsed.flags.port ? Number(parsed.flags.port) : 9222;
+  const explicitPort = parsed.flags.port ? Number(parsed.flags.port) : null;
   const browserOpt = (parsed.flags.browser as string | undefined) as BrowserKind | undefined;
   const launch = Boolean(parsed.flags.launch);
+  const headless = Boolean(parsed.flags.headless);
 
   // If already attached, short-circuit.
   const existing = readState(cfg);
@@ -159,13 +164,56 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
     clearState(cfg);
   }
 
-  let endpoint = await probeCdp(port);
+  // ── Step 1: find an endpoint (attach path) ───────────────────────
+  //
+  // Reuse beats launch. If the user asked for a specific port, only probe
+  // that. Otherwise scan PORT_BASE..+RANGE for any live CDP.
+  //
+  // When --browser <kind> is passed, treat it as a filter on what counts
+  // as a valid reuse target: the user wants THAT browser. If nothing of
+  // that kind is running, fall through to launch (assuming --launch).
+  let endpoint: CdpEndpoint | null = null;
+  if (explicitPort !== null) {
+    const hit = await probeCdp(explicitPort);
+    if (hit) {
+      const hitKind = inferKindFromVersion(hit.version['User-Agent']);
+      if (!browserOpt || hitKind === browserOpt) endpoint = hit;
+    }
+  } else {
+    let found = await scanCdpPorts(PORT_BASE, PORT_RANGE);
+    if (browserOpt) {
+      found = found.filter((ep) => inferKindFromVersion(ep.version['User-Agent']) === browserOpt);
+    }
+    if (found.length === 1) {
+      endpoint = found[0];
+    } else if (found.length > 1) {
+      // Multiple matching CDPs. Pick interactively if we have a TTY;
+      // fall back to the first one with a note for scripted callers.
+      endpoint = await pickEndpoint(found, browserOpt);
+    }
+  }
+
   let kind: BrowserKind = browserOpt ?? 'edge';
 
   if (!endpoint) {
+    // ── Step 2: launch path ─────────────────────────────────────────
     const browsers = detectBrowsers();
     if (!launch) {
-      console.error(launchInstructions(port, browsers));
+      // If --browser filtered out live CDPs, say so — it's a better error
+      // than pretending nothing's running.
+      if (browserOpt && explicitPort === null) {
+        const anyRunning = await scanCdpPorts(PORT_BASE, PORT_RANGE);
+        if (anyRunning.length > 0) {
+          const describe = (ep: CdpEndpoint) =>
+            `${inferKindFromVersion(ep.version['User-Agent'])} on :${ep.port}`;
+          console.error(
+            `--browser ${browserOpt} requested, but only ${anyRunning.map(describe).join(', ')} running.\n` +
+              `  Pass --launch to start ${browserOpt}, or omit --browser to attach to a running one.`,
+          );
+          return EXIT.NOT_ATTACHED;
+        }
+      }
+      console.error(launchInstructions(explicitPort ?? PORT_BASE, browsers));
       return EXIT.NOT_ATTACHED;
     }
     if (browsers.length === 0) {
@@ -179,13 +227,45 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
       console.error(`Browser ${browserOpt} not found. Installed: ${browsers.map((b) => b.kind).join(', ')}`);
       return EXIT.NOT_ATTACHED;
     }
+
+    // Pick the port: explicit wins, else scan for a free one in range.
+    let launchPort: number;
+    if (explicitPort !== null) {
+      launchPort = explicitPort;
+      // Sanity check: explicit port in use (non-CDP) means launch will fail
+      // anyway, but we can warn early if something's there.
+      const inUse = await probeCdp(explicitPort);
+      if (inUse) {
+        // Reuse-first invariant: if it IS a CDP, we should have used it above.
+        // Hitting this branch means the CDP disappeared between scan and now.
+        // Unlikely, but attach to it rather than launch-collide.
+        endpoint = inUse;
+        kind = browserOpt ?? inferKindFromVersion(inUse.version['User-Agent']);
+        const state = await spawnDaemon(endpoint, kind);
+        console.log(`attached (port race resolved) — pid ${state.pid}, port ${state.port}, browser ${state.browserKind}`);
+        return EXIT.OK;
+      }
+    } else {
+      const free = await findFreePort(PORT_BASE, PORT_RANGE);
+      if (free === null) {
+        console.error(`No free port in ${PORT_BASE}..${PORT_BASE + PORT_RANGE - 1} (all occupied). Pass --port to override.`);
+        return EXIT.NOT_ATTACHED;
+      }
+      launchPort = free;
+      if (launchPort !== PORT_BASE) {
+        console.log(`:${PORT_BASE} in use — using :${launchPort}`);
+      }
+    }
+
     const loadExt = parsed.flags['load-extension'] as string | undefined;
     const dataDir = parsed.flags['data-dir'] as string | undefined;
     const extNote = loadExt ? ` with unpacked extension from ${loadExt}` : '';
     const profileNote = dataDir ? dataDir : `~/.ghax/${target.kind}-profile`;
-    console.log(`launching ${target.label} with CDP on :${port} (profile: ${profileNote})${extNote}`);
+    const headlessNote = headless ? ' [headless]' : '';
+    console.log(`launching ${target.label}${headlessNote} with CDP on :${launchPort} (profile: ${profileNote})${extNote}`);
     const launched = await launchBrowser(target, {
-      port,
+      port: launchPort,
+      headless,
       ...(loadExt ? { loadExtension: loadExt } : {}),
       ...(dataDir ? { dataDir } : {}),
     });
@@ -198,6 +278,51 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
   const state = await spawnDaemon(endpoint, kind);
   console.log(`attached — pid ${state.pid}, port ${state.port}, browser ${state.browserKind}`);
   return EXIT.OK;
+}
+
+/**
+ * Multiple CDPs found in the scan range. If --browser was specified, prefer
+ * that kind. Otherwise — if stdin is a TTY — show a picker. Non-interactive
+ * callers (scripts, CI, pipes) get the first endpoint with a note.
+ */
+async function pickEndpoint(endpoints: CdpEndpoint[], preferKind: BrowserKind | undefined): Promise<CdpEndpoint> {
+  // Preference filter first.
+  if (preferKind) {
+    const matching = endpoints.filter((ep) => inferKindFromVersion(ep.version['User-Agent']) === preferKind);
+    if (matching.length === 1) return matching[0];
+    if (matching.length > 1) endpoints = matching;
+  }
+
+  const describe = (ep: CdpEndpoint) =>
+    `${inferKindFromVersion(ep.version['User-Agent'])} ${ep.version.Browser} on :${ep.port}`;
+
+  if (!process.stdin.isTTY) {
+    console.error(`Found ${endpoints.length} CDPs: ${endpoints.map(describe).join(', ')}.`);
+    console.error(`  using ${describe(endpoints[0])} (pass --port to override)`);
+    return endpoints[0];
+  }
+
+  console.log(`Found ${endpoints.length} CDP endpoints:`);
+  for (let i = 0; i < endpoints.length; i++) {
+    console.log(`  [${i + 1}] ${describe(endpoints[i])}`);
+  }
+  process.stdout.write(`Choose [1-${endpoints.length}] (default 1): `);
+  const line = await readLine();
+  const n = parseInt(line.trim(), 10);
+  if (!isNaN(n) && n >= 1 && n <= endpoints.length) return endpoints[n - 1];
+  return endpoints[0];
+}
+
+function readLine(): Promise<string> {
+  return new Promise((resolve) => {
+    const onData = (buf: Buffer) => {
+      process.stdin.pause();
+      process.stdin.off('data', onData);
+      resolve(buf.toString('utf-8'));
+    };
+    process.stdin.resume();
+    process.stdin.once('data', onData);
+  });
 }
 
 function inferKindFromVersion(userAgent: string): BrowserKind {
@@ -434,7 +559,10 @@ function expandSnapshotFlags(argv: string[]): ParsedArgs {
 const HELP = `ghax — attach to your real Chrome/Edge via CDP and drive it.
 
 Connection:
-  attach [--port 9222] [--browser edge|chrome] [--launch] [--load-extension <path>] [--data-dir <path>]
+  attach [--port <n>] [--browser edge|chrome|chromium|brave|arc] [--launch]
+         [--headless] [--load-extension <path>] [--data-dir <path>]
+         # Without --port, scans :9222-9230. Multiple running → picker.
+         # With --launch and no --port, auto-picks first free port in range.
   status [--json]
   detach
   restart

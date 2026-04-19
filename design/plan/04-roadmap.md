@@ -180,7 +180,8 @@ release track is on hold.
 - [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
 - [x] `test/smoke.ts` — live-browser harness. Runs locally only (CI has
       no browser); original scaffold at commit `e41ab7d`, extended to
-      cover the full v0.4 surface + `ghax try` — 54/54 checks in ~24s.
+      cover the full v0.4 surface + `ghax try` + attach ergonomics —
+      56/56 checks in ~24s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -253,6 +254,21 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] `ghax attach` ergonomics — auto-port fallback, headless launch,
+      multi-CDP scan with picker. Changes:
+      - No `--port` + no `--launch`: scan :9222-9230, attach to the one
+        found. If multiple, show a numbered picker (non-TTY → first +
+        warn). `--browser <kind>` filters the scan.
+      - No `--port` + `--launch`: reuse-first (attach if a CDP of the
+        requested kind is already up), else pick first free port in
+        range. Prints "port 9222 in use — using :9223" on fallback.
+      - `--headless` flag: adds `--headless=new` to the spawned browser.
+        Only with `--launch` (scratch profile). Real-profile headless is
+        explicitly NOT supported — user combines `--data-dir <path>`
+        with the browser closed if they know what they're doing.
+      - Clearer error when `--browser chrome` is asked for but only
+        Edge is running ("only edge on :9222 running; pass --launch to
+        start chrome").
 - [x] `ghax try` — live-injection fix-preview verb. Composable wrapper
       over `page.evaluate` + `page.screenshot`. Surface:
 
