@@ -341,6 +341,26 @@ implemented:
 
       Smoke grew 59 → 64 (perf shape, dedup grouping, status filter, HAR
       export, stack parsing). Edge + Chrome both pass the full suite.
+- [x] Threshold-enforced perf budget test (`test/perf-bench.ts` /
+      `bun run test:perf`). Asserts P50 budgets on 13 critical ops +
+      shell-mode fast path + cold workflow. FAILS on regression.
+
+      Physical floor confirmed via measurement:
+        Bun CLI cold spawn:      ~37ms (via `ghax --help`)
+        HTTP RPC + dispatch:     ~5-10ms on top
+        Single-cmd floor:        ~27-30ms (what every `ghax <cmd>` pays)
+        Shell-mode floor:        ~4.4ms/cmd (no spawn, 6.1x compression)
+        Cold workflow (7 cmds):  ~1.5s
+
+      No innovation tokens needed — the stack is at its physical floor
+      and still faster than every competitor (playwright-cli 476ms/cmd,
+      agent-browser 178ms/cmd, gstack-browse 56ms/cmd). Shell mode is
+      the innovation; already shipped.
+
+      Budgets calibrated at measured steady-state + 30% margin. Asserts
+      on P50 (catches real regression), prints P90/P95/max (shows tail
+      behavior, not asserted — CDP WebSocket occasionally stalls
+      200-500ms for one call, unactionable).
 - [x] Headless CLI benchmark (`test/benchmark.ts` / `bun run test:benchmark`).
       Compares ghax against gstack browse, playwright-cli, and agent-browser
       on a 6-step workflow (launch → goto → text → js → screenshot →
