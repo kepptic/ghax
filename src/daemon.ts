@@ -219,7 +219,7 @@ register('tabs', async (ctx) => {
   return out;
 });
 
-register('tab', async (ctx, args) => {
+register('tab', async (ctx, args, opts) => {
   const id = String(args[0] ?? '');
   if (!id) throw new Error('Usage: tab <id>');
   const pages = await allPages(ctx);
@@ -228,11 +228,82 @@ register('tab', async (ctx, args) => {
     if (tid === id) {
       ctx.activePageId = tid;
       await instrumentPage(ctx, p);
-      await p.bringToFront().catch(() => undefined);
+      // --quiet skips bringToFront. Useful when an agent locks onto a tab
+      // while the user is working elsewhere — no focus steal, no window
+      // raised. Default preserves v0.1 human-friendly behavior.
+      if (!opts.quiet) {
+        await p.bringToFront().catch(() => undefined);
+      }
       return { id: tid, url: p.url(), title: await p.title().catch(() => '') };
     }
   }
   throw new Error(`No tab with id ${id}`);
+});
+
+// ─── find / newWindow — dedicated-window workflow ──────────────
+//
+// The multi-agent + user-working-alongside pattern. Each agent owns a
+// window that ghax put there; the user's other windows/tabs are off-
+// limits. Implementation leans entirely on the browser's native
+// multi-window support via CDP's Target.createTarget:
+//   - newWindow: true       → new OS-level window (not a tab)
+//   - background: true      → don't raise / don't steal focus
+//   - same browser profile  → auth, cookies, extensions carry over
+//
+// For multi-agent isolation, each agent uses its own GHAX_STATE_FILE so
+// daemon state (including active tab) stays separated.
+
+register('find', async (ctx, args) => {
+  const pattern = String(args[0] ?? '');
+  if (!pattern) throw new Error('Usage: find <url-substring>');
+  const pages = await allPages(ctx);
+  const matches = [];
+  for (const p of pages) {
+    const url = p.url();
+    if (url.includes(pattern)) {
+      matches.push({
+        id: await pageTargetId(p),
+        url,
+        title: await p.title().catch(() => ''),
+      });
+    }
+  }
+  return matches;
+});
+
+register('newWindow', async (ctx, args) => {
+  const url = args[0] ? String(args[0]) : 'about:blank';
+  const context = ctx.browser.contexts()[0];
+  if (!context) throw new Error('newWindow: no browser context available');
+  const cdpSession = await ctx.browser.newBrowserCDPSession();
+  try {
+    // Race-free: subscribe to the "page" event BEFORE firing createTarget.
+    // Playwright surfaces the new page as soon as the target becomes
+    // attachable, so waitForEvent resolves right after CDP confirms.
+    const [newPage] = await Promise.all([
+      context.waitForEvent('page', { timeout: 10_000 }),
+      cdpSession.send('Target.createTarget', {
+        url,
+        newWindow: true,
+        background: true,
+      }),
+    ]);
+    // Let the initial nav settle so the caller sees the real URL, not
+    // about:blank, when they read the returned object.
+    await newPage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
+    const id = await pageTargetId(newPage);
+    // Auto-lock this tab as the active one so subsequent commands land
+    // in the freshly-created window without an extra `ghax tab` step.
+    ctx.activePageId = id;
+    await instrumentPage(ctx, newPage);
+    return {
+      id,
+      url: newPage.url(),
+      title: await newPage.title().catch(() => ''),
+    };
+  } finally {
+    await cdpSession.detach().catch(() => undefined);
+  }
 });
 
 register('goto', async (ctx, args) => {

@@ -180,8 +180,8 @@ release track is on hold.
 - [x] GitHub Actions CI (typecheck + compile matrix for mac/linux/win)
 - [x] `test/smoke.ts` — live-browser harness. Runs locally only (CI has
       no browser); original scaffold at commit `e41ab7d`, extended to
-      cover the full v0.4 surface + `ghax try` + attach ergonomics —
-      56/56 checks in ~24s.
+      cover the full v0.4 surface + `ghax try` + attach ergonomics +
+      background-window workflow — 59/59 checks in ~25s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -254,6 +254,16 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] Background-window workflow — `find` / `new-window` / `tab --quiet`
+      for the "user keeps browsing while agent works" case. Each agent
+      gets its own window (same browser, same profile, so auth + extensions
+      carry over) opened via `Target.createTarget({ newWindow: true,
+      background: true })`. Zero focus steal, zero collision with the
+      user's tabs. Multi-agent parallelism comes free via `GHAX_STATE_FILE`
+      — each agent points at its own daemon state file, locks onto its
+      own window, can't see the others. `new-window` auto-locks the new
+      tab as the daemon's active tab so the caller doesn't need a separate
+      `tab` step.
 - [x] `ghax attach` ergonomics — auto-port fallback, headless launch,
       multi-CDP scan with picker. Changes:
       - No `--port` + no `--launch`: scan :9222-9230, attach to the one

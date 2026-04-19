@@ -569,7 +569,9 @@ Connection:
 
 Tab:
   tabs
-  tab <id>
+  tab <id> [--quiet]              # --quiet = don't bringToFront
+  find <url-substring>            # list tabs matching (pipe into 'tab')
+  new-window [url]                # new background window, same profile
   goto <url>
   back | forward | reload
   eval <js>
@@ -672,6 +674,7 @@ async function main(): Promise<number> {
         return await makeSimple(verb)(parseArgs(rest));
 
       case 'tab':
+      case 'find':
       case 'goto':
       case 'eval':
       case 'try':
@@ -723,6 +726,9 @@ async function main(): Promise<number> {
         }
         return await makeSimple(verb)(parsed);
       }
+
+      case 'new-window':
+        return await makeSimple('newWindow')(parseArgs(rest));
 
       case 'ext':
         return await dispatchExt(rest);
