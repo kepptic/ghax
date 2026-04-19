@@ -15,12 +15,19 @@
 import { SourceMapConsumer } from 'source-map';
 import type { StackFrame } from './buffers';
 
-const SM_COMMENT_RE = /\/\/[#@]\s*sourceMappingURL=([^\s]+)/g;
+// Cap on cached consumers. Each holds ~100KB-few MB of wasm memory; 50
+// entries covers even large SPAs (typical apps ship 5-20 chunks). Past
+// the cap, oldest entries get destroy()'d and evicted. Prevents
+// unbounded growth on long-running daemons.
+const CACHE_MAX = 50;
 
 /**
- * Cache of parsed consumers keyed by the bundled script URL. `null` means
- * "tried, failed, don't retry" so we don't keep hammering an unreachable
- * or mapless script.
+ * Cache of parsed consumers keyed by the bundled script URL.
+ *   - `null`    → tried, no map available, don't retry
+ *   - Promise   → fetch + parse in flight; concurrent callers share it
+ *   - Consumer  → resolved and reusable
+ *
+ * LRU by Map insertion order — touched entries move to the end on read.
  */
 export class SourceMapCache {
   private cache = new Map<string, SourceMapConsumer | null | Promise<SourceMapConsumer | null>>();
@@ -28,13 +35,33 @@ export class SourceMapCache {
   async get(scriptUrl: string, fetchImpl: typeof fetch = fetch): Promise<SourceMapConsumer | null> {
     const cached = this.cache.get(scriptUrl);
     if (cached !== undefined) {
+      // LRU touch — move to newest slot without eviction.
+      this.cache.delete(scriptUrl);
+      this.cache.set(scriptUrl, cached);
       return cached instanceof Promise ? await cached : cached;
     }
     const promise = this.resolve(scriptUrl, fetchImpl);
-    this.cache.set(scriptUrl, promise);
+    this.insert(scriptUrl, promise);
     const result = await promise;
-    this.cache.set(scriptUrl, result);
+    this.insert(scriptUrl, result);
     return result;
+  }
+
+  private insert(key: string, value: SourceMapConsumer | null | Promise<SourceMapConsumer | null>): void {
+    this.cache.set(key, value);
+    while (this.cache.size > CACHE_MAX) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = this.cache.get(oldestKey);
+      if (oldest && !(oldest instanceof Promise)) {
+        try {
+          oldest.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      this.cache.delete(oldestKey);
+    }
   }
 
   private async resolve(scriptUrl: string, fetchImpl: typeof fetch): Promise<SourceMapConsumer | null> {
@@ -42,11 +69,14 @@ export class SourceMapCache {
       const resp = await fetchImpl(scriptUrl, { signal: AbortSignal.timeout(3000) });
       if (!resp.ok) return null;
       const body = await resp.text();
-      // Find the LAST sourceMappingURL comment (some bundlers emit multiple
-      // chunk comments; the final one is authoritative).
-      let mapUrl: string | null = null;
-      const matches = body.matchAll(SM_COMMENT_RE);
-      for (const m of matches) mapUrl = m[1];
+      // Find the LAST sourceMappingURL comment. Bundlers can emit multiple
+      // chunk comments per file; the final one is authoritative. lastIndexOf
+      // + a single non-global regex is simpler than the matchAll-and-take-
+      // last approach, and avoids the global-regex statefulness gotcha.
+      const lastAt = body.lastIndexOf('sourceMappingURL=');
+      if (lastAt < 0) return null;
+      const match = body.slice(lastAt).match(/sourceMappingURL=([^\s]+)/);
+      const mapUrl = match ? match[1] : null;
       if (!mapUrl) return null;
 
       let mapJson: string;
