@@ -7,7 +7,7 @@ instead of spinning up sandboxed copies.
 **Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
 layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
 `review`, `pair`, `try`) and a background-window workflow
-(`find`, `new-window`, `tab --quiet`) for multi-agent use. 66/66 smoke
+(`find`, `new-window`, `tab --quiet`) for multi-agent use. 67/67 smoke
 checks on Edge + Chrome. Repo is private under `kepptic` for now;
 open-source release paused.
 
@@ -33,7 +33,9 @@ Attach to a running Chrome or Edge over CDP, then drive it:
   `chrome.sidePanel.open()` that refuse synthetic clicks).
 - **Console + network capture** from the moment you attach — rolling 5k-entry
   buffers, `--errors` and `--pattern` filters, request+response headers,
-  HAR 1.2 export, stack-frame parsing on page errors, dedup grouping.
+  HAR 1.2 export, stack-frame parsing on page errors, dedup grouping,
+  **source-map resolution** (`--source-maps` maps `main.abc123.js:1:48291`
+  back to `src/AuthForm.tsx:42:12`).
 - **Core Web Vitals** (`ghax perf`): LCP (with size + source URL), FCP,
   CLS, TTFB + full navigation-timing breakdown. Buffered
   PerformanceObserver so you catch entries that fired before you asked.
@@ -191,7 +193,7 @@ chain < steps.json
 record start [name] | stop | status
 replay <file>
 gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
-console [--errors] [--last N] [--dedup]
+console [--errors] [--last N] [--dedup] [--source-maps]
 network [--pattern re] [--status 4xx|500|400-499] [--last N] [--har <path>]
 cookies
 ext list

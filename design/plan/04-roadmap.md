@@ -182,7 +182,7 @@ release track is on hold.
       no browser); original scaffold at commit `e41ab7d`, extended to
       cover the full v0.4 surface + `ghax try` + attach ergonomics +
       background-window workflow + debugging tier 1 + shell/disconnect
-      quality-of-life — 66/66 checks in ~30s.
+      quality-of-life + source-map resolution — 67/67 checks in ~30s.
 - [x] `test/fixtures/test-extension/` — minimal MV3 fixture for
       hot-reload verification.
 - [x] `ghax attach --launch --load-extension <path>` — scripted
@@ -255,6 +255,17 @@ implemented:
       `.ghax/canary-<host>.log`, structured JSON report on exit
 - [x] `ghax pair` — v0 SSH-tunnel instructions (multi-tenant token-auth
       deferred to v0.5)
+- [x] `ghax console --source-maps` — source-map resolution for
+      bundled stack frames. New `src/source-maps.ts` holds a
+      `SourceMapCache` on the daemon ctx; per-frame resolution fetches
+      the script, reads its sourceMappingURL (inline data URI or
+      external file), parses the map, and returns the original
+      position while preserving the bundled one as `{bundledUrl,
+      bundledLine, bundledCol}`. Silent fallback on every failure mode
+      (unreachable script, no map, parse error, out-of-range). Adds
+      ~60KB to the daemon bundle; zero cost when the flag isn't
+      passed. Verified end-to-end with a local fixture:
+      `main.abc123.js:1:43` → `src/AuthForm.ts:2:5`.
 - [x] `ghax shell` + disconnect recovery — quality-of-life tier.
 
       `ghax shell` — interactive REPL. Reads commands from stdin, tokenises

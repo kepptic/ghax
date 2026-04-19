@@ -20,7 +20,8 @@
     "uninstall-link": "rm -f ~/.local/bin/ghax && echo 'unlinked ~/.local/bin/ghax'"
   },
   "dependencies": {
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "source-map": "^0.7.6"
   },
   "engines": {
     "bun": ">=1.3.0"

@@ -501,6 +501,68 @@ c('shell mode runs piped commands in one process', async () => {
   assert(!r.stdout.includes('should-not-run'), `exit failed to stop — post-exit command ran: ${r.stdout.slice(0, 300)}`);
 });
 
+c('console --source-maps resolves bundled frames to original sources', async () => {
+  // Spin up a tiny HTTP server on an ephemeral port that serves a bundled
+  // JS (one line, throws in `authenticate`) plus a matching source map
+  // pointing at src/AuthForm.ts:2:5. Navigate to it, let the error fire,
+  // then call `console --source-maps` and assert the stack's first frame
+  // maps to the original file.
+  const { SourceMapGenerator } = await import('source-map');
+  const gen = new SourceMapGenerator({ file: 'bundle.js' });
+  // Bundled line 1 col 43 (where "throw" starts) → AuthForm.ts line 2 col 5.
+  gen.addMapping({
+    generated: { line: 1, column: 43 },
+    original: { line: 2, column: 5 },
+    source: 'src/AuthForm.ts',
+    name: 'authenticate',
+  });
+  gen.setSourceContent(
+    'src/AuthForm.ts',
+    'function authenticate(token) {\n  if (!token) {\n    throw new Error("ghax-smoke-sm");\n  }\n  return token;\n}',
+  );
+  const mapText = gen.toString();
+  const bundled =
+    'function authenticate(token) { if (!token) { throw new Error("ghax-smoke-sm"); } return token; } authenticate(null);\n//# sourceMappingURL=bundle.js.map';
+
+  const server = Bun.serve({
+    port: 0,  // ephemeral
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === '/' || url.pathname === '/index.html') {
+        return new Response(
+          '<!doctype html><html><head><script src="bundle.js"></script></head><body>sm</body></html>',
+          { headers: { 'content-type': 'text/html' } },
+        );
+      }
+      if (url.pathname === '/bundle.js') {
+        return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
+      }
+      if (url.pathname === '/bundle.js.map') {
+        return new Response(mapText, { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('not found', { status: 404 });
+    },
+  });
+
+  try {
+    const port = server.port;
+    await run(['goto', `http://127.0.0.1:${port}/`]);
+    await run(['wait', '500']);
+    const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
+    const entries = parseJson<Array<{ text: string; stack?: Array<{ url: string; line: number; col: number; bundledUrl?: string; fn: string | null }> }>>(r.stdout);
+    const ours = entries.find((e) => e.text.includes('ghax-smoke-sm'));
+    assert(ours, 'pageerror with ghax-smoke-sm not captured');
+    assert(ours.stack && ours.stack.length > 0, 'no stack frames');
+    const mapped = ours.stack.find((f) => f.url.includes('AuthForm.ts'));
+    assert(mapped, `no frame mapped to AuthForm.ts, got stack: ${JSON.stringify(ours.stack)}`);
+    assert(mapped.line === 2, `expected AuthForm.ts line 2, got ${mapped.line}`);
+    assert(mapped.bundledUrl !== undefined, 'bundledUrl should be preserved');
+    assert(mapped.fn === 'authenticate', `expected fn=authenticate, got ${mapped.fn}`);
+  } finally {
+    server.stop();
+  }
+});
+
 c('shell mode tokenises quoted args correctly', async () => {
   // `ghax try --css 'body { color: red }' ...` needs single-quote
   // preservation so the CSS doesn't get split on whitespace. If the

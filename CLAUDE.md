@@ -164,7 +164,7 @@ Every change must pass:
 ```bash
 bun run typecheck     # tsc --noEmit
 bun run build         # compile CLI + bundle daemon
-bun run test:smoke    # 66/66 against a live Edge session
+bun run test:smoke    # 67/67 against a live Edge session
 ```
 
 For bigger changes also run:
@@ -203,8 +203,8 @@ design discussion:
   against the skills with tool-call assertions. Deferred indefinitely
   because the 64-check E2E smoke catches the same regressions at zero
   API cost.
-- **Source-map resolution** for stack frames. Parser is in place but
-  the source-map package isn't wired. Tier 2 debugging work.
+- ~~Source-map resolution for stack frames.~~ Shipped — opt-in via
+  `ghax console --source-maps`.
 - **CPU flame graph export**. `ghax profile` captures point-in-time
   metrics + heap snapshots, not CPU traces.
 - **Request/response body capture**. Memory cost too high for a
