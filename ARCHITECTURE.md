@@ -185,6 +185,36 @@ Multi-agent parallelism comes free from this: each agent uses its own
 creates its own windows. They share the browser process but don't step
 on each other.
 
+## Source-map resolution
+
+`ghax console --source-maps` lives in `src/source-maps.ts`. The
+daemon holds a single `SourceMapCache` on `ctx.sourceMapCache` that
+stores parsed `SourceMapConsumer` instances keyed by bundled script
+URL. `null` means "tried and failed, don't retry" so we don't hammer
+an unreachable script or a build that shipped without maps.
+
+Flow per stack frame:
+1. Check cache for the script URL.
+2. On miss: fetch the script (3s timeout), scan for the *last*
+   `//# sourceMappingURL=...` comment. Multiple are allowed in bundled
+   output (one per chunk); the final one is authoritative.
+3. Resolve the map URL. Inline data URIs are base64-decoded or
+   URI-decoded in place. External URLs are fetched with another 3s
+   timeout.
+4. `new SourceMapConsumer(mapJson)` returns a parsed consumer.
+5. `consumer.originalPositionFor({line, column})` returns the original
+   `{source, line, column, name}`.
+6. Emit a new `StackFrame` with resolved `url/line/col`, preserving
+   the bundled position as `{bundledUrl, bundledLine, bundledCol}` for
+   correlation.
+
+Silent fallback: any failure at any step returns the original frame
+unchanged. Source-map resolution never breaks a console read.
+
+The `source-map` npm package (Mozilla) adds ~60KB to the daemon
+bundle. Zero cost when `--source-maps` isn't passed — the cache is
+lazy.
+
 ## Shell mode (REPL)
 
 `ghax shell` is a thin loop around the same `dispatch(argv)` function
@@ -228,6 +258,7 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 | `src/cdp-client.ts` | ~350 | Target pool, WebSocket management, raw CDP helpers |
 | `src/snapshot.ts` | ~500 | a11y tree walker, ref assignment, cursor-interactive + shadow-DOM pass |
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
+| `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |
 | `src/config.ts` | ~80 | State file resolution |
 
 The whole codebase is ~5000 lines of TypeScript plus ~500 lines of test

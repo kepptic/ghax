@@ -68,9 +68,16 @@ export class CircularBuffer<T> {
 
 export interface StackFrame {
   fn: string | null;  // function name, or null for anonymous
-  url: string;        // file/script URL
+  url: string;        // file/script URL (original source when resolved via map)
   line: number;
   col: number;
+  // Populated by source-map resolution. If present, `url/line/col` are the
+  // *resolved* original position; these fields preserve where the error
+  // actually fired in the bundled script for correlation with network
+  // capture + devtools.
+  bundledUrl?: string;
+  bundledLine?: number;
+  bundledCol?: number;
 }
 
 export interface ConsoleEntry {

@@ -599,7 +599,9 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N] [--dedup]  # --dedup groups repeats with count
+  console [--errors] [--last N] [--dedup] [--source-maps]
+         # --dedup groups repeats with count
+         # --source-maps resolves bundled stack frames to original sources
   network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--har <path>]
   cookies
 

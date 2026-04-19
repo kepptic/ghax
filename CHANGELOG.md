@@ -8,6 +8,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ghax console --source-maps` — resolve bundled stack frames back to their
+  original source locations via the page's source maps. Each captured
+  `pageerror` already parses its stack; with `--source-maps`, every frame
+  is run through the daemon's source-map cache: fetch the script, read
+  its `sourceMappingURL` comment (or data: URI), parse the map, look up
+  the original position. Result includes the resolved `{url, line, col}`
+  plus `{bundledUrl, bundledLine, bundledCol}` for correlation. Silent
+  fallback to the bundled frame on any failure (script unreachable, no
+  map comment, parse error, position out of range). Adds ~60KB to the
+  daemon bundle for the `source-map` library; zero cost when the flag
+  isn't used.
 - `ghax shell` — interactive REPL. Reads commands from stdin, tokenises
   with shell-ish quoting (single/double quotes, backslash escapes),
   re-enters the main dispatcher per line. One process for the whole

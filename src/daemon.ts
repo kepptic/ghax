@@ -27,6 +27,7 @@ import { chromium, type Browser, type BrowserContext, type Page, type Locator } 
 import { CdpPool, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
+import { SourceMapCache, resolveStack } from './source-maps';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot } from './snapshot';
 import * as fs from 'fs';
@@ -65,6 +66,7 @@ interface Ctx {
   pool: CdpPool;
   consoleBuf: CircularBuffer<ConsoleEntry>;
   networkBuf: CircularBuffer<NetworkEntry>;
+  sourceMapCache: SourceMapCache;
   activePageId: string | null;
   refs: Map<string, RefEntry>;
   instrumented: WeakSet<Page>;
@@ -584,9 +586,26 @@ register('type', async (ctx, args) => {
 register('console', async (ctx, _args, opts) => {
   const errorsOnly = Boolean(opts.errors);
   const dedup = Boolean(opts.dedup);
+  const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
   let entries = ctx.consoleBuf.last(n);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
+
+  // --source-maps: resolve each entry's parsed stack back to original
+  // positions via the daemon's map cache. Silent fallback to bundled
+  // frames on any failure (unreachable script, no map comment, parse
+  // error, position-out-of-range). Only entries that already have a
+  // `stack` (i.e. pageerror events) get enriched.
+  if (sourceMaps) {
+    entries = await Promise.all(
+      entries.map(async (e) => {
+        if (!e.stack || e.stack.length === 0) return e;
+        const resolved = await resolveStack(ctx.sourceMapCache, e.stack);
+        return { ...e, stack: resolved };
+      }),
+    );
+  }
+
   if (!dedup) return entries;
 
   // Group by (level, text). Duplicates keep the earliest `firstAt`, update
@@ -1841,6 +1860,7 @@ async function main() {
     pool: new CdpPool(cdpHttpUrl),
     consoleBuf: new CircularBuffer<ConsoleEntry>(BUFFER_CAP),
     networkBuf: new CircularBuffer<NetworkEntry>(BUFFER_CAP),
+    sourceMapCache: new SourceMapCache(),
     activePageId: null,
     refs: new Map(),
     instrumented: new WeakSet<Page>(),
@@ -2032,6 +2052,7 @@ async function main() {
     clearInterval(idleTimer);
     try {
       ctx.pool.close();
+      ctx.sourceMapCache.destroy();
       await browser.close().catch(() => undefined);
     } catch {
       // ignore
