@@ -67,6 +67,7 @@ interface Ctx {
   consoleBuf: CircularBuffer<ConsoleEntry>;
   networkBuf: CircularBuffer<NetworkEntry>;
   sourceMapCache: SourceMapCache;
+  captureBodiesRe: RegExp | null;  // null = don't capture; set = capture URLs matching
   activePageId: string | null;
   refs: Map<string, RefEntry>;
   instrumented: WeakSet<Page>;
@@ -129,6 +130,32 @@ async function activePage(ctx: Ctx): Promise<Page> {
   return p;
 }
 
+const BODY_CAP_BYTES = 32 * 1024;
+
+/**
+ * Fire-and-forget body capture. We call this from the sync `response`
+ * handler and don't await it — the event handler returns immediately,
+ * and the body lands on the entry whenever Playwright finishes reading
+ * it. Bodies beyond BODY_CAP_BYTES get truncated with a marker so large
+ * downloads don't blow the rolling buffer memory.
+ */
+function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Response): void {
+  resp
+    .text()
+    .then((body) => {
+      if (body.length > BODY_CAP_BYTES) {
+        entry.responseBody = body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`;
+        entry.responseBodyTruncated = true;
+      } else {
+        entry.responseBody = body;
+      }
+    })
+    .catch(() => {
+      // Response body may be unavailable (opaque CORS, navigation frame
+      // already gone, etc.). Leave the field undefined; not a capture error.
+    });
+}
+
 async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   if (ctx.instrumented.has(page)) return;
   ctx.instrumented.add(page);
@@ -180,6 +207,18 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
         e.responseHeaders = resp.headers();
         e.responseAt = Date.now();
         e.duration = e.responseAt - e.timestamp;
+
+        // Body capture (opt-in at attach time via GHAX_CAPTURE_BODIES).
+        // Async, best-effort: we don't block the response event, and we
+        // ignore failures (bodies for opaque cross-origin responses,
+        // navigation frames already gone, etc.).
+        if (ctx.captureBodiesRe && ctx.captureBodiesRe.test(resp.url())) {
+          const ct = (resp.headers()['content-type'] ?? '').toLowerCase();
+          const textLike = /json|text|javascript|xml|html|css|graphql/.test(ct);
+          if (textLike) {
+            captureBodyAsync(e, resp);
+          }
+        }
         break;
       }
     }
@@ -442,6 +481,54 @@ register('screenshot', async (ctx, args, opts) => {
     await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage) });
   }
   return { path: outPath };
+});
+
+// ─── xpath / box — utility queries ─────────────────────────────
+//
+// XPath itself is already usable with every selector-accepting command
+// via Playwright's native `xpath=...` prefix (e.g. `ghax click
+// 'xpath=//button[@id="submit"]'`). This handler is the *query* form:
+// list every matching element with its text, tag, and bounding box so
+// you can preview what your expression hit before acting on it.
+
+register('xpath', async (ctx, args, opts) => {
+  const expr = String(args[0] ?? '');
+  if (!expr) throw new Error('Usage: xpath <expression>');
+  const limit = opts.limit ? Number(opts.limit) : 50;
+  const page = await activePage(ctx);
+  const locator = page.locator(`xpath=${expr}`);
+  const count = await locator.count();
+  const matches: Array<{
+    index: number;
+    tag: string;
+    text: string;
+    box: { x: number; y: number; width: number; height: number } | null;
+  }> = [];
+  for (let i = 0; i < Math.min(count, limit); i++) {
+    const el = locator.nth(i);
+    const [text, tag, box] = await Promise.all([
+      el.textContent().catch(() => ''),
+      el.evaluate((node) => (node as Element).tagName?.toLowerCase() ?? 'node').catch(() => '?'),
+      el.boundingBox().catch(() => null),
+    ]);
+    matches.push({
+      index: i,
+      tag,
+      text: (text ?? '').trim().replace(/\s+/g, ' ').slice(0, 120),
+      box,
+    });
+  }
+  return { count, returned: matches.length, matches };
+});
+
+register('box', async (ctx, args) => {
+  const target = args[0] ? String(args[0]) : null;
+  if (!target) throw new Error('Usage: box <@ref|selector>');
+  const page = await activePage(ctx);
+  const locator = resolveRef(ctx, target, page);
+  const box = await locator.first().boundingBox();
+  if (!box) throw new Error(`${target}: element not visible or not in layout`);
+  return box;
 });
 
 register('snapshot', async (ctx, _args, opts) => {
@@ -1816,6 +1903,11 @@ async function main() {
   const cdpHttpUrl = process.env.GHAX_CDP_HTTP_URL;
   const cdpBrowserUrl = process.env.GHAX_CDP_BROWSER_URL;
   const browserKind = process.env.GHAX_BROWSER_KIND || 'chromium';
+  // GHAX_CAPTURE_BODIES is absent (no capture), "*" (capture all),
+  // or a glob-ish pattern like "*/api/*" (capture URLs matching).
+  // We treat it as a simple glob: '*' → any, otherwise the pattern is
+  // converted to a RegExp with * → .* for matching URL substrings.
+  const captureBodiesPattern = process.env.GHAX_CAPTURE_BODIES ?? null;
   if (!cdpHttpUrl || !cdpBrowserUrl) {
     console.error('ghax daemon: missing GHAX_CDP_HTTP_URL / GHAX_CDP_BROWSER_URL env');
     process.exit(4);
@@ -1861,6 +1953,17 @@ async function main() {
     consoleBuf: new CircularBuffer<ConsoleEntry>(BUFFER_CAP),
     networkBuf: new CircularBuffer<NetworkEntry>(BUFFER_CAP),
     sourceMapCache: new SourceMapCache(),
+    captureBodiesRe: captureBodiesPattern
+      ? captureBodiesPattern === '*' || captureBodiesPattern === ''
+        ? /.*/
+        : new RegExp(
+            '^' +
+              captureBodiesPattern
+                .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+                .replace(/\*/g, '.*') +
+              '$',
+          )
+      : null,
     activePageId: null,
     refs: new Map(),
     instrumented: new WeakSet<Page>(),

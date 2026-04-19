@@ -115,19 +115,31 @@ function resolveDaemonBundle(): string {
   throw new Error('Cannot locate dist/ghax-daemon.mjs. Run `bun run build` first.');
 }
 
-async function spawnDaemon(endpoint: CdpEndpoint, kind: BrowserKind): Promise<DaemonState> {
+async function spawnDaemon(
+  endpoint: CdpEndpoint,
+  kind: BrowserKind,
+  opts: { captureBodies?: string | boolean } = {},
+): Promise<DaemonState> {
   ensureStateDir(cfg);
   const bundle = resolveDaemonBundle();
   const cmd = ['node', '--enable-source-maps', bundle];
 
+  const env: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    GHAX_STATE_FILE: cfg.stateFile,
+    GHAX_CDP_HTTP_URL: endpoint.httpUrl,
+    GHAX_CDP_BROWSER_URL: endpoint.browserUrl,
+    GHAX_BROWSER_KIND: kind,
+  };
+  // Empty string for the "capture everything" form, or a glob-ish pattern
+  // like "*/api/*" to only capture matching URLs. Passed to daemon via env
+  // because attach-time options live on the spawn environment.
+  if (opts.captureBodies !== undefined) {
+    env.GHAX_CAPTURE_BODIES = typeof opts.captureBodies === 'string' ? opts.captureBodies : '*';
+  }
+
   const proc = Bun.spawn(cmd, {
-    env: {
-      ...process.env,
-      GHAX_STATE_FILE: cfg.stateFile,
-      GHAX_CDP_HTTP_URL: endpoint.httpUrl,
-      GHAX_CDP_BROWSER_URL: endpoint.browserUrl,
-      GHAX_BROWSER_KIND: kind,
-    },
+    env,
     stdout: 'ignore',
     stderr: 'ignore',
     stdin: 'ignore',
@@ -157,6 +169,13 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
   const browserOpt = (parsed.flags.browser as string | undefined) as BrowserKind | undefined;
   const launch = Boolean(parsed.flags.launch);
   const headless = Boolean(parsed.flags.headless);
+  // --capture-bodies has three forms:
+  //   (absent)                     → no body capture, default
+  //   --capture-bodies             → capture all JSON/text bodies up to 32KB
+  //   --capture-bodies='*/api/*'   → same, filtered to URLs matching glob
+  const captureBodiesRaw = parsed.flags['capture-bodies'];
+  const captureBodies: string | boolean | undefined =
+    captureBodiesRaw === undefined ? undefined : captureBodiesRaw;
 
   // If already attached, short-circuit.
   const existing = readState(cfg);
@@ -246,7 +265,7 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
         // Unlikely, but attach to it rather than launch-collide.
         endpoint = inUse;
         kind = browserOpt ?? inferKindFromVersion(inUse.version['User-Agent']);
-        const state = await spawnDaemon(endpoint, kind);
+        const state = await spawnDaemon(endpoint, kind, { captureBodies });
         console.log(`attached (port race resolved) — pid ${state.pid}, port ${state.port}, browser ${state.browserKind}`);
         return EXIT.OK;
       }
@@ -280,7 +299,7 @@ async function cmdAttach(parsed: ParsedArgs): Promise<number> {
     kind = browserOpt ?? inferKindFromVersion(endpoint.version['User-Agent']);
   }
 
-  const state = await spawnDaemon(endpoint, kind);
+  const state = await spawnDaemon(endpoint, kind, { captureBodies });
   console.log(`attached — pid ${state.pid}, port ${state.port}, browser ${state.browserKind}`);
   return EXIT.OK;
 }
@@ -566,8 +585,11 @@ const HELP = `ghax — attach to your real Chrome/Edge via CDP and drive it.
 Connection:
   attach [--port <n>] [--browser edge|chrome|chromium|brave|arc] [--launch]
          [--headless] [--load-extension <path>] [--data-dir <path>]
+         [--capture-bodies[=<url-glob>]]
          # Without --port, scans :9222-9230. Multiple running → picker.
          # With --launch and no --port, auto-picks first free port in range.
+         # --capture-bodies records JSON/text response bodies (opt-in,
+         #   32KB cap per body). Glob filters by URL (e.g. '*/api/*').
   status [--json]
   detach
   restart
@@ -596,6 +618,8 @@ Snapshot & interact:
   responsive [prefix] [--fullPage]
   diff <url1> <url2>
   is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
+  xpath <expression> [--limit N]      # list matching elements with text + box
+  box <@ref|selector>                 # bounding box {x, y, width, height}
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
@@ -686,6 +710,8 @@ async function dispatch(argv: string[]): Promise<number> {
       case 'goto':
       case 'eval':
       case 'try':
+      case 'xpath':
+      case 'box':
       case 'click':
       case 'press':
       case 'type':

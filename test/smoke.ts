@@ -319,6 +319,38 @@ c('gesture dblclick dispatches double press/release', async () => {
   assert(data.ok === true, 'gesture dblclick should return ok');
 });
 
+c('xpath query returns matches with text + tag + box', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '200']);
+  const r = await run(['xpath', '//h1', '--json']);
+  const data = parseJson<{
+    count: number;
+    returned: number;
+    matches: Array<{ index: number; tag: string; text: string; box: { width: number } | null }>;
+  }>(r.stdout);
+  assert(data.count >= 1, `expected at least one <h1>, got ${data.count}`);
+  assert(data.matches[0].tag === 'h1', `expected tag=h1, got ${data.matches[0].tag}`);
+  assert(/Example Domain/i.test(data.matches[0].text), `expected "Example Domain" text, got ${data.matches[0].text}`);
+  assert(data.matches[0].box && data.matches[0].box.width > 0, 'expected non-zero box width');
+});
+
+c('box returns {x, y, width, height} for a selector', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '200']);
+  const r = await run(['box', 'h1', '--json']);
+  const box = parseJson<{ x: number; y: number; width: number; height: number }>(r.stdout);
+  assert(typeof box.x === 'number' && typeof box.y === 'number', 'box x/y numeric');
+  assert(box.width > 0 && box.height > 0, `box should be laid out, got ${box.width}x${box.height}`);
+});
+
+c('box also resolves @e<n> refs from the last snapshot', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['snapshot', '-i']);
+  const r = await run(['box', '@e1', '--json']);
+  const box = parseJson<{ width: number }>(r.stdout);
+  assert(box.width > 0, 'ref box missing width');
+});
+
 c('is <check> asserts element state', async () => {
   await run(['goto', 'https://example.com']);
   await run(['snapshot', '-i']);
