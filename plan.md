@@ -171,7 +171,7 @@ proves liveness; the kill probe is redundant when health succeeds.
 behavior on dead daemon unchanged (still gives the clean "not
 attached" hint).
 
-### 12. Snapshot: cache `getComputedStyle` in the cursor-interactive walk
+### 12. Snapshot: cache `getComputedStyle` in the cursor-interactive walk — [x]
 
 `snapshot.ts::consider()` calls `getComputedStyle(el)` and
 `isInFloating()` walks ancestors re-reading `getComputedStyle` for
