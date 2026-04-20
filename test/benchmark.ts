@@ -18,6 +18,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -113,8 +114,13 @@ const tools: ToolSpec[] = [
 
 async function runArgv(argv: string[]): Promise<{ ok: boolean; ms: number; stderr: string }> {
   const started = performance.now();
-  const proc = Bun.spawn(argv, { stdout: 'ignore', stderr: 'pipe' });
-  const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+  const [prog, ...args] = argv;
+  const proc = spawn(prog, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   const ms = performance.now() - started;
   return { ok: exitCode === 0, ms, stderr };
 }

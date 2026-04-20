@@ -84,17 +84,17 @@ curl -L https://github.com/kepptic/ghax/releases/latest/download/ghax-aarch64-ap
 Playwright-based tool installed you already have it; ghax doesn't add a
 new runtime expectation.
 
-**Build from source** (needs Rust 1.80+ and Bun 1.3+):
+**Build from source** (needs Rust 1.80+ and Node 20+):
 
 ```bash
-bun install
-bun run build:all    # compiles Rust CLI + bundles Node daemon (added in Phase 4B)
-bun run install-link    # symlinks the Rust binary → ~/.local/bin/ghax
+npm install
+npm run build:all    # compiles Rust CLI + bundles Node daemon
+npm run install-link    # symlinks the Rust binary → ~/.local/bin/ghax
 ```
 
 `install-link` is optional but makes `ghax` available from any directory
 without qualifying the path. `~/.local/bin` is on the default macOS user
-PATH. Re-run is idempotent; remove via `bun run uninstall-link`.
+PATH. Re-run is idempotent; remove via `npm run uninstall-link`.
 
 1. Launch your Edge or Chrome with CDP enabled:
 

@@ -69,10 +69,10 @@ Key performance numbers (Rust CLI vs old Bun CLI):
 
 Build artifacts:
 - `target/release/ghax` — Rust binary, ~2.6–10 MB depending on platform.
-  Built via `cargo build --release` (or `bun run build:rust` for the
+  Built via `cargo build --release` (or `npm run build:rust` for the
   in-repo shortcut).
-- `dist/ghax-daemon.mjs` — ~134 KB Node ESM bundle (Playwright external).
-  Built via `bun run build`.
+- `dist/ghax-daemon.mjs` — ~77 KB Node ESM bundle (Playwright + source-map external).
+  Built via `npm run build` (esbuild).
 
 ## Rust dependency surface
 

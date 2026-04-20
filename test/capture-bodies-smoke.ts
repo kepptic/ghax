@@ -9,15 +9,18 @@
  * Requirements:
  *   - A Chrome install on this machine (not Edge — Edge is left alone so
  *     the user's daily-driver isn't touched).
- *   - `bun run build` has been run so dist/ghax + dist/ghax-daemon.mjs exist.
+ *   - `npm run build` has been run so dist/ghax + dist/ghax-daemon.mjs exist.
  *
  * Run:
- *   bun run test/capture-bodies-smoke.ts
+ *   tsx test/capture-bodies-smoke.ts
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, spawnSync } from 'child_process';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -37,16 +40,16 @@ const attachPort = '9272';
 interface RunResult { stdout: string; stderr: string; exitCode: number; }
 
 async function run(args: string[], opts: { allowFailure?: boolean; env?: Record<string, string> } = {}): Promise<RunResult> {
-  const proc = Bun.spawn([ghax, ...args], {
+  const proc = spawn(ghax, args, {
     env: { ...process.env, GHAX_STATE_FILE: stateFile, ...(opts.env ?? {}) },
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   if (exitCode !== 0 && !opts.allowFailure) {
     fail(`${args.join(' ')} exited ${exitCode}\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`);
   }
@@ -61,10 +64,10 @@ function fail(msg: string): never {
 
 function cleanup() {
   try {
-    Bun.spawnSync([ghax, 'detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile } });
+    spawnSync(ghax, ['detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile }, stdio: 'ignore' });
   } catch {}
   try {
-    Bun.spawnSync(['pkill', '-f', profileDir]);
+    spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' });
   } catch {}
   try {
     fs.rmSync(stateFile, { force: true });
@@ -76,44 +79,40 @@ function assert(cond: unknown, msg: string): asserts cond {
 }
 
 // Fixture server: serves an HTML shell at / and two JSON endpoints.
-function startFixture(bodyFor40kb: string): { port: number; stop: () => void } {
-  const server = Bun.serve({
-    port: 0,  // ephemeral
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/api/users') {
-        return Response.json({ users: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }] });
-      }
-      if (url.pathname === '/api/big') {
-        return new Response(bodyFor40kb, { headers: { 'content-type': 'application/json' } });
-      }
-      if (url.pathname === '/skip-me') {
-        return Response.json({ shouldNotBeCapturedByPattern: true });
-      }
-      if (url.pathname === '/') {
-        return new Response(
-          `<!doctype html><html><body><script>
+async function startFixture(bodyFor40kb: string): Promise<{ port: number; stop: () => void }> {
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/api/users') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ users: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }] }));
+    } else if (url.pathname === '/api/big') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(bodyFor40kb);
+    } else if (url.pathname === '/skip-me') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ shouldNotBeCapturedByPattern: true }));
+    } else if (url.pathname === '/') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<!doctype html><html><body><script>
             Promise.all([
               fetch('/api/users').then(r=>r.text()),
               fetch('/api/big').then(r=>r.text()),
               fetch('/skip-me').then(r=>r.text()),
             ]);
-          </script></body></html>`,
-          { headers: { 'content-type': 'text/html' } },
-        );
-      }
-      return new Response('not found', { status: 404 });
-    },
+          </script></body></html>`);
+    } else {
+      res.writeHead(404); res.end('not found');
+    }
   });
-  const port = server.port;
-  if (port === undefined) throw new Error('Bun.serve did not assign a port');
-  return { port, stop: () => server.stop() };
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  return { port, stop: () => server.close() };
 }
 
 (async () => {
   // Generate a 40KB JSON body to test the truncation marker.
   const big = JSON.stringify({ data: 'x'.repeat(40_000) });
-  const fixture = startFixture(big);
+  const fixture = await startFixture(big);
 
   console.log('--- capture-bodies smoke ---\n');
 
@@ -151,7 +150,7 @@ function startFixture(bodyFor40kb: string): { port: number; stop: () => void } {
     assert(skip.responseBody === undefined, `/skip-me should not have body captured (glob *api* excludes it), got: ${skip.responseBody?.slice(0, 60)}`);
   } finally {
     await run(['detach'], { allowFailure: true });
-    try { Bun.spawnSync(['pkill', '-f', profileDir]); } catch {}
+    try { spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' }); } catch {}
     await new Promise((r) => setTimeout(r, 300));
   }
 
@@ -168,7 +167,7 @@ function startFixture(bodyFor40kb: string): { port: number; stop: () => void } {
     assert(ours.responseBody === undefined, `no flag set, responseBody should be undefined, got: ${ours.responseBody?.slice(0, 60)}`);
   } finally {
     await run(['detach'], { allowFailure: true });
-    try { Bun.spawnSync(['pkill', '-f', `${profileDir}-2`]); } catch {}
+    try { spawnSync('pkill', ['-f', `${profileDir}-2`], { stdio: 'ignore' }); } catch {}
   }
 
   fixture.stop();

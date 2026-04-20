@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, spawnSync } from 'child_process';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -50,17 +51,16 @@ async function run(
   args: string[],
   opts: { allowFailure?: boolean } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn([ghax, ...args], {
+  const proc = spawn(ghax, args, {
     env: { ...process.env, GHAX_STATE_FILE: stateFile },
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   const res = { stdout, stderr, exitCode };
   if (exitCode !== 0 && !opts.allowFailure) {
     fail(`ghax ${args.join(' ')} exited ${exitCode}\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`);
@@ -85,10 +85,7 @@ async function cleanup() {
   // leaves the browser running. We targeted the scratch profile dir on launch,
   // so pkill on that path is precise and non-destructive to the user's real Edge.
   try {
-    Bun.spawnSync(['pkill', '-f', `user-data-dir=${scratchProfile}`], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-    });
+    spawnSync('pkill', ['-f', `user-data-dir=${scratchProfile}`], { stdio: 'ignore' });
   } catch {
     // pkill not installed or no matches — best-effort
   }
