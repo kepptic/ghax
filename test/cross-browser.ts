@@ -23,6 +23,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, spawnSync } from 'child_process';
 
 // Browser detection used to live in src/browser-launch.ts (Bun CLI). With the
 // Rust CLI rewrite that file is gone, so the test inlines a minimal macOS-only
@@ -60,16 +61,17 @@ interface Result {
 }
 
 async function runCmd(cmd: string[], env: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(cmd, {
+  const [prog, ...args] = cmd;
+  const proc = spawn(prog, args, {
     env: { ...process.env, ...env },
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   return { stdout, stderr, exitCode };
 }
 
@@ -99,13 +101,13 @@ async function runOne(kind: BrowserKind, label: string, port: number): Promise<R
   console.log(attach.stdout.trim());
 
   const start = Date.now();
-  const smokeRes = await runCmd(['bun', 'run', smoke], env);
+  const smokeRes = await runCmd(['tsx', smoke], env);
   const durationS = (Date.now() - start) / 1000;
 
   // Smoke's final check is `detach` so the daemon is gone by now. Best-effort
   // cleanup of the scratch browser process + profile dir.
   try {
-    Bun.spawnSync(['pkill', '-f', profileDir]);
+    spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' });
   } catch {
     // ignore
   }

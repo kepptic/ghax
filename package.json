@@ -9,16 +9,15 @@
   },
   "scripts": {
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
-    "build": "bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core",
+    "build": "esbuild src/daemon.ts --bundle --platform=node --format=esm --outfile=dist/ghax-daemon.mjs --external:electron --external:chromium-bidi --external:@playwright/test --external:playwright --external:playwright-core --external:source-map --legal-comments=none",
     "build:rust": "cargo build --release --manifest-path crates/cli/Cargo.toml",
-    "build:all": "bun run build:rust && bun run build",
-    "typecheck": "bunx tsc --noEmit",
-    "test": "bun test",
-    "test:smoke": "bun run test/smoke.ts",
-    "test:capture-bodies": "bun run test/capture-bodies-smoke.ts",
-    "test:cross-browser": "bun run test/cross-browser.ts",
-    "test:benchmark": "bun run test/benchmark.ts",
-    "test:perf": "bun run test/perf-bench.ts",
+    "build:all": "npm run build:rust && npm run build",
+    "typecheck": "tsc --noEmit",
+    "test:smoke": "tsx test/smoke.ts",
+    "test:capture-bodies": "tsx test/capture-bodies-smoke.ts",
+    "test:cross-browser": "tsx test/cross-browser.ts",
+    "test:benchmark": "tsx test/benchmark.ts",
+    "test:perf": "tsx test/perf-bench.ts",
     "install-link": "mkdir -p ~/.local/bin ~/.local/share/ghax && ln -sf \"$PWD/target/release/ghax\" ~/.local/bin/ghax && ln -sf \"$PWD/dist/ghax-daemon.mjs\" ~/.local/share/ghax/ghax-daemon.mjs && echo 'linked → ~/.local/bin/ghax + ~/.local/share/ghax/ghax-daemon.mjs'",
     "uninstall-link": "rm -f ~/.local/bin/ghax ~/.local/share/ghax/ghax-daemon.mjs && echo 'unlinked ~/.local/bin/ghax and ~/.local/share/ghax/ghax-daemon.mjs'"
   },
@@ -27,7 +26,7 @@
     "source-map": "^0.7.6"
   },
   "engines": {
-    "bun": ">=1.3.0"
+    "node": ">=20.0.0"
   },
   "keywords": [
     "cdp",
@@ -54,7 +53,9 @@
     "url": "https://github.com/kepptic/ghax.git"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.12",
-    "@types/node": "^25.6.0"
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.25.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
   }
 }

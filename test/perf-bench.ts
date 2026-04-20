@@ -24,6 +24,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, spawnSync } from 'child_process';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -50,16 +51,16 @@ interface RunResult { stdout: string; stderr: string; exitCode: number; duration
 
 async function run(args: string[], opts: { allowFailure?: boolean } = {}): Promise<RunResult> {
   const started = performance.now();
-  const proc = Bun.spawn([ghax, ...args], {
+  const proc = spawn(ghax, args, {
     env: { ...process.env, GHAX_STATE_FILE: stateFile },
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   const durationMs = performance.now() - started;
   if (exitCode !== 0 && !opts.allowFailure) {
     throw new Error(`${args.join(' ')} exited ${exitCode}: ${stderr}`);
@@ -168,9 +169,9 @@ async function measure(budget: Budget): Promise<Measurement> {
 
 function cleanup() {
   try {
-    Bun.spawnSync([ghax, 'detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile } });
+    spawnSync(ghax, ['detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile }, stdio: 'ignore' });
   } catch {}
-  try { Bun.spawnSync(['pkill', '-f', profileDir]); } catch {}
+  try { spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' }); } catch {}
   try { fs.rmSync(stateFile, { force: true }); } catch {}
   try { fs.rmSync('/tmp/ghax-perf-shot.png', { force: true }); } catch {}
 }
@@ -181,8 +182,8 @@ async function measureColdWorkflow(): Promise<{ p95Ms: number; p50Ms: number; bu
   const budgetMs = 6000;
   const iterations = 3;
   for (let i = 0; i < iterations; i++) {
-    try { Bun.spawnSync([ghax, 'detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile } }); } catch {}
-    try { Bun.spawnSync(['pkill', '-f', profileDir]); } catch {}
+    try { spawnSync(ghax, ['detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile }, stdio: 'ignore' }); } catch {}
+    try { spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' }); } catch {}
     await new Promise((r) => setTimeout(r, 300));
     const t0 = performance.now();
     await run(['attach', '--launch', '--headless', '--browser', 'chrome', '--port', attachPort, '--data-dir', `${profileDir}-cold-${i}`]);
@@ -194,7 +195,7 @@ async function measureColdWorkflow(): Promise<{ p95Ms: number; p50Ms: number; bu
     await run(['detach']);
     samples.push(performance.now() - t0);
     try { fs.rmSync(`/tmp/ghax-perf-cold-${i}.png`, { force: true }); } catch {}
-    try { Bun.spawnSync(['pkill', '-f', `${profileDir}-cold-${i}`]); } catch {}
+    try { spawnSync('pkill', ['-f', `${profileDir}-cold-${i}`], { stdio: 'ignore' }); } catch {}
   }
   const sorted = [...samples].sort((a, b) => a - b);
   return {
@@ -253,16 +254,14 @@ async function measureColdWorkflow(): Promise<{ p95Ms: number; p50Ms: number; bu
     'xpath //h1',
     'exit',
   ].join('\n');
-  const shellProc = Bun.spawn([ghax, 'shell'], {
+  const shellProc = spawn(ghax, ['shell'], {
     env: { ...process.env, GHAX_STATE_FILE: stateFile },
-    stdin: 'pipe',
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const shellStart = performance.now();
-  (shellProc.stdin as any).write(shellScript);
-  (shellProc.stdin as any).end();
-  await shellProc.exited;
+  shellProc.stdin!.write(shellScript);
+  shellProc.stdin!.end();
+  await new Promise<void>((resolve) => shellProc.on('exit', () => resolve()));
   const shellDurationMs = performance.now() - shellStart;
   const perCmdMs = shellDurationMs / 19; // 19 real commands (exit doesn't count)
   const shellBudgetMs = 15;
@@ -272,8 +271,8 @@ async function measureColdWorkflow(): Promise<{ p95Ms: number; p50Ms: number; bu
 
   console.log('\n• cold workflow (attach+goto+text+eval+shot+snap+detach)');
   // Detach the warm daemon first
-  try { Bun.spawnSync([ghax, 'detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile } }); } catch {}
-  try { Bun.spawnSync(['pkill', '-f', `${profileDir}-warm`]); } catch {}
+  try { spawnSync(ghax, ['detach'], { env: { ...process.env, GHAX_STATE_FILE: stateFile }, stdio: 'ignore' }); } catch {}
+  try { spawnSync('pkill', ['-f', `${profileDir}-warm`], { stdio: 'ignore' }); } catch {}
   await new Promise((r) => setTimeout(r, 500));
   const cold = await measureColdWorkflow();
   const coldVerdict = cold.pass ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';

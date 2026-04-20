@@ -4,10 +4,10 @@
  *
  * Requirements:
  *   - A Chromium-family browser on --remote-debugging-port=9222
- *   - `bun run build` has been run so dist/ghax + dist/ghax-daemon.mjs exist
+ *   - `npm run build` has been run so dist/ghax + dist/ghax-daemon.mjs exist
  *
  * Run:
- *   bun run test/smoke.ts
+ *   tsx test/smoke.ts
  *
  * Exit code 0 on success, non-zero on the first failed check.
  *
@@ -17,15 +17,15 @@
  * exercised via --dry-run so no commits/pushes happen.
  *
  * Run against the Rust binary:
- *   bun run build:rust && GHAX_BIN=$PWD/target/release/ghax bun run test:smoke
- *
- * Or shortcut (after Phase 4B adds it):
- *   bun run test:rust-smoke
+ *   npm run build:rust && GHAX_BIN=$PWD/target/release/ghax npm run test:smoke
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, spawnSync } from 'child_process';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -42,20 +42,19 @@ interface RunResult {
 }
 
 async function run(args: string[], opts: { stdin?: string; allowFailure?: boolean } = {}): Promise<RunResult> {
-  const proc = Bun.spawn([ghax, ...args], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: opts.stdin ? 'pipe' : 'ignore',
+  const proc = spawn(ghax, args, {
+    stdio: [opts.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   });
   if (opts.stdin && proc.stdin) {
-    (proc.stdin as any).write(opts.stdin);
-    (proc.stdin as any).end();
+    proc.stdin.write(opts.stdin);
+    proc.stdin.end();
   }
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => {
+    proc.on('exit', (code) => resolve(code ?? 0));
+  });
   const res: RunResult = { stdout, stderr, exitCode };
   if (exitCode !== 0 && !opts.allowFailure) {
     fail(`ghax ${args.join(' ')} exited ${exitCode}\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`);
@@ -562,28 +561,25 @@ c('console --source-maps resolves bundled frames to original sources', async () 
   const bundled =
     'function authenticate(token) { if (!token) { throw new Error("ghax-smoke-sm"); } return token; } authenticate(null);\n//# sourceMappingURL=bundle.js.map';
 
-  const server = Bun.serve({
-    port: 0,  // ephemeral
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/' || url.pathname === '/index.html') {
-        return new Response(
-          '<!doctype html><html><head><script src="bundle.js"></script></head><body>sm</body></html>',
-          { headers: { 'content-type': 'text/html' } },
-        );
-      }
-      if (url.pathname === '/bundle.js') {
-        return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
-      }
-      if (url.pathname === '/bundle.js.map') {
-        return new Response(mapText, { headers: { 'content-type': 'application/json' } });
-      }
-      return new Response('not found', { status: 404 });
-    },
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><head><script src="bundle.js"></script></head><body>sm</body></html>');
+    } else if (url.pathname === '/bundle.js') {
+      res.writeHead(200, { 'content-type': 'application/javascript' });
+      res.end(bundled);
+    } else if (url.pathname === '/bundle.js.map') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(mapText);
+    } else {
+      res.writeHead(404); res.end('not found');
+    }
   });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
 
   try {
-    const port = server.port;
+    const port = (server.address() as AddressInfo).port;
     await run(['goto', `http://127.0.0.1:${port}/`]);
     await run(['wait', '500']);
     const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
@@ -597,7 +593,7 @@ c('console --source-maps resolves bundled frames to original sources', async () 
     assert(mapped.bundledUrl !== undefined, 'bundledUrl should be preserved');
     assert(mapped.fn === 'authenticate', `expected fn=authenticate, got ${mapped.fn}`);
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
@@ -605,22 +601,22 @@ c('source-maps: falls back silently when script has no map comment', async () =>
   // Serve a bundle with NO sourceMappingURL comment. Console --source-maps
   // should return the frame unchanged (no bundledUrl field).
   const bundled = 'throw new Error("ghax-sm-nomap");';
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/') {
-        return new Response('<!doctype html><html><body><script src="bundle.js"></script></body></html>',
-          { headers: { 'content-type': 'text/html' } });
-      }
-      if (url.pathname === '/bundle.js') {
-        return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
-      }
-      return new Response('not found', { status: 404 });
-    },
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><body><script src="bundle.js"></script></body></html>');
+    } else if (url.pathname === '/bundle.js') {
+      res.writeHead(200, { 'content-type': 'application/javascript' });
+      res.end(bundled);
+    } else {
+      res.writeHead(404); res.end('not found');
+    }
   });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   try {
-    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    const port = (server.address() as AddressInfo).port;
+    await run(['goto', `http://127.0.0.1:${port}/`]);
     await run(['wait', '500']);
     const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
     const entries = parseJson<Array<{ text: string; stack?: Array<{ url: string; bundledUrl?: string }> }>>(r.stdout);
@@ -634,24 +630,31 @@ c('source-maps: falls back silently when script has no map comment', async () =>
       );
     }
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
 c('source-maps: falls back silently on invalid map JSON', async () => {
   const bundled = 'throw new Error("ghax-sm-badmap");\n//# sourceMappingURL=bundle.js.map';
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/') return new Response('<!doctype html><html><body><script src="bundle.js"></script></body></html>', { headers: { 'content-type': 'text/html' } });
-      if (url.pathname === '/bundle.js') return new Response(bundled, { headers: { 'content-type': 'application/javascript' } });
-      if (url.pathname === '/bundle.js.map') return new Response('{not valid json at all}', { headers: { 'content-type': 'application/json' } });
-      return new Response('not found', { status: 404 });
-    },
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><body><script src="bundle.js"></script></body></html>');
+    } else if (url.pathname === '/bundle.js') {
+      res.writeHead(200, { 'content-type': 'application/javascript' });
+      res.end(bundled);
+    } else if (url.pathname === '/bundle.js.map') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{not valid json at all}');
+    } else {
+      res.writeHead(404); res.end('not found');
+    }
   });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   try {
-    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    const port = (server.address() as AddressInfo).port;
+    await run(['goto', `http://127.0.0.1:${port}/`]);
     await run(['wait', '500']);
     const r = await run(['console', '--errors', '--last', '20', '--source-maps', '--json']);
     const entries = parseJson<Array<{ text: string; stack?: Array<{ bundledUrl?: string }> }>>(r.stdout);
@@ -665,7 +668,7 @@ c('source-maps: falls back silently on invalid map JSON', async () => {
       );
     }
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
@@ -712,45 +715,52 @@ c('box: element not in layout throws a clean error', async () => {
 
 c('network --status 404 exact match filters correctly', async () => {
   // Server that returns 404 for a specific path and 200 for the root.
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/missing') return new Response('not found', { status: 404 });
-      return new Response('<!doctype html><html><body><img src="/missing"></body></html>', { headers: { 'content-type': 'text/html' } });
-    },
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/missing') {
+      res.writeHead(404); res.end('not found');
+    } else {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><body><img src="/missing"></body></html>');
+    }
   });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const server404Port = (server.address() as AddressInfo).port;
   try {
-    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['goto', `http://127.0.0.1:${server404Port}/`]);
     await run(['wait', '500']);
     const r = await run(['network', '--status', '404', '--last', '50', '--json']);
     const entries = parseJson<Array<{ status: number; url: string }>>(r.stdout);
     assert(entries.length >= 1, `expected at least one 404, got ${entries.length}`);
     assert(entries.every((e) => e.status === 404), 'all entries should be 404');
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
 c('network --status 400-499 range matches 4xx', async () => {
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === '/gone') return new Response('gone', { status: 410 });
-      if (url.pathname === '/err') return new Response('server err', { status: 500 });
-      return new Response('<!doctype html><html><body><img src="/gone"><img src="/err"></body></html>', { headers: { 'content-type': 'text/html' } });
-    },
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, `http://127.0.0.1`);
+    if (url.pathname === '/gone') {
+      res.writeHead(410); res.end('gone');
+    } else if (url.pathname === '/err') {
+      res.writeHead(500); res.end('server err');
+    } else {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><html><body><img src="/gone"><img src="/err"></body></html>');
+    }
   });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const server4xxPort = (server.address() as AddressInfo).port;
   try {
-    await run(['goto', `http://127.0.0.1:${server.port}/`]);
+    await run(['goto', `http://127.0.0.1:${server4xxPort}/`]);
     await run(['wait', '500']);
     const r = await run(['network', '--status', '400-499', '--last', '50', '--json']);
     const entries = parseJson<Array<{ status: number }>>(r.stdout);
     assert(entries.some((e) => e.status === 410), 'expected the 410 entry');
     assert(!entries.some((e) => e.status === 500), 'range 400-499 should NOT include 500');
   } finally {
-    server.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 
@@ -893,7 +903,7 @@ c('review emits a Claude-ready prompt or exits cleanly on no-diff', async () => 
 c('review --diff falls back to raw diff output', async () => {
   // Force a guaranteed diff by comparing HEAD to HEAD~1. Nearly all repos
   // have at least one prior commit; if they don't, accept the no-diff path.
-  const hasPrior = Bun.spawnSync(['git', 'rev-parse', 'HEAD~1'], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+  const hasPrior = spawnSync('git', ['rev-parse', 'HEAD~1'], { stdio: 'ignore' }).status === 0;
   if (!hasPrior) {
     console.log('  (no HEAD~1 — skipping diff check)');
     return;
@@ -1087,8 +1097,8 @@ c('try --shot writes a screenshot', async () => {
 });
 
 c('gif renders a GIF from a recording (if ffmpeg available)', async () => {
-  const ffmpeg = Bun.spawnSync(['ffmpeg', '-version'], { stdout: 'ignore', stderr: 'ignore' });
-  if (ffmpeg.exitCode !== 0) {
+  const ffmpeg = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+  if (ffmpeg.status !== 0) {
     console.log('  (ffmpeg not on PATH — skipping gif check)');
     return;
   }

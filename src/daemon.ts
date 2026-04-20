@@ -1,5 +1,5 @@
 /**
- * ghax daemon — persistent Bun.serve HTTP server.
+ * ghax daemon — persistent Node http server.
  *
  * Owns:
  *   - Playwright Browser (connected via chromium.connectOverCDP)

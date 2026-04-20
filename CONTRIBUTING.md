@@ -8,7 +8,7 @@ moving parts so you can land one without friction.
 
 ```
 ghax/
-  bin/ghax                  Shell shim — falls back from dist/ghax to bun run src/cli.ts
+  bin/ghax                  Shell shim — launches the Rust binary from target/release/ghax
   src/
     cli.ts                  Argv → daemon RPC. Verb dispatcher + attach/detach specials.
     daemon.ts               Node HTTP daemon. Playwright connectOverCDP + raw CDP pool.
@@ -32,20 +32,19 @@ ghax/
 
 ## Dev loop
 
-Prerequisites: **Bun 1.3+** and **Node 20+**.
+Prerequisites: **Rust 1.80+**, **Node 20+**, git.
 
 ```bash
-bun install
-bun run build            # produces dist/ghax (compiled) + dist/ghax-daemon.mjs
-./dist/ghax attach       # attach to a running Edge on :9222
-./dist/ghax --help       # command surface
-bunx tsc --noEmit        # typecheck
+npm install
+npm run build            # bundles Node daemon → dist/ghax-daemon.mjs (esbuild)
+npm run build:rust       # compiles Rust CLI → target/release/ghax
+./target/release/ghax attach   # attach to a running Edge on :9222
+./target/release/ghax --help   # command surface
+npm run typecheck              # tsc --noEmit
 ```
 
-During dev, editing `src/*.ts` requires `bun run build` again — the
-daemon is a bundle, not a live file. The CLI alone can run via
-`bun run src/cli.ts <cmd>`, but the daemon can't run directly
-(imports use extensionless paths that only the bundle resolves).
+During dev, editing `src/*.ts` requires `npm run build` again — the
+daemon is a bundle, not a live file.
 
 ## Adding a new command
 
@@ -60,9 +59,9 @@ daemon is a bundle, not a live file. The CLI alone can run via
 
 ## Architecture invariants
 
-- **CLI = Bun (compiled). Daemon = Node (ESM bundle).** Playwright's
-  `connectOverCDP` hangs under Bun 1.3.x. Don't reach for `Bun.serve`
-  or `Bun.spawn` inside `daemon.ts` — use Node's `http` and `child_process`.
+- **CLI = Rust. Daemon = Node (ESM bundle).** Playwright's
+  `connectOverCDP` is Node-only. Don't reach for `Bun.serve`
+  or `Bun.spawn` anywhere — use Node's `http` and `child_process`.
 - **Single daemon per project.** State file at `.ghax/ghax.json` points
   at pid + port. Never write a second state file.
 - **Refs survive until re-snapshot.** `click @e3` resolves against the
@@ -83,12 +82,12 @@ daemon is a bundle, not a live file. The CLI alone can run via
 Six test surfaces:
 
 ```bash
-bun run typecheck           # bunx tsc --noEmit — runs in CI
-bun run test:smoke          # test/smoke.ts — drives a real browser, NOT in CI
-bun run test:capture-bodies # test/capture-bodies-smoke.ts — end-to-end body capture
-bun run test:cross-browser  # run smoke against every installed Chromium (Edge + Chrome, Brave, Chromium if present)
-bun run test:benchmark      # compare per-command latency vs gstack-browse / playwright-cli / agent-browser
-bun run test:perf           # perf budget test — FAILS if P50 regresses past threshold
+npm run typecheck           # tsc --noEmit — runs in CI
+npm run test:smoke          # test/smoke.ts — drives a real browser, NOT in CI
+npm run test:capture-bodies # test/capture-bodies-smoke.ts — end-to-end body capture
+npm run test:cross-browser  # run smoke against every installed Chromium (Edge + Chrome, Brave, Chromium if present)
+npm run test:benchmark      # compare per-command latency vs gstack-browse / playwright-cli / agent-browser
+npm run test:perf           # perf budget test — FAILS if P50 regresses past threshold
 ```
 
 The smoke test requires a running Chromium-family browser on
@@ -110,8 +109,7 @@ gstack-browse.
 `test:perf` enforces P50 budgets on 13 critical operations + the shell-
 mode fast path + a cold-start workflow. It FAILS on regression. The
 budgets are calibrated against measured steady-state + 30% margin.
-Current floor: ~30ms/cmd for single-invocation (dominated by Bun CLI
-spawn), ~4.4ms/cmd in shell mode.
+Current floor: ~20ms/cmd for single-invocation (Rust CLI spawn), ~4.4ms/cmd in shell mode.
 
 For MV3 hot-reload specifically, load `test/fixtures/test-extension/`
 as an unpacked extension and follow its README — that's the one bit of
@@ -119,9 +117,9 @@ QA that needs a dedicated fixture rather than the real web.
 
 ## Before opening a PR
 
-1. `bun run typecheck` passes.
-2. `bun run build` succeeds on macOS (CI also runs Linux + Windows).
-3. `bun run test:smoke` passes against a real running Edge.
+1. `npm run typecheck` passes.
+2. `npm run build` succeeds on macOS (CI also runs Linux + Windows).
+3. `npm run test:smoke` passes against a real running Edge.
 4. You dogfooded the specific thing you changed — fix a bug? reproduce
    it before and after.
 5. Updated `CHANGELOG.md` under `## [Unreleased]`.

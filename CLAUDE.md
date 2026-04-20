@@ -167,16 +167,16 @@ Every change must pass:
 ```bash
 # Rust CLI
 cargo build --release            # compile Rust CLI (crates/cli/)
-bun run typecheck                # tsc --noEmit (daemon TS + tests)
-bun run build                    # bundle daemon → dist/ghax-daemon.mjs
-bun run test:rust-smoke          # Rust binary smoke suite (added in Phase 4D — assume it exists)
+npm run typecheck                # tsc --noEmit (daemon TS + tests)
+npm run build                    # bundle daemon → dist/ghax-daemon.mjs (esbuild)
+npm run test:smoke               # 70-check smoke suite against a live Edge session
 ```
 
 For bigger changes also run:
 
 ```bash
-bun run test:cross-browser    # Edge + Chrome both pass the suite
-bun run test:benchmark        # per-command latency hasn't regressed
+npm run test:cross-browser    # Edge + Chrome both pass the suite
+npm run test:benchmark        # per-command latency hasn't regressed
 ```
 
 The smoke test requires a Chromium-family browser on
@@ -184,9 +184,8 @@ The smoke test requires a Chromium-family browser on
 launch Edge/Chrome with that flag or the smoke will abort at the first
 attach.
 
-`GHAX_BIN=./target/release/ghax bun run test:smoke` runs the original
-70-check Bun smoke suite against the Rust binary — useful for verifying
-parity during the transition window.
+`GHAX_BIN=./target/release/ghax npm run test:smoke` runs the smoke
+suite against the Rust binary — useful for verifying parity.
 
 ## Before committing
 
