@@ -567,7 +567,16 @@ fn clear_state(cfg: &Config) {
 
 /// Poll state file + health until the daemon is live, mirroring `spawnDaemon`
 /// in cli.ts: 100ms tick, 15s deadline.
-fn wait_for_daemon(cfg: &Config, expected_pid: u32) -> Result<DaemonState> {
+///
+/// `stderr_path` (optional): if the daemon dies before health, read its stderr
+/// from this file and surface it in the error message — fix for BUG-001 where
+/// the daemon's `Cannot find package 'playwright'` error was silently
+/// discarded and the user got the unhelpful "didn't become healthy" message.
+fn wait_for_daemon(
+    cfg: &Config,
+    expected_pid: u32,
+    stderr_path: Option<&std::path::Path>,
+) -> Result<DaemonState> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(1500))
@@ -575,7 +584,6 @@ fn wait_for_daemon(cfg: &Config, expected_pid: u32) -> Result<DaemonState> {
 
     while Instant::now() < deadline {
         if let Some(s) = state::read_state(cfg) {
-            // Verify it's our process and it's healthy.
             if s.pid == expected_pid as i32 {
                 let url = format!("http://127.0.0.1:{}/health", s.port);
                 if let Ok(resp) = client.get(&url).send() {
@@ -589,11 +597,39 @@ fn wait_for_daemon(cfg: &Config, expected_pid: u32) -> Result<DaemonState> {
                 }
             }
         }
+        // Daemon died before becoming healthy — surface its stderr immediately
+        // instead of waiting out the 15s deadline.
+        if !state::is_process_alive(expected_pid as i32) {
+            return Err(daemon_failure(stderr_path, "exited before becoming healthy"));
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(anyhow::anyhow!(
-        "Daemon did not become healthy within 15s. Check .ghax/ghax-daemon.log."
-    ))
+    Err(daemon_failure(stderr_path, "did not become healthy within 15s"))
+}
+
+/// Compose a daemon spawn-failure error. Reads stderr if available, includes
+/// it in the message, and adds a hint for the BUG-001 playwright case.
+fn daemon_failure(stderr_path: Option<&std::path::Path>, what: &str) -> anyhow::Error {
+    let stderr = stderr_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut msg = format!("Daemon {what}.");
+    if let Some(s) = &stderr {
+        msg.push_str("\n\n--- daemon stderr ---\n");
+        msg.push_str(s);
+        msg.push_str("\n----------------------");
+        if s.contains("Cannot find package 'playwright'")
+            || s.contains("ERR_MODULE_NOT_FOUND")
+        {
+            msg.push_str(
+                "\n\nThis is BUG-001 — the daemon needs a playwright runtime beside it.\nFix: cd ~/.local/share/ghax && npm install\n(or re-run `bun run install-link` from the ghax repo)",
+            );
+        }
+    } else {
+        msg.push_str(" (no stderr captured)");
+    }
+    anyhow::anyhow!(msg)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,6 +646,18 @@ fn spawn_daemon(
 
     let bundle = resolve_daemon_bundle()?;
 
+    // Capture stderr to a temp file so we can surface the daemon's last
+    // words if it dies before becoming healthy. BUG-001 (2026-04-19) hid a
+    // playwright resolution error behind a generic "didn't become healthy"
+    // message because stderr was piped to /dev/null.
+    let stderr_path = cfg.state_dir.join(format!("ghax-daemon-spawn-{}.stderr", std::process::id()));
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stderr_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open daemon stderr capture file: {e}"))?;
+
     // Build the inherited environment plus ghax-specific overrides.
     // Mirror cli.ts: `{ ...process.env, GHAX_STATE_FILE, GHAX_CDP_HTTP_URL,
     //   GHAX_CDP_BROWSER_URL, GHAX_BROWSER_KIND [, GHAX_CAPTURE_BODIES] }`
@@ -618,7 +666,7 @@ fn spawn_daemon(
         .arg(&bundle)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
         .env("GHAX_STATE_FILE",       cfg.state_file.as_os_str())
         .env("GHAX_CDP_HTTP_URL",     &endpoint.http_url)
         .env("GHAX_CDP_BROWSER_URL",  &endpoint.browser_url)
@@ -639,7 +687,111 @@ fn spawn_daemon(
     // Don't wait — daemon runs independently.
     drop(child);
 
-    wait_for_daemon(cfg, pid)
+    let result = wait_for_daemon(cfg, pid, Some(&stderr_path));
+
+    // BUG-001 auto-bootstrap: if the daemon failed because a bare-import
+    // dep wasn't installed beside it, run `npm install` in the daemon's
+    // parent dir and retry once. The bootstrap dir gets a minimal
+    // package.json on the fly. Capped at one retry to prevent loops.
+    spawn_daemon_with_retry(cfg, endpoint, kind, capture_bodies, &bundle, &stderr_path, result, false)
+}
+
+fn spawn_daemon_with_retry(
+    cfg: &Config,
+    endpoint: &CdpEndpoint,
+    kind: &BrowserKind,
+    capture_bodies: Option<&str>,
+    bundle: &std::path::Path,
+    stderr_path: &std::path::Path,
+    result: Result<DaemonState>,
+    already_retried: bool,
+) -> Result<DaemonState> {
+    match result {
+        Ok(state) => {
+            let _ = std::fs::remove_file(stderr_path);
+            Ok(state)
+        }
+        Err(e) => {
+            let stderr_text = std::fs::read_to_string(stderr_path).unwrap_or_default();
+            let _ = std::fs::remove_file(stderr_path);
+
+            let needs_bootstrap = !already_retried
+                && (stderr_text.contains("ERR_MODULE_NOT_FOUND")
+                    || stderr_text.contains("Cannot find package"));
+            if !needs_bootstrap {
+                return Err(e);
+            }
+
+            let Some(parent) = bundle.parent() else {
+                return Err(e);
+            };
+            eprintln!(
+                "ghax: daemon needs runtime deps — bootstrapping in {} (one-time, ~10s)...",
+                parent.display()
+            );
+            bootstrap_daemon_runtime(parent)
+                .map_err(|be| anyhow::anyhow!("{e}\n\nAuto-bootstrap also failed: {be}"))?;
+
+            // One-shot retry: re-spawn and re-wait, but DO NOT recurse into
+            // bootstrap a second time (already_retried = true).
+            ensure_state_dir(cfg)?;
+            let stderr_file = std::fs::OpenOptions::new()
+                .create(true).write(true).truncate(true)
+                .open(stderr_path)
+                .map_err(|fe| anyhow::anyhow!("Failed to reopen stderr capture: {fe}"))?;
+            let mut cmd = std::process::Command::new("node");
+            cmd.arg("--enable-source-maps")
+                .arg(bundle)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(stderr_file))
+                .env("GHAX_STATE_FILE",      cfg.state_file.as_os_str())
+                .env("GHAX_CDP_HTTP_URL",    &endpoint.http_url)
+                .env("GHAX_CDP_BROWSER_URL", &endpoint.browser_url)
+                .env("GHAX_BROWSER_KIND",    kind.as_str());
+            if let Some(pattern) = capture_bodies {
+                cmd.env("GHAX_CAPTURE_BODIES", pattern);
+            }
+            let child = cmd.spawn().map_err(|se| {
+                anyhow::anyhow!("Failed to re-spawn daemon after bootstrap: {se}")
+            })?;
+            let pid = child.id();
+            drop(child);
+            let result = wait_for_daemon(cfg, pid, Some(stderr_path));
+            spawn_daemon_with_retry(cfg, endpoint, kind, capture_bodies, bundle, stderr_path, result, true)
+        }
+    }
+}
+
+/// Drop a minimal package.json + run `npm install` in `dir`. Pulls in every
+/// runtime dep marked external by the daemon's esbuild step (currently:
+/// playwright + source-map). Used by the BUG-001 auto-bootstrap path.
+fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
+    let pkg = r#"{
+  "name": "ghax-daemon-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Sibling deps for ghax-daemon.mjs (auto-bootstrapped by ghax attach)",
+  "dependencies": {
+    "playwright": "^1.58.2",
+    "source-map": "^0.7.6"
+  }
+}
+"#;
+    std::fs::write(dir.join("package.json"), pkg)
+        .map_err(|e| anyhow::anyhow!("Failed to write package.json in {}: {e}", dir.display()))?;
+    let status = std::process::Command::new("npm")
+        .args(["install", "--silent", "--no-audit", "--no-fund", "--omit=dev"])
+        .current_dir(dir)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run npm install in {}: {e}", dir.display()))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "npm install in {} exited with {status}",
+            dir.display()
+        ));
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

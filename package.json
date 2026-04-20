@@ -18,8 +18,8 @@
     "test:cross-browser": "tsx test/cross-browser.ts",
     "test:benchmark": "tsx test/benchmark.ts",
     "test:perf": "tsx test/perf-bench.ts",
-    "install-link": "mkdir -p ~/.local/bin ~/.local/share/ghax && ln -sf \"$PWD/target/release/ghax\" ~/.local/bin/ghax && ln -sf \"$PWD/dist/ghax-daemon.mjs\" ~/.local/share/ghax/ghax-daemon.mjs && echo 'linked → ~/.local/bin/ghax + ~/.local/share/ghax/ghax-daemon.mjs'",
-    "uninstall-link": "rm -f ~/.local/bin/ghax ~/.local/share/ghax/ghax-daemon.mjs && echo 'unlinked ~/.local/bin/ghax and ~/.local/share/ghax/ghax-daemon.mjs'"
+    "install-link": "bash scripts/install-link.sh",
+    "uninstall-link": "rm -rf ~/.local/bin/ghax ~/.local/share/ghax && echo 'unlinked ~/.local/bin/ghax and removed ~/.local/share/ghax/'"
   },
   "dependencies": {
     "playwright": "^1.58.2",
