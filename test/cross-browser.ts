@@ -23,15 +23,30 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { detectBrowsers, type BrowserKind } from '../src/browser-launch';
+
+// Browser detection used to live in src/browser-launch.ts (Bun CLI). With the
+// Rust CLI rewrite that file is gone, so the test inlines a minimal macOS-only
+// detection. Cross-browser CI on Linux/Windows can grow this when needed.
+type BrowserKind = 'edge' | 'chrome' | 'chromium' | 'brave' | 'arc';
+interface BrowserInfo { kind: BrowserKind; label: string; path: string }
+
+function detectBrowsers(): BrowserInfo[] {
+  const candidates: BrowserInfo[] = [
+    { kind: 'edge',    label: 'Microsoft Edge', path: '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge' },
+    { kind: 'chrome',  label: 'Google Chrome',  path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+    { kind: 'brave',   label: 'Brave',          path: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser' },
+    { kind: 'arc',     label: 'Arc',            path: '/Applications/Arc.app/Contents/MacOS/Arc' },
+  ];
+  return candidates.filter((b) => fs.existsSync(b.path));
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const ghax = path.join(root, 'dist', 'ghax');
+const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax');
 const smoke = path.join(root, 'test', 'smoke.ts');
 
 if (!fs.existsSync(ghax)) {
-  console.error(`dist/ghax missing — run 'bun run build' first`);
+  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 
