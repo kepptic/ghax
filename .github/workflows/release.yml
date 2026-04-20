@@ -156,6 +156,20 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Setup Node 20 for daemon bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build daemon bundle (esbuild)
+        # cargo-dist's `include` directive copies dist/ghax-daemon.mjs into each
+        # release archive but doesn't build it. The daemon is a Node ESM bundle
+        # produced by esbuild from src/daemon.ts. Build it before cargo-dist runs
+        # so the file exists when cargo-dist tries to copy it.
+        shell: bash
+        run: |
+          npm install
+          npm run build
+          ls -la dist/ghax-daemon.mjs
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
