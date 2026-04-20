@@ -80,7 +80,7 @@ filter regex. Register them in a loop.
 **Accept:** three separate registers become one loop emitting three
 handlers; smoke passes.
 
-### 5. Rust CLI: shared time helpers (3 copies today)
+### 5. Rust CLI: shared time helpers (3 copies today) — [x]
 
 `qa.rs`, `canary.rs`, and `ship.rs` each have their own
 `now_ms()` / `iso_now()` / `days_to_ymd()` implementations. `ship.rs`
