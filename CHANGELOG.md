@@ -6,7 +6,52 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `console --since <epoch-ms>` and `network --since <epoch-ms>` filter
+  buffer entries server-side, so callers (notably `qa` and `canary`)
+  don't have to ship hundreds of irrelevant entries across the HTTP
+  RPC just to discard them locally. `console` also accepts `errors:
+  true` via RPC opts so the daemon drops non-error levels before
+  serialising; the Rust CLI uses this on the hot path.
+
+### Fixed
+- **Invariant enforcement**: `ctx.refs` is now cleared when the active
+  tab changes (via `tab <id>` or `new-window`). Previously the
+  "refs survive only until next snapshot" rule held within a tab but
+  broke across tab switches — `@e3` from tab A could silently resolve
+  against tab B's DOM. A new smoke check (`refs cleared on tab
+  switch`) asserts the invariant.
+
 ### Changed
+- Daemon DRY pass: three new helpers collapse repeated shapes.
+  `evalInTarget()` centralises nine `Runtime.evaluate` sites with
+  consistent `exceptionDetails` handling (which also fixes a latent
+  bug in `ext.storage` where a thrown expression was silently
+  returned as `{ok: true}`). `getSwTarget()` owns the five-step
+  find-sw / pool.get / Runtime.enable dance across five extension
+  verbs. `withCdpSession()` owns the session open + try/finally +
+  detach lifecycle across five gesture/profile sites. The three
+  `ext.{panel,popup,options}.eval` handlers now register in a loop
+  since they differ only by URL filter + label.
+- Rust CLI DRY pass: new `time_util` module consolidates three
+  copies of the ISO-8601 / days-to-ymd logic (the `ship` copy was
+  using a slower year-loop algorithm than the other two); new
+  `qa_common` module shares the `console_errors_since` /
+  `failed_requests_since` filters between `qa` and `canary`, with
+  the filtering now happening daemon-side via the new `since:` opt.
+- `dispatch.rs` swaps a hand-rolled percent-encoder for the
+  `urlencoding` crate; `qa.rs` swaps a hand-rolled URL resolver for
+  `url::Url::join`. Adds `url` + `urlencoding` as direct deps (both
+  are tiny; `url` was already in the tree transitively via
+  `reqwest`).
+- `require_daemon` (Rust) now trusts `/health` as the liveness
+  signal and only falls back to the `kill(pid, 0)` syscall when
+  `/health` fails — every CLI invocation shaves a syscall.
+- `snapshot.ts` caches `getComputedStyle()` results per element for
+  the duration of one walk. The cursor-interactive pass used to
+  force-recalc styles O(n · depth) times on SPA-sized trees; now
+  O(n) via a scoped `WeakMap`.
+
 - Daemon: `pageTargetId()` caches the target id on a `WeakMap<Page>`.
   Playwright target ids are stable for a page's lifetime, but reading
   one costs a full `CDPSession.newCDPSession` + `Target.getTargetInfo`

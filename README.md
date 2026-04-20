@@ -218,8 +218,8 @@ chain < steps.json
 record start [name] | stop | status
 replay <file>
 gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
-console [--errors] [--last N] [--dedup] [--source-maps]
-network [--pattern re] [--status 4xx|500|400-499] [--last N] [--har <path>]
+console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
+network [--pattern re] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
 cookies
 ext list
 ext targets <ext-id>
