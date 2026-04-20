@@ -128,7 +128,7 @@ a 15-line zero-dep crate already used by `reqwest` adjacents.
 
 **Accept:** `ghax ext inspect <id>` still works; smoke passes.
 
-### 9. Daemon: invariant fix — clear `ctx.refs` on tab switch
+### 9. Daemon: invariant fix — clear `ctx.refs` on tab switch — [x]
 
 The CLAUDE.md hard invariant says "Refs survive only until the next
 snapshot." Today `ctx.refs` is a single global map; switching tabs via

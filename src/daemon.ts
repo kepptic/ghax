@@ -310,6 +310,13 @@ register('tab', async (ctx, args, opts) => {
   for (const p of pages) {
     const tid = await pageTargetId(p);
     if (tid === id) {
+      if (ctx.activePageId !== tid) {
+        // Refs are scoped to "the last snapshot on the active tab". Switching
+        // tabs invalidates them — otherwise `@e3` after `tab <other>` would
+        // resolve against the previous tab's locator and land in the wrong
+        // DOM. The CLAUDE.md invariant is explicit about this.
+        ctx.refs.clear();
+      }
       ctx.activePageId = tid;
       await instrumentPage(ctx, p);
       // --quiet skips bringToFront. Useful when an agent locks onto a tab
@@ -373,6 +380,8 @@ register('newWindow', async (ctx, args) => {
     const id = await pageTargetId(newPage);
     // Auto-lock this tab as the active one so subsequent commands land
     // in the freshly-created window without an extra `ghax tab` step.
+    // Same refs-invalidation rule as the `tab` handler.
+    if (ctx.activePageId !== id) ctx.refs.clear();
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
     return {

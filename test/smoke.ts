@@ -1037,6 +1037,55 @@ c('new-window opens a background window and auto-locks active tab', async () => 
   if (beforeActive) await run(['tab', beforeActive, '--quiet'], { allowFailure: true });
 });
 
+c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {
+  // Need at least two tabs to exercise the switch path. If the smoke
+  // session is running on a single-tab browser, spawn a second window
+  // for the test and clean up at the end.
+  let spawnedSecondary = false;
+  let secondaryId: string | null = null;
+  let originalId: string | null = null;
+
+  const tabsBefore = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  if (tabsBefore.length < 2) {
+    const r = await run(['new-window', 'about:blank', '--json']);
+    const created = parseJson<{ id: string }>(r.stdout);
+    secondaryId = created.id;
+    spawnedSecondary = true;
+    originalId = tabsBefore.find((t) => t.active)?.id ?? null;
+  } else {
+    originalId = tabsBefore.find((t) => t.active)?.id ?? null;
+    secondaryId = tabsBefore.find((t) => !t.active)?.id ?? null;
+  }
+  assert(!!originalId && !!secondaryId && originalId !== secondaryId, 'need two distinct tab ids');
+
+  // Land on a page with a stable locator, snapshot, grab @e1.
+  await run(['goto', 'https://example.com']);
+  await run(['wait', '300']);
+  const snap = await run(['snapshot', '-i']);
+  const firstRef = snap.stdout.match(/@(e\d+)/)?.[1];
+  assert(!!firstRef, `snapshot should emit a ref: ${snap.stdout.slice(0, 200)}`);
+
+  // Switch tabs — refs should be invalidated.
+  await run(['tab', secondaryId!, '--quiet']);
+
+  // Clicking the ref should fail with "not found" — the pre-switch
+  // locator must NOT resolve against the new active page.
+  const click = await run(['click', `@${firstRef}`], { allowFailure: true });
+  const combined = click.stderr + click.stdout;
+  assert(
+    click.exitCode !== 0 && /not found|Run 'ghax snapshot' first/i.test(combined),
+    `@${firstRef} should fail after tab switch — got exit=${click.exitCode}, out=${combined.slice(0, 200)}`,
+  );
+
+  // Restore active tab for downstream tests.
+  if (originalId) await run(['tab', originalId, '--quiet'], { allowFailure: true });
+  if (spawnedSecondary && secondaryId) {
+    await run(['tab', secondaryId, '--quiet'], { allowFailure: true });
+    await run(['eval', 'window.close()'], { allowFailure: true });
+    if (originalId) await run(['tab', originalId, '--quiet'], { allowFailure: true });
+  }
+});
+
 c('tab --quiet skips bringToFront', async () => {
   // Hard to assert "no focus change" deterministically, so assert the command
   // path runs cleanly and sets the active pointer.
