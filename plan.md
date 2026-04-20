@@ -117,7 +117,7 @@ against the same RPC results with the same shape.
 
 **Accept:** `qa --crawl` still resolves links correctly; smoke passes.
 
-### 8. Rust CLI: `dispatch.rs::url_encode` → `urlencoding` crate
+### 8. Rust CLI: `dispatch.rs::url_encode` → `urlencoding` crate — [x]
 
 Hand-rolled percent-encoder with explicit byte table. `urlencoding` is
 a 15-line zero-dep crate already used by `reqwest` adjacents.
