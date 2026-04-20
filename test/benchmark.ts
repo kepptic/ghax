@@ -22,16 +22,19 @@ import { spawn } from 'child_process';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const ghax = path.join(root, 'dist', 'ghax');
+const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax');
 const gstackBrowse = path.join(process.env.HOME!, '.claude/skills/gstack/browse/dist/browse');
 
 if (!fs.existsSync(ghax)) {
-  console.error(`dist/ghax missing — run 'bun run build' first`);
+  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 
 const ITERS = Number(process.argv.find((a) => a.startsWith('--iters='))?.split('=')[1] ?? 3);
-const URL = 'https://example.com';
+// Default to Wikipedia's JavaScript article — a long-time webperf benchmark target.
+// Override with --url=<...> for ad-hoc runs against other sites.
+const URL = process.argv.find((a) => a.startsWith('--url='))?.split('=')[1]
+  ?? 'https://en.wikipedia.org/wiki/JavaScript';
 const SHOT_DIR = '/tmp/ghax-bench-shots';
 fs.mkdirSync(SHOT_DIR, { recursive: true });
 

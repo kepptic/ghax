@@ -28,10 +28,10 @@ import { spawn, spawnSync } from 'child_process';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const ghax = path.join(root, 'dist', 'ghax');
+const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax');
 
 if (!fs.existsSync(ghax)) {
-  console.error("dist/ghax missing — run 'bun run build' first");
+  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 
