@@ -46,6 +46,41 @@ npm run typecheck              # tsc --noEmit
 During dev, editing `src/*.ts` requires `npm run build` again — the
 daemon is a bundle, not a live file.
 
+## Cutting a release
+
+The release flow is fully scripted and won't install a binary locally
+unless the GitHub Actions release workflow goes green first — so what
+you ship is exactly what you keep running.
+
+```bash
+npm run release patch    # 0.4.2 → 0.4.3 (default)
+npm run release minor    # 0.4.2 → 0.5.0
+npm run release major    # 0.4.2 → 1.0.0
+npm run release 0.4.3    # explicit version
+```
+
+Steps the script takes:
+1. Refuses to run if the working tree is dirty or you're not on `main`.
+2. Bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, commits, tags `v<version>`.
+3. Pushes the commit + tag.
+4. Polls the GitHub Actions release workflow with `gh run watch --exit-status`.
+5. **Only on green:** downloads the published archive, verifies its SHA-256,
+   installs the binary to `~/.cargo/bin/ghax`, drops the daemon bundle into
+   `~/.local/share/ghax/`, and bootstraps the daemon's `node_modules/`.
+6. **On red:** stops with a pointer to `gh run view --log-failed`. Nothing
+   gets installed locally — you keep running the previous version until you
+   fix the build.
+
+To pull the latest published release without cutting a new one (e.g. another
+machine, or after a manual hotfix release):
+
+```bash
+npm run install-release            # latest non-prerelease
+npm run install-release v0.4.2     # specific tag
+```
+
+Both scripts share the same install path. Idempotent — safe to re-run.
+
 ## Adding a new command
 
 1. Register a handler in `daemon.ts` via `register('name', async (ctx, args, opts) => {...})`.
