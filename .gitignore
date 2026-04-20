@@ -8,3 +8,4 @@ dist/
 .gstack/
 .playwright-cli/
 target/
+.claude/
