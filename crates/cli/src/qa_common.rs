@@ -1,9 +1,7 @@
-//! Shared QA-style log filters used by both `qa` (full crawl report) and
-//! `canary` (post-deploy loop). Both reach into the daemon's console and
-//! network ring buffers, discard anything older than a cycle-start
-//! timestamp, and pluck out error-level console entries or 4xx/5xx
-//! network entries. Centralising the filter keeps the two verbs honest
-//! about what counts as a "cycle error".
+//! Shared "cycle error" definition for `qa` and `canary`: error-level
+//! console entries and 4xx/5xx network entries newer than a cycle-start
+//! timestamp. Daemon-side `since` + `errors` flags keep the payload small
+//! when the ring buffers hold thousands of entries.
 
 use crate::rpc;
 use serde::Serialize;

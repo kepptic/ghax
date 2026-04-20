@@ -1,7 +1,6 @@
-//! Shared time helpers. Prior to consolidation, `qa.rs`, `canary.rs`, and
-//! `ship.rs` each had their own `now_ms`/`iso_now`/`days_to_ymd` — `ship.rs`
-//! even used a slower year-by-year loop algorithm. This module is the one
-//! place that knows how to spell "now" without a time crate.
+//! Chrono-free time helpers used by verbs that timestamp reports and
+//! commit messages. Kept here so all callers share the same O(1)
+//! Howard-Hinnant date algorithm instead of drifting into year-loops.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

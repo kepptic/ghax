@@ -1143,12 +1143,10 @@ class DaemonError extends Error {
   }
 }
 
-// Centralised `Runtime.evaluate` with returnByValue + exception surfacing.
-// Every CDP-eval site used to open-code the same shape and (inconsistently)
-// the exceptionDetails check — the silent sites were masking real errors
-// (ext.storage returned {ok:true} on thrown expressions). Throwing here
-// surfaces them as DaemonError; callers that want to swallow wrap in
-// try/catch as they already do.
+// evalInTarget (below) throws DaemonError on exceptionDetails so silent
+// swallowing can't mask thrown expressions — ext.storage previously
+// returned {ok:true} on a thrown expr. Callers that want the old
+// behaviour wrap in try/catch.
 async function withCdpSession<T>(
   page: Page,
   fn: (session: import('playwright').CDPSession) => Promise<T>,
