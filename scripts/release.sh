@@ -70,7 +70,10 @@ fi
 
 # ── 2. Bump version + commit + tag ────────────────────────────────
 sed -i.bak "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml && rm Cargo.toml.bak
-cargo build --release --quiet 2>&1 | tail -3   # also refreshes Cargo.lock
+# Refresh Cargo.lock to reflect the version bump without paying for a full
+# release compile (the local artifact isn't consumed; CI builds the
+# authoritative one). cargo update --workspace just touches the lock entry.
+cargo update --workspace --quiet 2>&1 | tail -3
 git add Cargo.toml Cargo.lock
 git commit -m "release: $TAG"
 git tag -a "$TAG" -m "$TAG"

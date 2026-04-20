@@ -6,6 +6,31 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- `attach.rs` simplification (post-/simplify pass): collapsed the
+  two-function `spawn_daemon` + `spawn_daemon_with_retry` recursion-with-
+  flag into a single `for attempt in 0..2` loop inside `spawn_daemon`.
+  Extracted `build_daemon_cmd()` (Command builder shared by both attempts)
+  and `is_missing_module()` (single sentinel for the BUG-001 detection,
+  used by both the auto-bootstrap path and the `daemon_failure` hint).
+  Pulled the playwright/source-map version literals out of
+  `bootstrap_daemon_runtime` into module-level constants
+  (`PLAYWRIGHT_VERSION`, `SOURCE_MAP_VERSION`) AND made the function
+  prefer a sibling `package.json` if one is present — so release archives
+  can ship a real package.json and skip the constants entirely.
+- Bash scripts factor out `scripts/bootstrap-daemon-runtime.sh` — now
+  the single source of truth for the daemon's `npm install` step.
+  `install-link.sh` and `install-release.sh` both delegate to it.
+  Includes version-mismatch detection (was only in install-link before),
+  so users upgrading across a playwright bump get a refreshed
+  node_modules without manual intervention.
+- `release.sh` swaps `cargo build --release` (30-90s, artifact unused)
+  for `cargo update --workspace` (~1s) — the local build was only there
+  to refresh `Cargo.lock` after the version sed; CI builds the
+  authoritative artifact.
+- Trimmed a "BUG-001" ticket label out of the user-facing daemon-failure
+  error message; the surrounding text already explains the fix.
+
 ### Added
 
 - `ghax xpath <expression> [--limit N]` — query the page's DOM with an
