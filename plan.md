@@ -38,7 +38,7 @@ Two of them (`ext.sw.eval`, `extViewEval`) also wrap the user JS in
 
 **Accept:** diff reduces daemon.ts by ~30-50 net lines; smoke passes.
 
-### 2. Daemon: `getSwTarget()` helper (6 call sites)
+### 2. Daemon: `getSwTarget()` helper (6 call sites) — [x]
 
 `ext.reload`, `ext.hot-reload`, `ext.sw.eval`, `ext.storage`,
 `ext.message`, and `ensureSwLogSubscription` all repeat:

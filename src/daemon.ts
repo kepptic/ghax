@@ -1136,6 +1136,18 @@ class DaemonError extends Error {
 // (ext.storage returned {ok:true} on thrown expressions). Throwing here
 // surfaces them as DaemonError; callers that want to swallow wrap in
 // try/catch as they already do.
+async function getSwTarget(
+  ctx: Ctx,
+  extId: string,
+): Promise<{ target: CdpTarget; info: CdpTargetInfo }> {
+  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
+  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
+  const info = sws[0];
+  const target = await ctx.pool.get(info);
+  await target.send('Runtime.enable');
+  return { target, info };
+}
+
 async function evalInTarget<T = unknown>(
   target: CdpTarget,
   expression: string,
@@ -1159,10 +1171,7 @@ async function evalInTarget<T = unknown>(
 register('ext.reload', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext reload <ext-id>');
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
   // Read content_scripts so we can warn — reload disconnects us before the promise resolves.
   let manifestCs: unknown[] = [];
   try {
@@ -1344,13 +1353,7 @@ async function ensureSwLogSubscription(ctx: Ctx, extId: string): Promise<SwLogSu
     ctx.swLogs.delete(extId);
   }
 
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) {
-    throw new DaemonError(`No service worker for ${extId}`, 3);
-  }
-  const targetInfo = sws[0];
-  const target = await ctx.pool.get(targetInfo);
-  await target.send('Runtime.enable');
+  const { target, info: targetInfo } = await getSwTarget(ctx, extId);
   const buf = new CircularBuffer<ConsoleEntry>(BUFFER_CAP);
   target.on((event) => {
     if (event.method === 'Runtime.consoleAPICalled') {
@@ -1418,10 +1421,7 @@ register('ext.sw.eval', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const js = String(args[1] ?? '');
   if (!extId || !js) throw new Error('Usage: ext sw <ext-id> eval <js>');
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
   const value = await evalInTarget(target, js, {
     awaitPromise: true,
     wrapIife: true,
@@ -1436,10 +1436,7 @@ register('ext.storage', async (ctx, args) => {
   const op = String(args[2] ?? 'get');
   if (!extId) throw new Error('Usage: ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]');
   if (!['local', 'session', 'sync'].includes(area)) throw new Error(`Unknown area: ${area}`);
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
 
   let expr: string;
   if (op === 'get') {
@@ -1480,10 +1477,7 @@ register('ext.message', async (ctx, args) => {
     // Allow raw strings too — wrap as {data: <string>}
     payload = payloadRaw;
   }
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
   // chrome.runtime.sendMessage from inside the SW with a recipient extension
   // ID round-trips through the extension's own onMessage listeners. For
   // cross-extension messaging, the SW would need to already be authorised.
