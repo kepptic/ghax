@@ -158,7 +158,7 @@ over HTTP per page check.
 **Accept:** a page with 500 console entries returns only post-cycle
 entries; smoke passes; QA output unchanged.
 
-### 11. Rust CLI: `require_daemon` skip redundant checks
+### 11. Rust CLI: `require_daemon` skip redundant checks — [x]
 
 `state.rs::require_daemon` reads the state file, does a `kill(pid, 0)`
 probe, then an HTTP `/health` round-trip. The `/health` call already

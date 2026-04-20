@@ -10,7 +10,7 @@
 //!   3. `git rev-parse --show-toplevel` → `<root>/.ghax/ghax.json`
 //!   4. cwd fallback (non-git environments)
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -132,19 +132,24 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
             cfg.state_file.display()
         )
     })?;
+    // /health is the authoritative liveness signal — if it responds, the
+    // daemon is alive. Skip the kill-probe syscall on the happy path and
+    // only fall back to it when /health fails, so we can still give the
+    // pid-specific "daemon not running" hint instead of a bare network
+    // timeout.
+    if health_check(state.port).is_ok() {
+        return Ok(state.port);
+    }
     if !is_process_alive(state.pid) {
         return Err(anyhow!(
             "daemon (pid {}) is not running — run `ghax attach`",
             state.pid
         ));
     }
-    health_check(state.port).with_context(|| {
-        format!(
-            "daemon at :{} not responding to /health — run `ghax attach`",
-            state.port
-        )
-    })?;
-    Ok(state.port)
+    Err(anyhow!(
+        "daemon at :{} not responding to /health — run `ghax attach`",
+        state.port
+    ))
 }
 
 fn health_check(port: u16) -> Result<()> {
