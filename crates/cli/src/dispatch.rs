@@ -17,6 +17,9 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
+// Phase 3 wired up the last stubs, but keep this and `stub()` around as the
+// escape hatch for any future verb that lands without a Rust port yet.
+#[allow(dead_code)]
 pub const EXIT_PHASE_PENDING: i32 = 64;
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
@@ -59,8 +62,8 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "canary" => return canary::cmd_canary(&args::parse(rest)),
         "review" => return review::cmd_review(&args::parse(rest)),
         "ship" => return ship::cmd_ship(&args::parse(rest)),
-        // Phase 3 (needs SSE / REPL).
-        "shell" => return Ok(stub(verb, "phase 3")),
+        // Phase 3B — shell REPL.
+        "shell" => return crate::shell::cmd_shell(),
         _ => {}
     }
 
@@ -118,8 +121,8 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "console" | "network" => {
             let parsed = args::parse(rest);
             if matches!(parsed.flags.get("follow"), Some(Value::Bool(true))) {
-                eprintln!("ghax: --follow streams over SSE (phase 3 — not yet ported to Rust). Use the Bun CLI for now.");
-                return Ok(EXIT_PHASE_PENDING);
+                let port = state::require_daemon(cfg)?;
+                return crate::sse::stream(port, &format!("/sse/{verb}"));
             }
             simple(cfg, verb, parsed)
         }
@@ -149,6 +152,7 @@ fn simple_no_args(cfg: &Config, cmd: &str, parsed: Parsed) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
+#[allow(dead_code)]
 fn stub(verb: &str, phase: &str) -> i32 {
     eprintln!(
         "ghax: `{verb}` not yet ported to the Rust CLI ({phase}). Use the Bun CLI for now (set GHAX_BIN=./dist/ghax)."
@@ -212,8 +216,10 @@ fn dispatch_ext_sw(cfg: &Config, rest: &[String]) -> Result<i32> {
         "logs" => {
             let parsed = args::parse(tail);
             if matches!(parsed.flags.get("follow"), Some(Value::Bool(true))) {
-                eprintln!("ghax: ext sw logs --follow streams over SSE (phase 3 — not yet ported).");
-                return Ok(EXIT_PHASE_PENDING);
+                let port = state::require_daemon(cfg)?;
+                // URL-encode the ext-id to match the TS `encodeURIComponent` call.
+                let encoded_id = url_encode(ext_id);
+                return crate::sse::stream(port, &format!("/sse/ext-sw-logs/{encoded_id}"));
             }
             let port = state::require_daemon(cfg)?;
             let positional = json!([ext_id.clone()]);
@@ -262,6 +268,24 @@ fn dispatch_gesture(cfg: &Config, rest: &[String]) -> Result<i32> {
         }
     };
     simple(cfg, cmd, parsed)
+}
+
+/// Percent-encode a string the same way JS `encodeURIComponent` does.
+///
+/// Only unreserved characters (A-Z a-z 0-9 - _ . ~) are left as-is;
+/// everything else is `%XX`-encoded. This matches the daemon's expectation for
+/// the ext-sw-logs SSE path where the ext-id may contain colons or underscores.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn dispatch_record(cfg: &Config, rest: &[String]) -> Result<i32> {

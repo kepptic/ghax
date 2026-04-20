@@ -388,6 +388,8 @@ fn launch_instructions(port: u16, browsers: &[BrowserBinary]) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct LaunchResult {
+    // Logged in launch messages so the user can kill the right process if it hangs.
+    #[allow(dead_code)]
     pid: u32,
     endpoint: CdpEndpoint,
     #[allow(dead_code)]
