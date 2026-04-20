@@ -107,7 +107,7 @@ against the same RPC results with the same shape.
 
 **Accept:** one implementation of each filter; smoke passes.
 
-### 7. Rust CLI: `resolve_url` → `url::Url::join`
+### 7. Rust CLI: `resolve_url` → `url::Url::join` — [x]
 
 `qa.rs::resolve_url` reimplements relative→absolute URL resolution.
 `url` crate is already transitively in the dep tree via `reqwest`.

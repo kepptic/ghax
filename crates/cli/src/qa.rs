@@ -181,31 +181,8 @@ fn extract_href(tag: &str) -> Option<String> {
     if href.is_empty() { None } else { Some(href) }
 }
 
-/// Minimal URL resolution (absolute URLs pass through, relative paths are joined).
 fn resolve_url(base: &str, href: &str) -> Option<String> {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return Some(href.to_string());
-    }
-    // Extract origin + path from base.
-    let (scheme_end, _) = base.split_once("://")?;
-    let full_prefix = format!("{scheme_end}://");
-    let rest = &base[full_prefix.len()..];
-    let slash = rest.find('/');
-    let host = match slash {
-        Some(i) => &rest[..i],
-        None => rest,
-    };
-    let base_path = match slash {
-        Some(i) => &rest[i..],
-        None => "/",
-    };
-    if href.starts_with('/') {
-        Some(format!("{full_prefix}{host}{href}"))
-    } else {
-        // Relative: resolve against directory of base_path.
-        let dir = base_path.rfind('/').map_or("/", |i| &base_path[..=i]);
-        Some(format!("{full_prefix}{host}{dir}{href}"))
-    }
+    url::Url::parse(base).ok()?.join(href).ok().map(|u| u.to_string())
 }
 
 /// Crawl URLs under `root`: sitemap first, BFS fallback.
