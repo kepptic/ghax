@@ -63,23 +63,12 @@ cp "$INNER/ghax" "$BIN_DIR/ghax"
 chmod +x "$BIN_DIR/ghax"
 cp "$INNER/ghax-daemon.mjs" "$SHARE_DIR/ghax-daemon.mjs"
 
-# Bootstrap node_modules (idempotent — handled by Rust auto-bootstrap on first
-# attach, but pre-bootstrapping here means the first attach is fast too).
-if [ ! -d "$SHARE_DIR/node_modules/playwright" ]; then
-  echo "install-release: bootstrapping daemon runtime in $SHARE_DIR (one-time, ~10s)..."
-  cat > "$SHARE_DIR/package.json" <<'JSON'
-{
-  "name": "ghax-daemon-runtime",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "playwright": "^1.58.2",
-    "source-map":  "^0.7.6"
-  }
-}
-JSON
-  (cd "$SHARE_DIR" && npm install --silent --no-audit --no-fund --omit=dev) > /dev/null 2>&1
-fi
+# Bootstrap node_modules. The shared helper handles version-mismatch
+# detection too — so users who upgrade across a playwright bump get a
+# refreshed install_modules without us hardcoding versions here.
+echo "install-release: bootstrapping daemon runtime in $SHARE_DIR (no-op if already current)..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+bash "$SCRIPT_DIR/bootstrap-daemon-runtime.sh" "$SHARE_DIR" > /dev/null
 
 # Sanity check.
 INSTALLED="$("$BIN_DIR/ghax" --version 2>/dev/null || echo unknown)"
