@@ -474,3 +474,87 @@ implemented:
       v0 SSH-tunnel path covers the "me on another machine" case.**
 
 (No other v0.5 work currently planned.)
+
+## Known bugs
+
+### BUG-001 · daemon bundle imports `playwright` but doesn't ship it — `ghax attach` fails on a fresh install — ✓ FIXED 2026-04-20 (ghax 0.4.2)
+
+**Status:** Fixed in v0.4.2 via auto-bootstrap. The Rust CLI now detects the
+`ERR_MODULE_NOT_FOUND` from the spawned daemon, runs `npm install` in the
+daemon's parent dir (writing a minimal `package.json` first), and retries the
+spawn — once. Transparent to the user; first attach is ~10s slower than
+subsequent attaches (the npm install step). Three layers of fix landed:
+
+1. **Auto-bootstrap in `attach.rs`** (`spawn_daemon_with_retry` +
+   `bootstrap_daemon_runtime`) — primary fix, no manual user step.
+2. **Daemon stderr surfacing** (`wait_for_daemon` + `daemon_failure`) — when
+   the daemon crashes for any other reason, the user sees the actual stderr
+   instead of "didn't become healthy, check log file that doesn't exist."
+3. **`scripts/install-link.sh`** — bootstraps the same way for in-repo
+   `bun run install-link` users, so dev installs don't need a first-attach
+   to trigger the bootstrap.
+
+Original bug report below for posterity.
+
+---
+
+**Reported:** 2026-04-19 · from Setsail `/qa` session (ISSUE-002 in the Setsail QA report that day).
+**Severity:** blocker on fresh installs (prevents any `ghax attach` from succeeding).
+**Affects:** `ghax 0.4.1-rc.3`. CLI (Rust, `~/.cargo/bin/ghax`) + daemon bundle at `/Users/gr/.local/share/ghax/ghax-daemon.mjs`. Probably affects every release since the Rust CLI rewrite landed.
+
+**Repro**
+
+```bash
+# Edge already running with --remote-debugging-port=9222
+export GHAX_DAEMON_BUNDLE=/Users/gr/.local/share/ghax/ghax-daemon.mjs
+ghax attach
+# → ghax: Daemon did not become healthy within 15s. Check .ghax/ghax-daemon.log.
+```
+
+No log file is written (`~/.ghax/ghax-daemon.log` doesn't exist after the failure — the daemon dies too early to open its logger).
+
+Running the bundle directly surfaces the actual error:
+
+```bash
+$ node /Users/gr/.local/share/ghax/ghax-daemon.mjs
+node:internal/modules/package_json_reader:255
+  throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright'
+  imported from /Users/gr/.local/share/ghax/ghax-daemon.mjs
+```
+
+**Root cause**
+
+Line 2 of the compiled bundle: `import { chromium } from "playwright";`. The bundle is 2291 lines of inlined source + that one unresolved import. `/Users/gr/.local/share/ghax/` contains ONLY `ghax-daemon.mjs` — no `node_modules/`, no `package.json`. Node's ESM resolver looks for `playwright` in that dir's `node_modules` → parent dirs → fails.
+
+Playwright is installed globally on this machine (`/Users/gr/.nvm/versions/node/v24.3.0/lib/node_modules/playwright/`), but Node ESM imports don't honour `NODE_PATH` for bare-specifier resolution the way CJS does, so a globally-installed playwright is not discoverable from an ad-hoc `.mjs` file dropped outside a package.
+
+**Why the CLI doesn't give a useful error**
+
+`ghax attach` spawns the daemon and waits 15s for a health check. When Node exits with the ERR_MODULE_NOT_FOUND before the daemon opens its log file, the CLI only sees "didn't become healthy" and points at a log file that was never created. The real stderr from the daemon child is discarded.
+
+**Suggested fixes** (in priority order)
+
+1. **Bundle playwright into the daemon mjs.** The daemon bundler should NOT mark `playwright` as external. Including playwright's JS (not the browsers — those are a separate install step) adds ~8-10MB to the bundle but makes the daemon self-contained and matches how the Rust CLI binary is shipped (single compiled binary, zero runtime deps). This is the cleanest fix and matches the "standalone install" promise the roadmap already makes for the CLI. Playwright browsers still need a one-time `npx playwright install chromium` for scratch-profile mode (`--launch`), but CDP-only `ghax attach` against an already-running Edge/Chrome should work without it.
+
+2. **If bundling is rejected** (e.g. bundle size concern), ship an install script that creates `~/.local/share/ghax/package.json` + runs `npm i playwright` into a sibling `node_modules/`. Document it in the README as a postinstall step. Make the installer the distribution unit, not a raw .mjs file.
+
+3. **In any case, plumb the daemon's stderr back through the CLI's failure path.** When the daemon exits with a non-zero code before the health port opens, the Rust CLI should print the child's stderr instead of the generic "did not become healthy" message. A proper error text would save every future debugger ~15 minutes of triage. The current behaviour also breaks the "check `.ghax/ghax-daemon.log`" advice, because the log file was never created.
+
+**Workaround today (users who hit this)**
+
+Install playwright into a node_modules beside the daemon:
+
+```bash
+cd ~/.local/share/ghax
+echo '{"type":"module","dependencies":{"playwright":"*"}}' > package.json
+npm i
+# then retry ghax attach
+```
+
+This is ugly — users shouldn't have to know about ESM resolution quirks to run a CLI.
+
+**Downstream impact**
+
+On the reporter's machine (Setsail QA, 2026-04-19), `ghax attach` not working meant falling back to gstack browse CDP mode, which launched a new Chromium instead of reusing the existing authenticated Edge session — defeating the whole purpose of ghax. The user's stated memory preference ("Default to ghax for browser QA — skip the gstack-browse login dance") assumes `ghax attach` works on fresh installs. It doesn't.
