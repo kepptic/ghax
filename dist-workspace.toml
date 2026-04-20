@@ -19,12 +19,15 @@ ci = "github"
 #   - msi       → Windows MSI generation; .zip in the release archive is enough
 # These can be added later when there's reason to use those distribution channels.
 installers = ["shell", "powershell"]
-# Target platforms to build apps for (Rust target-triple syntax)
-# 6 triples per design/plan/06-rust-cli-rewrite.md §Distribution plan
+# Target platforms to build apps for (Rust target-triple syntax).
+# 5 of the 6 plan-doc triples — aarch64-pc-windows-msvc dropped because the
+# cargo-xwin cross-compile of `ring` (TLS, via reqwest/rustls) emits malformed
+# clang args on Linux runners (`/imsvc` passed as a positional path instead of
+# `-imsvc <dir>`). Affects an extremely small user base. Re-add when upstream
+# fixes the flag quoting; a v0.5 native-Windows-runner job could also resolve.
 targets = [
   "aarch64-apple-darwin",
   "aarch64-unknown-linux-gnu",
-  "aarch64-pc-windows-msvc",
   "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "x86_64-pc-windows-msvc",
