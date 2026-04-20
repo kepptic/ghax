@@ -25,3 +25,7 @@ anyhow = "1"
 # is not interruptible — ctrlc sets an AtomicBool that the sleep loop checks every
 # 250 ms (same pattern as the TS canary which uses 250 ms setTimeout ticks).
 ctrlc = { version = "3", features = ["termination"] }
+# rustyline: shell-mode REPL — history + Ctrl-C handling. ~1MB binary cost.
+rustyline = "15"
+# atty: TTY detection for shell-mode prompt and scripted-mode failure propagation.
+atty = "0.2"
