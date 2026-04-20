@@ -1,9 +1,4 @@
-//! Verb dispatch table. Mirrors the `switch (verb)` block in `src/cli.ts`.
-//!
-//! Phase 1 + 2 scope: every trivial verb plus medium verbs (attach, detach,
-//! restart, status, qa, canary, review, ship, pair, diff-state, chain, replay,
-//! gif). Phase 3 verbs that need SSE or REPL (shell, console --follow,
-//! network --follow, ext sw logs --follow) still stub out to the Bun CLI.
+//! Verb dispatch table — every CLI verb routes through here.
 
 use crate::args::{self, Parsed};
 use crate::output;
@@ -17,10 +12,6 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
-// Phase 3 wired up the last stubs, but keep this and `stub()` around as the
-// escape hatch for any future verb that lands without a Rust port yet.
-#[allow(dead_code)]
-pub const EXIT_PHASE_PENDING: i32 = 64;
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
     let cfg = state::resolve_config();
@@ -47,7 +38,6 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
 }
 
 fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
-    // Phase 2 medium verbs — wired into per-module commands.
     match verb {
         "attach" => return attach::cmd_attach(&args::parse(rest), cfg),
         "detach" => return attach::cmd_detach(cfg),
@@ -62,7 +52,6 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "canary" => return canary::cmd_canary(&args::parse(rest)),
         "review" => return review::cmd_review(&args::parse(rest)),
         "ship" => return ship::cmd_ship(&args::parse(rest)),
-        // Phase 3B — shell REPL.
         "shell" => return crate::shell::cmd_shell(),
         _ => {}
     }
@@ -80,7 +69,6 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, verb, parsed)
         }
 
-        // The "ev" verb (JS execution against the page) — daemon RPC name matches.
         "eval" => {
             let parsed = args::parse(rest);
             simple(cfg, "eval", parsed)
@@ -150,14 +138,6 @@ fn simple_no_args(cfg: &Config, cmd: &str, parsed: Parsed) -> Result<i32> {
     let data = rpc::call(port, cmd, Value::Array(vec![]), parsed.opts_without_json())?;
     output::print(&data, parsed.json());
     Ok(EXIT_OK)
-}
-
-#[allow(dead_code)]
-fn stub(verb: &str, phase: &str) -> i32 {
-    eprintln!(
-        "ghax: `{verb}` not yet ported to the Rust CLI ({phase}). Use the Bun CLI for now (set GHAX_BIN=./dist/ghax)."
-    );
-    EXIT_PHASE_PENDING
 }
 
 fn dispatch_ext(cfg: &Config, rest: &[String]) -> Result<i32> {

@@ -79,7 +79,6 @@ export async function snapshot(
     return { text: '(no accessible elements found)', refs: new Map(), count: 0 };
   }
 
-  const lines = ariaText.split('\n');
   const refs = new Map<string, RefEntry>();
   const output: string[] = [];
   let refCounter = 1;
@@ -88,16 +87,16 @@ export async function snapshot(
   const roleNameCounts = new Map<string, number>();
   const roleNameSeen = new Map<string, number>();
 
-  for (const line of lines) {
+  const nodes: ParsedNode[] = [];
+  for (const line of ariaText.split('\n')) {
     const node = parseLine(line);
     if (!node) continue;
+    nodes.push(node);
     const key = `${node.role}:${node.name || ''}`;
     roleNameCounts.set(key, (roleNameCounts.get(key) || 0) + 1);
   }
 
-  for (const line of lines) {
-    const node = parseLine(line);
-    if (!node) continue;
+  for (const node of nodes) {
 
     const depth = Math.floor(node.indent / 2);
     const isInteractive = INTERACTIVE_ROLES.has(node.role);

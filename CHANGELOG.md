@@ -7,6 +7,22 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Daemon: `pageTargetId()` caches the target id on a `WeakMap<Page>`.
+  Playwright target ids are stable for a page's lifetime, but reading
+  one costs a full `CDPSession.newCDPSession` + `Target.getTargetInfo`
+  + detach round-trip. Every command that walks tabs (`activePage`,
+  `tabs`, `find`, `status`, `tab`) used to pay that per page per call.
+  With the cache, the hot path is O(1).
+- Daemon: `tabs` and `find` handlers now fan out per-page
+  `pageTargetId` + `page.title()` in parallel with `Promise.all` instead
+  of a serial await loop. With N tabs open this drops N round-trips to 1.
+- `snapshot.ts`: the aria-tree disambiguation pass used to call
+  `parseLine()` twice per line (once to count role+name duplicates, once
+  to emit). Parsed once into a reused array — meaningful on large SPAs.
+- `dispatch.rs`: removed the dead `stub()` helper and
+  `EXIT_PHASE_PENDING` constant left over from the Rust-port phases,
+  and refreshed the stale "Phase 1 + 2" module doc.
+
 - `attach.rs` simplification (post-/simplify pass): collapsed the
   two-function `spawn_daemon` + `spawn_daemon_with_retry` recursion-with-
   flag into a single `for attempt in 0..2` loop inside `spawn_daemon`.

@@ -100,12 +100,22 @@ async function allPages(ctx: Ctx): Promise<Page[]> {
   return pages;
 }
 
+// Target IDs are stable for a page's lifetime, but reading them costs a
+// full CDPSession open+detach round-trip. Every command that walks tabs
+// (activePage, tabs, find, status, tab) used to pay that per page per
+// call. Cache it on the Page via a WeakMap so the hot path stays O(1).
+const pageTargetIds = new WeakMap<Page, string>();
+
 async function pageTargetId(page: Page): Promise<string | null> {
+  const cached = pageTargetIds.get(page);
+  if (cached) return cached;
   try {
     const session = await page.context().newCDPSession(page);
     const info = await session.send('Target.getTargetInfo');
     await session.detach().catch(() => undefined);
-    return (info as any)?.targetInfo?.targetId ?? null;
+    const id = (info as any)?.targetInfo?.targetId ?? null;
+    if (id) pageTargetIds.set(page, id);
+    return id;
   } catch {
     return null;
   }
@@ -285,17 +295,12 @@ register('status', async (ctx) => {
 
 register('tabs', async (ctx) => {
   const pages = await allPages(ctx);
-  const out = [];
-  for (const p of pages) {
-    const id = await pageTargetId(p);
-    out.push({
-      id,
-      title: await p.title().catch(() => ''),
-      url: p.url(),
-      active: id === ctx.activePageId,
-    });
-  }
-  return out;
+  return Promise.all(
+    pages.map(async (p) => {
+      const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+      return { id, title, url: p.url(), active: id === ctx.activePageId };
+    }),
+  );
 });
 
 register('tab', async (ctx, args, opts) => {
@@ -336,18 +341,13 @@ register('find', async (ctx, args) => {
   const pattern = String(args[0] ?? '');
   if (!pattern) throw new Error('Usage: find <url-substring>');
   const pages = await allPages(ctx);
-  const matches = [];
-  for (const p of pages) {
-    const url = p.url();
-    if (url.includes(pattern)) {
-      matches.push({
-        id: await pageTargetId(p),
-        url,
-        title: await p.title().catch(() => ''),
-      });
-    }
-  }
-  return matches;
+  const hits = pages.filter((p) => p.url().includes(pattern));
+  return Promise.all(
+    hits.map(async (p) => {
+      const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+      return { id, url: p.url(), title };
+    }),
+  );
 });
 
 register('newWindow', async (ctx, args) => {
