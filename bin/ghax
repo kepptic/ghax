@@ -1,12 +1,43 @@
 #!/usr/bin/env bash
-# ghax CLI shim — delegates to compiled binary, falls back to `bun run src/cli.ts`.
+# ghax CLI shim — selects the best available binary, in this order:
+#
+#   1. $GHAX_BIN            — explicit override (CI, multi-agent isolation, testing)
+#   2. target/release/ghax  — in-repo Rust build (preferred during development)
+#   3. dist/ghax            — Bun-compiled fallback (transition period; pre-built packages)
+#   4. bun run src/cli.ts   — source fallback (hacking on TS without a full build)
+#   5. exit 10              — nothing usable found; print install hint
+#
+# For installed users (Homebrew, cargo install, npm -g) the binary is on PATH
+# and this shim is never invoked.  The precedence only matters for in-repo use.
+
+set -e
+
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if test -x "$DIR/dist/ghax"; then
+
+# 1. Explicit override.
+if [ -n "${GHAX_BIN:-}" ] && [ -x "$GHAX_BIN" ]; then
+  exec "$GHAX_BIN" "$@"
+fi
+
+# 2. Rust binary (target/release/ghax) — preferred in-repo binary.
+if [ -x "$DIR/target/release/ghax" ]; then
+  exec "$DIR/target/release/ghax" "$@"
+fi
+
+# 3. Bun-compiled binary (dist/ghax) — fallback during transition.
+if [ -x "$DIR/dist/ghax" ]; then
   exec "$DIR/dist/ghax" "$@"
 fi
-if command -v bun >/dev/null 2>&1 && test -f "$DIR/src/cli.ts"; then
+
+# 4. Bun source fallback — for hacking on the TS CLI without a build step.
+if command -v bun >/dev/null 2>&1 && [ -f "$DIR/src/cli.ts" ]; then
   exec bun run "$DIR/src/cli.ts" "$@"
 fi
-echo "ghax: no compiled binary at $DIR/dist/ghax and no Bun runtime available." >&2
-echo "Run: cd $DIR && bun install && bun run build" >&2
+
+# 5. Nothing found.
+echo "ghax: no usable binary found." >&2
+echo "" >&2
+echo "  To build the Rust binary:  cd $DIR && cargo build --release --manifest-path crates/cli/Cargo.toml" >&2
+echo "  To build the Bun binary:   cd $DIR && bun run build" >&2
+echo "  Or set GHAX_BIN to point at a pre-built ghax binary." >&2
 exit 10

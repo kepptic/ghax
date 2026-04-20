@@ -196,6 +196,39 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Shadow-DOM selectors use ` >> ` (Playwright's chain combinator)
   instead of the invented `>>>`.
 
+## [1.0.0] - 2026-04-19 (UNRELEASED)
+
+The Rust CLI rewrite. ghax is now a 2.6 MB Rust binary that talks to the
+unchanged Node daemon over HTTP. 30x faster cold start, 24x smaller
+download, distributed as platform-specific binaries via cargo-dist for 6
+target triples.
+
+### Changed
+- ghax CLI: TypeScript → Rust 2021 edition. The TS source under `src/`
+  stays as a fallback during the transition release.
+- Distribution: 61 MB Bun-compiled universal blob → ~2.6 MB stripped Rust
+  binary on Apple Silicon (~10 MB on Linux x64) per platform.
+- Cold start: ~70 ms (P50) → ~20 ms (P50). P99 ~600 ms → ~20 ms.
+- Build: now requires Rust toolchain (1.80+) in addition to Bun + Node.
+
+### Added
+- 6-target release matrix via cargo-dist (macOS x64/ARM, Linux x64/ARM,
+  Windows x64/ARM).
+- Homebrew tap, `cargo install`, `npm install -g @ghax/cli` distribution
+  paths.
+- Daemon discovery precedence in `attach.rs`: (1) `$GHAX_DAEMON_BUNDLE`
+  env var, (2) sibling of CLI binary, (3) dev fallback at
+  `<repo root>/dist/ghax-daemon.mjs`.
+- Serde type mirror in `crates/cli/src/types.rs` — one struct per RPC
+  return shape, hand-mirrored from the TS interfaces in `src/daemon.ts`.
+- `test/parity.ts` — CI check that Rust and Bun CLIs produce byte-equal
+  output for deterministic verbs. Fails loud on format drift.
+
+### Deprecated
+- The Bun-compiled CLI (`dist/ghax`). The `bin/ghax` shim now prefers the
+  Rust binary when present. Bun fallback will be removed in v1.1 once the
+  Rust binary has shipped to enough users.
+
 ## [0.3.0] — 2026-04-18
 
 ### Added
@@ -265,7 +298,8 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/kepptic/ghax/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/kepptic/ghax/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kepptic/ghax/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kepptic/ghax/releases/tag/v0.1.0

@@ -5,7 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Attach to your real Chrome or Edge via CDP and drive it — Rust CLI."
+
+[package.metadata.wix]
+upgrade-guid = "7D2A2B7C-7953-427A-9DF7-C0D2B2817671"
+path-guid = "A10569BC-E257-43AE-A11E-22C33FC18CBB"
+license = false
+eula = false
 
 [[bin]]
 name = "ghax"

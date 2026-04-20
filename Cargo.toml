@@ -8,6 +8,8 @@ edition = "2021"
 rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/kepptic/ghax"
+homepage = "https://github.com/kepptic/ghax"
+authors = ["Kepptic <admin@kepptic.com>"]
 
 [profile.release]
 opt-level = "z"
@@ -15,3 +17,8 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -640,7 +640,7 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
     let palette = format!("{tmp_dir}/palette.png");
     let frame_pattern = format!("{tmp_dir}/frame-%04d.png");
     let framerate = (1000_u64 / delay_ms.max(1)).max(1).to_string();
-    let scale_str = format!("{scale}:-1:flags=lanczos");
+    let scale_str = format!("scale={scale}:-1:flags=lanczos");
 
     // Pass 1: generate palette.
     let palette_status = std::process::Command::new("ffmpeg")

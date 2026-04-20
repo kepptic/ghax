@@ -11,6 +11,8 @@
     "dev": "bun run src/cli.ts",
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
     "build": "bun build --compile src/cli.ts --outfile dist/ghax && bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core && chmod +x dist/ghax",
+    "build:rust": "cargo build --release --manifest-path crates/cli/Cargo.toml",
+    "build:all": "bun run build:rust && bun run build",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "test:smoke": "bun run test/smoke.ts",
@@ -18,8 +20,8 @@
     "test:cross-browser": "bun run test/cross-browser.ts",
     "test:benchmark": "bun run test/benchmark.ts",
     "test:perf": "bun run test/perf-bench.ts",
-    "install-link": "mkdir -p ~/.local/bin && ln -sf \"$PWD/dist/ghax\" ~/.local/bin/ghax && echo 'linked → ~/.local/bin/ghax'",
-    "uninstall-link": "rm -f ~/.local/bin/ghax && echo 'unlinked ~/.local/bin/ghax'"
+    "install-link": "mkdir -p ~/.local/bin ~/.local/share/ghax && ln -sf \"$PWD/target/release/ghax\" ~/.local/bin/ghax && ln -sf \"$PWD/dist/ghax-daemon.mjs\" ~/.local/share/ghax/ghax-daemon.mjs && echo 'linked → ~/.local/bin/ghax + ~/.local/share/ghax/ghax-daemon.mjs'",
+    "uninstall-link": "rm -f ~/.local/bin/ghax ~/.local/share/ghax/ghax-daemon.mjs && echo 'unlinked ~/.local/bin/ghax and ~/.local/share/ghax/ghax-daemon.mjs'"
   },
   "dependencies": {
     "playwright": "^1.58.2",
