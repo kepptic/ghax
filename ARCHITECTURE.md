@@ -68,12 +68,11 @@ Key performance numbers (Rust CLI vs old Bun CLI):
 - **Zero re-attach cost** — the daemon persists across invocations.
 
 Build artifacts:
-- `dist/ghax` (or `dist/ghax-rust`) — Rust binary, ~2.6–10 MB depending on
-  platform. Built via `cargo build --release`.
-- `dist/ghax-daemon.mjs` — ~66 KB Node ESM bundle (Playwright external).
-  Built via `bun run build` (unchanged).
-- `dist/ghax` (Bun fallback) — kept as fallback during transition, removed
-  in v1.1.
+- `target/release/ghax` — Rust binary, ~2.6–10 MB depending on platform.
+  Built via `cargo build --release` (or `bun run build:rust` for the
+  in-repo shortcut).
+- `dist/ghax-daemon.mjs` — ~134 KB Node ESM bundle (Playwright external).
+  Built via `bun run build`.
 
 ## Rust dependency surface
 
@@ -312,14 +311,12 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/cli.ts` | ~1700 | Bun CLI (fallback path during transition; Rust is default) |
 | `src/daemon.ts` | ~1700 | RPC dispatch, all daemon-side handlers, SSE endpoints, capture wiring |
-| `src/browser-launch.ts` | ~230 | Browser detect, CDP probe, scan/findFreePort, launch-browser + headless |
 | `src/cdp-client.ts` | ~350 | Target pool, WebSocket management, raw CDP helpers |
 | `src/snapshot.ts` | ~500 | a11y tree walker, ref assignment, cursor-interactive + shadow-DOM pass |
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
 | `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |
-| `src/config.ts` | ~80 | State file resolution |
+| `src/config.ts` | ~80 | State file resolution (uses Node child_process so it works under both Node and Bun) |
 
 ## Security model
 

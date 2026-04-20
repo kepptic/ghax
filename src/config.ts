@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { execFileSync } from 'child_process';
 
 export interface GhaxConfig {
   projectDir: string;
@@ -32,15 +33,17 @@ export interface DaemonState {
 }
 
 export function getGitRoot(cwd: string = process.cwd()): string | null {
+  // Uses Node's child_process so this file works under both Bun (tests) and
+  // Node (daemon runtime). Previously called Bun.spawnSync which would crash
+  // if the daemon ever ran without GHAX_STATE_FILE pre-set by the Rust CLI.
   try {
-    const proc = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
+    const out = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd,
-      stdout: 'pipe',
-      stderr: 'pipe',
+      stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
+      encoding: 'utf-8',
     });
-    if (proc.exitCode !== 0) return null;
-    return proc.stdout.toString().trim() || null;
+    return out.trim() || null;
   } catch {
     return null;
   }

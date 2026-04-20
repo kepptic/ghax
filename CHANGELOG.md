@@ -204,12 +204,12 @@ download, distributed as platform-specific binaries via cargo-dist for 6
 target triples.
 
 ### Changed
-- ghax CLI: TypeScript → Rust 2021 edition. The TS source under `src/`
-  stays as a fallback during the transition release.
+- ghax CLI: TypeScript/Bun → Rust 2021 edition. Single source of truth.
 - Distribution: 61 MB Bun-compiled universal blob → ~2.6 MB stripped Rust
   binary on Apple Silicon (~10 MB on Linux x64) per platform.
 - Cold start: ~70 ms (P50) → ~20 ms (P50). P99 ~600 ms → ~20 ms.
-- Build: now requires Rust toolchain (1.80+) in addition to Bun + Node.
+- Build: now requires Rust toolchain (1.80+). Bun stays as a dev tool for
+  the daemon bundle (`bun build --target=node`) and the test runner.
 
 ### Added
 - 6-target release matrix via cargo-dist (macOS x64/ARM, Linux x64/ARM,
@@ -220,15 +220,18 @@ target triples.
 - Daemon discovery precedence in `attach.rs`: (1) `$GHAX_DAEMON_BUNDLE`
   env var, (2) sibling of CLI binary, (3) dev fallback at
   `<repo root>/dist/ghax-daemon.mjs`.
-- Serde type mirror in `crates/cli/src/types.rs` — one struct per RPC
-  return shape, hand-mirrored from the TS interfaces in `src/daemon.ts`.
-- `test/parity.ts` — CI check that Rust and Bun CLIs produce byte-equal
-  output for deterministic verbs. Fails loud on format drift.
+- Smoke suite (`test/smoke.ts`) reads `GHAX_BIN` env var so the same 80
+  checks run against any binary. 80/80 against the Rust binary in 31.3s.
 
-### Deprecated
-- The Bun-compiled CLI (`dist/ghax`). The `bin/ghax` shim now prefers the
-  Rust binary when present. Bun fallback will be removed in v1.1 once the
-  Rust binary has shipped to enough users.
+### Removed
+- The Bun CLI source — `src/cli.ts` (~2,071 lines) and `src/browser-launch.ts`
+  (~230 lines). The `bin/ghax` shim now resolves to `target/release/ghax`
+  (Rust) only; the Bun fallback paths are gone. If you need the Bun CLI
+  back, `git log --oneline -- src/cli.ts` will find it in history.
+- The `dev` package.json script (`bun run src/cli.ts`) — no source CLI to
+  hot-reload anymore. Use `cargo run --release` for the Rust equivalent.
+- The Bun-compiled `dist/ghax` binary — the `build` script now bundles
+  the daemon only.
 
 ## [0.3.0] — 2026-04-18
 

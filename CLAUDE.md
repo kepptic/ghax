@@ -24,8 +24,8 @@ the tool in the past.
 1. **CLI is Rust. Daemon runs under Node.** Playwright's
    `connectOverCDP` is Node-only — keep all Playwright usage in the
    daemon. The Rust CLI calls the daemon via HTTP RPC; it has no Playwright
-   dependency. The Bun TypeScript source under `src/cli.ts` is kept as the
-   fallback path during the v1.0 transition but is not the default.
+   dependency. The old Bun CLI source under `src/cli.ts` is gone — use
+   `git log --oneline -- src/cli.ts` to find it in history if you need it.
 
 2. **Single daemon per state file.** `.ghax/ghax.json` stores
    `{pid, port, browserKind, browserUrl, cwd}`. Never spawn a second
@@ -43,25 +43,20 @@ the tool in the past.
    once debugging LCP capture — daemon returned null because it was still
    running the pre-fix code.
 
-5. **The Rust CLI and daemon do not share source.** `src/buffers.ts` is
-   still shared between the Bun fallback CLI and the daemon (rebuild both
-   with `bun run build`). But the Rust CLI does NOT import TS types —
-   instead, every RPC return shape has a hand-mirrored serde struct in
-   `crates/cli/src/types.rs`. When the daemon changes an RPC return shape,
-   update the corresponding struct in the same PR. Format drift between the
-   two is caught by `test/parity.ts` in CI.
-
-6. **When daemon RPC return shapes change, update the Rust serde types.**
-   Open `crates/cli/src/types.rs`, find the matching struct, add/remove
-   fields. Then run `cargo build --release` and verify `test/parity.ts`
-   still passes (zero output divergence between Bun and Rust for
-   deterministic verbs).
+5. **The Rust CLI and daemon do not share source.** The Rust CLI uses
+   `serde_json::Value` for daemon responses (the daemon already returns
+   JSON; deserializing into named structs would be a re-implementation of
+   `printResult()` for no benefit). When the daemon changes an RPC
+   return shape, just update whatever Rust dispatch code reads
+   `data.get("foo")` if the field name changed. Smoke (`test/smoke.ts`
+   via `GHAX_BIN=$PWD/target/release/ghax bun run test:smoke`) catches
+   the breakage.
 
 ## Command patterns
 
-Adding a new verb now takes 4 steps:
+Adding a new verb takes 3 steps:
 
-1. **Register a handler in `daemon.ts`** (Node side — unchanged):
+1. **Register a handler in `daemon.ts`** (Node side):
    ```ts
    register('myVerb', async (ctx, args, opts) => {
      const page = await activePage(ctx);
@@ -70,32 +65,18 @@ Adding a new verb now takes 4 steps:
    });
    ```
 
-2. **Wire the Rust dispatch in `crates/cli/src/main.rs`** (or a file
-   in `crates/cli/src/commands/`). For trivial verbs, use the `rpc`
-   helper:
-   ```rust
-   Commands::MyVerb { flag } => {
-       rpc::simple("myVerb", json!({ "flag": flag }))?;
-   }
-   ```
-   For verbs with CLI-side logic (output formatting, multi-RPC
-   orchestration), write a dedicated `cmd_my_verb(args)` function.
+2. **Wire the Rust dispatch in `crates/cli/src/dispatch.rs`.** For
+   trivial verbs (parse args → POST /rpc → print), add the verb name
+   to one of the existing `match` arms — `simple()` does the rest.
+   For verbs with CLI-side logic (custom print, multi-RPC, shell-out),
+   add a new module under `crates/cli/src/<verb>.rs` exposing
+   `pub fn cmd_<verb>(parsed: &Parsed) -> Result<i32>`, then wire it
+   in `dispatch.rs::dispatch_inner` and declare `mod <verb>;` in
+   `main.rs`. See `qa.rs`, `ship.rs`, `attach.rs` for templates.
 
-3. **Wire the Bun fallback in `src/cli.ts`** (kept as fallback during
-   the transition):
-   ```ts
-   case 'my-verb':
-     return await makeSimple('myVerb')(parseArgs(rest));
-   ```
-
-4. **Add a smoke check in `test/smoke.ts`** and, if the verb has a
-   serde return type, add the matching struct to
-   `crates/cli/src/types.rs`.
-
-For verbs that need interactive prompts, custom output formatting, or
-orchestration across multiple RPCs (like `qa`, `ship`, `canary`), write
-dedicated functions in both the Rust `commands/` module and the Bun
-`cli.ts`, keeping output format identical (verified by `test/parity.ts`).
+3. **Add a smoke check in `test/smoke.ts`.** Run it against both Bun
+   (irrelevant now — only the daemon is Bun-built) and Rust
+   (`GHAX_BIN=$PWD/target/release/ghax bun run test:smoke`).
 
 ## Common workflows
 
@@ -186,8 +167,8 @@ Every change must pass:
 ```bash
 # Rust CLI
 cargo build --release            # compile Rust CLI (crates/cli/)
-bun run typecheck                # tsc --noEmit (daemon + Bun fallback)
-bun run build                    # bundle daemon (dist/ghax-daemon.mjs) + Bun fallback CLI
+bun run typecheck                # tsc --noEmit (daemon TS + tests)
+bun run build                    # bundle daemon → dist/ghax-daemon.mjs
 bun run test:rust-smoke          # Rust binary smoke suite (added in Phase 4D — assume it exists)
 ```
 

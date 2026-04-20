@@ -8,9 +8,8 @@
     "ghax": "./bin/ghax"
   },
   "scripts": {
-    "dev": "bun run src/cli.ts",
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
-    "build": "bun build --compile src/cli.ts --outfile dist/ghax && bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core && chmod +x dist/ghax",
+    "build": "bun build --target=node --format=esm src/daemon.ts --outfile dist/ghax-daemon.mjs --external electron --external chromium-bidi --external '@playwright/test' --external playwright --external playwright-core",
     "build:rust": "cargo build --release --manifest-path crates/cli/Cargo.toml",
     "build:all": "bun run build:rust && bun run build",
     "typecheck": "bunx tsc --noEmit",
@@ -45,7 +44,7 @@
   ],
   "files": [
     "bin/",
-    "dist/",
+    "dist/ghax-daemon.mjs",
     "src/",
     "README.md",
     "LICENSE"
