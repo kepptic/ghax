@@ -72,7 +72,7 @@ session.detach().catch(...); }` verbatim (`gesture.click`,
 **Accept:** six call sites shrink; smoke passes.
 
 ### 4. Daemon: `ext.panel.eval` / `ext.popup.eval` / `ext.options.eval`
-loop-registration
+loop-registration — [x]
 
 Three near-identical `register()` calls that differ only in a label +
 filter regex. Register them in a loop.

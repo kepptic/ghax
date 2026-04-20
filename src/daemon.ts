@@ -1538,45 +1538,23 @@ async function extViewEval(
   return value ?? null;
 }
 
-register('ext.panel.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/sidepanel\.html|sidePanel|panel\.html/i.test(url),
-    'panel',
-  );
-});
+// The three ext-view eval verbs differ only in label + URL filter.
+// Popups are transient (target only exists while open); options pages
+// are normal tabs (options.html / options_ui); panels live in the
+// side panel frame (sidepanel.html).
+const EXT_VIEW_FILTERS: Array<{ label: string; match: RegExp }> = [
+  { label: 'panel', match: /\/sidepanel\.html|sidePanel|panel\.html/i },
+  { label: 'popup', match: /\/popup\.html|\/popup\.htm|default_popup/i },
+  { label: 'options', match: /\/options\.html|\/options\/|options_ui/i },
+];
 
-register('ext.popup.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  // Popups are transient — a page target only exists while the popup is
-  // actually open. Matching by popup.html or action/default_popup path.
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/popup\.html|\/popup\.htm|default_popup/i.test(url),
-    'popup',
-  );
-});
-
-register('ext.options.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  // Options pages open as normal tabs when the user clicks "Options" in
-  // the extensions panel. Path convention: options.html or options_ui.
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/options\.html|\/options\/|options_ui/i.test(url),
-    'options',
-  );
-});
+for (const { label, match } of EXT_VIEW_FILTERS) {
+  register(`ext.${label}.eval`, async (ctx, args) => {
+    const extId = String(args[0] ?? '');
+    const js = String(args[1] ?? '');
+    return extViewEval(ctx, extId, js, (url) => match.test(url), label);
+  });
+}
 
 // ─── Gesture commands (real Input.dispatch*) ───────────────────
 
