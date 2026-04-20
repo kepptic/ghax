@@ -55,7 +55,7 @@ await target.send('Runtime.enable');
 
 **Accept:** 6 sites shrink to one-liners; smoke passes.
 
-### 3. Daemon: `withCdpSession()` helper (6 call sites)
+### 3. Daemon: `withCdpSession()` helper (6 call sites) — [x]
 
 Gesture + profile handlers all build `const session = await
 page.context().newCDPSession(page); try { ... } finally { await

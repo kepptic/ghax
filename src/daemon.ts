@@ -1136,6 +1136,18 @@ class DaemonError extends Error {
 // (ext.storage returned {ok:true} on thrown expressions). Throwing here
 // surfaces them as DaemonError; callers that want to swallow wrap in
 // try/catch as they already do.
+async function withCdpSession<T>(
+  page: Page,
+  fn: (session: import('playwright').CDPSession) => Promise<T>,
+): Promise<T> {
+  const session = await page.context().newCDPSession(page);
+  try {
+    return await fn(session);
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+}
+
 async function getSwTarget(
   ctx: Ctx,
   extId: string,
@@ -1577,14 +1589,11 @@ register('gesture.click', async (ctx, args) => {
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
   // Dispatch on the active tab's target.
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1672,7 +1681,7 @@ register('profile', async (ctx, _args, opts) => {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const base = `${dir}/${extId ? `ext-${extId}-${ts}` : `tab-${ts}`}`;
 
-  let startMetrics: Record<string, number>;
+  let startMetrics: Record<string, number> = {};
   let endMetrics: Record<string, number> | null = null;
   let target = extId ? `ext:${extId}` : 'active-tab';
   let heapPath: string | null = null;
@@ -1692,9 +1701,8 @@ register('profile', async (ctx, _args, opts) => {
     }
   } else {
     const page = await activePage(ctx);
-    const session = await page.context().newCDPSession(page);
-    const sendable = asCdpSend(session);
-    try {
+    await withCdpSession(page, async (session) => {
+      const sendable = asCdpSend(session);
       startMetrics = await takeMetricsViaSession(sendable);
       if (durationMs > 0) {
         await new Promise((r) => setTimeout(r, durationMs));
@@ -1704,9 +1712,7 @@ register('profile', async (ctx, _args, opts) => {
         heapPath = `${base}.heapsnapshot`;
         await captureHeapSnapshot(sendable, heapPath);
       }
-    } finally {
-      await session.detach().catch(() => undefined);
-    }
+    });
     target = `tab:${page.url()}`;
   }
 
@@ -1889,13 +1895,10 @@ register('gesture.key', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: gesture key <key>');
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key });
     await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1907,8 +1910,7 @@ register('gesture.dblclick', async (ctx, args) => {
   const y = Number(ys);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     // clickCount=2 on the second pressed/released is what Chrome treats as a
     // dblclick — firing pressed/released twice with clickCount=1 is NOT the
@@ -1917,9 +1919,7 @@ register('gesture.dblclick', async (ctx, args) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
     await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1931,8 +1931,7 @@ register('gesture.scroll', async (ctx, args) => {
   }
   if (!Number.isFinite(amount)) throw new Error(`Invalid scroll amount: ${args[1]}`);
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     // Dispatch on the viewport centre. Magnitude is the wheel delta.
     const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
     const x = viewport.width / 2;
@@ -1946,9 +1945,7 @@ register('gesture.scroll', async (ctx, args) => {
       deltaX,
       deltaY,
     });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true, direction: dir, amount };
 });
 
