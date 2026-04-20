@@ -27,24 +27,9 @@ use std::collections::HashSet;
 use std::process::Command;
 use std::time::Duration;
 
+use crate::qa_common::{console_errors_since, failed_requests_since, ConsoleErrorEntry, FailedRequestEntry};
+
 // ── JSON report types ──────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleErrorEntry {
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FailedRequestEntry {
-    url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<u16>,
-    method: String,
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,40 +408,8 @@ pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
                     screenshot_path = Some(path);
                 }
 
-                // ── Console errors ──
-                let console_log = rpc::call(port, "console", json!([]), json!({ "last": 200 })).unwrap_or(Value::Array(vec![]));
-                let console_errors: Vec<ConsoleErrorEntry> = console_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        let level = e.get("level").and_then(|v| v.as_str()).unwrap_or("");
-                        let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        level == "error" && ts >= page_start
-                    })
-                    .map(|e| ConsoleErrorEntry {
-                        text: e.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        url: e.get("url").and_then(|v| v.as_str()).map(str::to_string),
-                    })
-                    .collect();
-
-                // ── Failed network requests ──
-                let net_log = rpc::call(port, "network", json!([]), json!({ "last": 500 })).unwrap_or(Value::Array(vec![]));
-                let failed_requests: Vec<FailedRequestEntry> = net_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let status = e.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
-                        ts >= page_start && status >= 400
-                    })
-                    .map(|e| FailedRequestEntry {
-                        url: e.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        status: e.get("status").and_then(|v| v.as_u64()).map(|n| n as u16),
-                        method: e.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string(),
-                    })
-                    .collect();
+                let console_errors = console_errors_since(port, page_start, 200);
+                let failed_requests = failed_requests_since(port, page_start, 500);
 
                 let err_tag = if console_errors.is_empty() { String::new() } else { format!(", {} console errors", console_errors.len()) };
                 let net_tag = if failed_requests.is_empty() { String::new() } else { format!(", {} failed requests", failed_requests.len()) };

@@ -94,7 +94,7 @@ uses a different algorithm for the same problem.
 **Accept:** one implementation, three consumers; `cargo build`
 clean; smoke passes.
 
-### 6. Rust CLI: `qa.rs` / `canary.rs` shared "since cycle start" filter
+### 6. Rust CLI: `qa.rs` / `canary.rs` shared "since cycle start" filter — [x]
 
 Both files filter console entries on `level == "error" && ts >=
 page_start` and failed-requests on `ts >= page_start && status >= 400`

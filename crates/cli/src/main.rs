@@ -9,6 +9,7 @@ mod dispatch;
 mod help;
 mod output;
 mod qa;
+mod qa_common;
 mod review;
 mod rpc;
 mod shell;

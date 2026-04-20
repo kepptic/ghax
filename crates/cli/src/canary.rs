@@ -18,6 +18,7 @@
 
 use crate::args::Parsed;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_OK, EXIT_USAGE};
+use crate::qa_common;
 use crate::rpc;
 use crate::state;
 use anyhow::Result;
@@ -147,33 +148,8 @@ pub fn cmd_canary(parsed: &Parsed) -> Result<i32> {
                     notes = Some(vec![format!("redirected to {final_url}")]);
                 }
 
-                // Console errors since cycle start.
-                let console_log = rpc::call(port, "console", json!([]), json!({ "last": 500 }))
-                    .unwrap_or(Value::Array(vec![]));
-                console_errors = console_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        e.get("level").and_then(|v| v.as_str()).unwrap_or("") == "error"
-                            && e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0) >= cycle_start
-                    })
-                    .count();
-
-                // Failed network requests since cycle start.
-                let net_log = rpc::call(port, "network", json!([]), json!({ "last": 500 }))
-                    .unwrap_or(Value::Array(vec![]));
-                failed_requests = net_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let status = e.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
-                        ts >= cycle_start && status >= 400
-                    })
-                    .count();
-
+                console_errors = qa_common::console_errors_since(port, cycle_start, 500).len();
+                failed_requests = qa_common::failed_requests_since(port, cycle_start, 500).len();
             }
         }
         // ok = nav succeeded AND no console/net errors.
