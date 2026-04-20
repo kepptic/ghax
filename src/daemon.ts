@@ -24,7 +24,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator } from 'playwright';
-import { CdpPool, type CdpTargetInfo } from './cdp-client';
+import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
@@ -1088,12 +1088,11 @@ register('ext.list', async (ctx) => {
       try {
         const target = await ctx.pool.get(probe);
         await target.send('Runtime.enable');
-        const r = (await target.send('Runtime.evaluate', {
-          expression:
-            '(() => { try { const m = chrome.runtime.getManifest(); return JSON.stringify({n: m.name, v: m.version}); } catch (e) { return "{}"; } })()',
-          returnByValue: true,
-        })) as { result?: { value?: string } };
-        const parsed = JSON.parse(r.result?.value || '{}') as { n?: string; v?: string };
+        const value = await evalInTarget<string>(
+          target,
+          '(() => { try { const m = chrome.runtime.getManifest(); return JSON.stringify({n: m.name, v: m.version}); } catch (e) { return "{}"; } })()',
+        );
+        const parsed = JSON.parse(value || '{}') as { n?: string; v?: string };
         name = parsed.n ?? '';
         version = parsed.v ?? '';
       } catch {
@@ -1131,6 +1130,32 @@ class DaemonError extends Error {
   }
 }
 
+// Centralised `Runtime.evaluate` with returnByValue + exception surfacing.
+// Every CDP-eval site used to open-code the same shape and (inconsistently)
+// the exceptionDetails check — the silent sites were masking real errors
+// (ext.storage returned {ok:true} on thrown expressions). Throwing here
+// surfaces them as DaemonError; callers that want to swallow wrap in
+// try/catch as they already do.
+async function evalInTarget<T = unknown>(
+  target: CdpTarget,
+  expression: string,
+  opts: { awaitPromise?: boolean; wrapIife?: boolean; errorPrefix?: string } = {},
+): Promise<T | undefined> {
+  const expr = opts.wrapIife ? `(async () => { return (${expression}); })()` : expression;
+  const res = (await target.send('Runtime.evaluate', {
+    expression: expr,
+    awaitPromise: opts.awaitPromise ?? false,
+    returnByValue: true,
+  })) as { result?: { value?: T; description?: string }; exceptionDetails?: unknown };
+  if (res.exceptionDetails) {
+    throw new DaemonError(
+      `${opts.errorPrefix ?? 'eval'} threw: ${JSON.stringify(res.exceptionDetails)}`,
+      4,
+    );
+  }
+  return res.result?.value;
+}
+
 register('ext.reload', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext reload <ext-id>');
@@ -1141,11 +1166,11 @@ register('ext.reload', async (ctx, args) => {
   // Read content_scripts so we can warn — reload disconnects us before the promise resolves.
   let manifestCs: unknown[] = [];
   try {
-    const r = (await target.send('Runtime.evaluate', {
-      expression: 'JSON.stringify(chrome.runtime.getManifest().content_scripts || [])',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    manifestCs = JSON.parse(r.result?.value || '[]') as unknown[];
+    const value = await evalInTarget<string>(
+      target,
+      'JSON.stringify(chrome.runtime.getManifest().content_scripts || [])',
+    );
+    manifestCs = JSON.parse(value || '[]') as unknown[];
   } catch {
     // non-fatal; hint relies on it but reload itself doesn't
   }
@@ -1201,12 +1226,11 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   let contentScripts: ManifestContentScript[] = [];
   let oldVersion = '';
   try {
-    const r = (await oldTarget.send('Runtime.evaluate', {
-      expression:
-        'JSON.stringify({v: chrome.runtime.getManifest().version, cs: chrome.runtime.getManifest().content_scripts || []})',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    const parsed = JSON.parse(r.result?.value || '{}') as { v?: string; cs?: ManifestContentScript[] };
+    const value = await evalInTarget<string>(
+      oldTarget,
+      'JSON.stringify({v: chrome.runtime.getManifest().version, cs: chrome.runtime.getManifest().content_scripts || []})',
+    );
+    const parsed = JSON.parse(value || '{}') as { v?: string; cs?: ManifestContentScript[] };
     oldVersion = parsed.v ?? '';
     contentScripts = parsed.cs ?? [];
   } catch (err: any) {
@@ -1227,11 +1251,8 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   // Read the new version for reporting.
   let newVersion = '';
   try {
-    const r = (await newTarget.send('Runtime.evaluate', {
-      expression: 'chrome.runtime.getManifest().version',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    newVersion = r.result?.value || '';
+    newVersion =
+      (await evalInTarget<string>(newTarget, 'chrome.runtime.getManifest().version')) || '';
   } catch {
     // non-fatal
   }
@@ -1282,15 +1303,11 @@ register('ext.hot-reload', async (ctx, args, opts) => {
         return JSON.stringify(out);
       })()
     `;
-    const r = (await newTarget.send('Runtime.evaluate', {
-      expression: expr,
+    const value = await evalInTarget<string>(newTarget, expr, {
       awaitPromise: true,
-      returnByValue: true,
-    })) as { result?: { value?: string }; exceptionDetails?: unknown };
-    if (r.exceptionDetails) {
-      throw new DaemonError(`hot-reload inject failed: ${JSON.stringify(r.exceptionDetails)}`, 4);
-    }
-    const results = JSON.parse(r.result?.value || '[]') as InjectResult[];
+      errorPrefix: 'hot-reload inject',
+    });
+    const results = JSON.parse(value || '[]') as InjectResult[];
     allResults.push(...results);
     if (verbose) {
       // Verbose output is surfaced via log — the structured response carries the per-tab detail.
@@ -1405,16 +1422,12 @@ register('ext.sw.eval', async (ctx, args) => {
   if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
   const target = await ctx.pool.get(sws[0]);
   await target.send('Runtime.enable');
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => { return (${js}); })()`,
+  const value = await evalInTarget(target, js, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: 'SW eval',
   });
-  const r = res as { result?: { value?: unknown; description?: string }; exceptionDetails?: unknown };
-  if (r.exceptionDetails) {
-    throw new Error(`SW eval threw: ${JSON.stringify(r.exceptionDetails)}`);
-  }
-  return r.result?.value ?? r.result?.description ?? null;
+  return value ?? null;
 });
 
 register('ext.storage', async (ctx, args) => {
@@ -1448,13 +1461,12 @@ register('ext.storage', async (ctx, args) => {
   } else {
     throw new Error(`Unknown op: ${op}`);
   }
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => ${expr})()`,
+  const value = await evalInTarget(target, expr, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: 'ext storage',
   });
-  const r = res as { result?: { value?: unknown } };
-  return r.result?.value ?? { ok: true };
+  return value ?? { ok: true };
 });
 
 register('ext.message', async (ctx, args) => {
@@ -1485,12 +1497,11 @@ register('ext.message', async (ctx, args) => {
       }
     })()
   `;
-  const res = (await target.send('Runtime.evaluate', {
-    expression: expr,
+  const value = await evalInTarget(target, expr, {
     awaitPromise: true,
-    returnByValue: true,
-  })) as { result?: { value?: unknown } };
-  return res.result?.value ?? null;
+    errorPrefix: 'ext message',
+  });
+  return value ?? null;
 });
 
 // Shared eval-in-extension-page helper. `filter` decides which of the
@@ -1513,14 +1524,12 @@ async function extViewEval(
   }
   const target = await ctx.pool.get(pages[0]);
   await target.send('Runtime.enable');
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => { return (${js}); })()`,
+  const value = await evalInTarget(target, js, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: `${label} eval`,
   });
-  const r = res as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (r.exceptionDetails) throw new Error(`${label} eval threw: ${JSON.stringify(r.exceptionDetails)}`);
-  return r.result?.value ?? null;
+  return value ?? null;
 }
 
 register('ext.panel.eval', async (ctx, args) => {

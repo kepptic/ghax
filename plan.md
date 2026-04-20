@@ -22,7 +22,7 @@ debate.
 
 ## Scope
 
-### 1. Daemon: `evalInTarget()` helper (high impact, 9 call sites)
+### 1. Daemon: `evalInTarget()` helper (high impact, 9 call sites) — [x]
 
 `Runtime.evaluate` with `awaitPromise: true, returnByValue: true` + the
 `exceptionDetails` check is open-coded in nine places in `daemon.ts`
