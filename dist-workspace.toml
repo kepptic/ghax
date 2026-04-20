@@ -1,0 +1,46 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "homebrew", "msi"]
+# Target platforms to build apps for (Rust target-triple syntax)
+# 6 triples per design/plan/06-rust-cli-rewrite.md §Distribution plan
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# Allow the release.yml workflow to be hand-edited without dist plan failing.
+# The workflow header, trigger scoping (tags only, no pull_request), and
+# runtime comments were manually adjusted per Phase 4A constraints.
+# If you need to regenerate CI from scratch: dist generate --allow-dirty
+allow-dirty = ["ci", "msi"]
+# Ship the Node daemon bundle alongside the Rust binary in every release archive.
+# The daemon is a Node ESM bundle (dist/ghax-daemon.mjs) that ghax spawns locally.
+# RUNTIME REQUIREMENT: Node >= 20 must be installed by the end user — the daemon
+# requires it. Homebrew and direct-download users see this documented in README.
+# The Rust CLI discovers the daemon via: (1) path relative to argv[0], (2)
+# ~/.ghax/daemon/ghax-daemon.mjs, (3) GHAX_DAEMON_BUNDLE env var.
+include = ["dist/ghax-daemon.mjs"]
+
+# Homebrew tap configuration.
+# TODO: Create the tap repo at https://github.com/kepptic/homebrew-tap before
+# enabling the homebrew publish job in release.yml. Once the repo exists, set:
+#   tap = "kepptic/homebrew-tap"
+# and re-run `dist generate` to wire up the publish step.
+# brew install kepptic/tap/ghax will work after that.

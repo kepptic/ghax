@@ -187,7 +187,13 @@ fn dispatch_ext(cfg: &Config, rest: &[String]) -> Result<i32> {
         "sw" => dispatch_ext_sw(cfg, &rest[1..]),
         "panel" | "popup" | "options" => dispatch_ext_inner(cfg, sub, &rest[1..]),
         "storage" => simple(cfg, "ext.storage", parsed),
-        "message" => simple(cfg, "ext.message", parsed),
+        "message" => {
+            if parsed.positional.len() < 2 {
+                eprintln!("Usage: ghax ext message <ext-id> <json-payload>");
+                return Ok(EXIT_USAGE);
+            }
+            simple(cfg, "ext.message", parsed)
+        }
         other => {
             eprintln!("Unknown ext subcommand: {other}");
             Ok(EXIT_USAGE)
@@ -294,14 +300,34 @@ fn dispatch_record(cfg: &Config, rest: &[String]) -> Result<i32> {
         return Ok(EXIT_USAGE);
     };
     let parsed = args::parse(&rest[1..]);
-    let cmd = match sub.as_str() {
-        "start" => "record.start",
-        "stop" => "record.stop",
-        "status" => "record.status",
+    match sub.as_str() {
+        "start" => {
+            let port = state::require_daemon(cfg)?;
+            let data = rpc::call(port, "record.start", parsed.positional_value(), parsed.opts_without_json())?;
+            if parsed.json() {
+                output::print(&data, true);
+            } else {
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("recording");
+                println!("recording → {name}");
+            }
+            Ok(EXIT_OK)
+        }
+        "stop" => {
+            let port = state::require_daemon(cfg)?;
+            let data = rpc::call(port, "record.stop", parsed.positional_value(), parsed.opts_without_json())?;
+            if parsed.json() {
+                output::print(&data, true);
+            } else {
+                let steps = data.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
+                let rec_path = data.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                println!("saved {steps} steps → {rec_path}");
+            }
+            Ok(EXIT_OK)
+        }
+        "status" => simple(cfg, "record.status", parsed),
         other => {
             eprintln!("Unknown record subcommand: {other}");
-            return Ok(EXIT_USAGE);
+            Ok(EXIT_USAGE)
         }
-    };
-    simple(cfg, cmd, parsed)
+    }
 }

@@ -14,7 +14,8 @@ history (why these choices were made, alternatives rejected, etc.) see
                              │ CDP (WebSocket)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  ghax daemon (Node, ESM bundle — dist/ghax-daemon.mjs)          │
+│  ghax daemon (Node ESM bundle — dist/ghax-daemon.mjs)           │
+│  Node 20+, unchanged from v0.4                                  │
 │                                                                 │
 │   Playwright's chromium.connectOverCDP   — tab-level ops        │
 │   Raw CDP WebSocket pool (cdp-client.ts) — SW, side panels,     │
@@ -30,13 +31,16 @@ history (why these choices were made, alternatives rejected, etc.) see
 │   GET  /health                                                  │
 │   POST /shutdown                                                │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ HTTP
+                             │ HTTP (unchanged RPC protocol)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  ghax CLI (Bun-compiled single binary — dist/ghax)              │
+│  ghax CLI (Rust 2021 edition — crates/cli/)                     │
+│  ~2.6 MB stripped binary, ~20 ms cold start                     │
 │                                                                 │
-│   Argv → parseArgs → route to handler                           │
-│   Handler → rpc(port, cmd, args, opts) → print result           │
+│   clap argv parsing → route to handler                          │
+│   Handler → reqwest HTTP POST /rpc → serde_json → print result  │
+│   SSE streams via reqwest async (console/network --follow)      │
+│   Shell REPL via rustyline                                      │
 │   Special cases: attach, detach, status, restart                │
 └────────────────────────────┬────────────────────────────────────┘
                              │ stdout / stderr
@@ -44,24 +48,67 @@ history (why these choices were made, alternatives rejected, etc.) see
                           User / agent
 ```
 
-## Why CLI (Bun) + Daemon (Node)
+## Why CLI (Rust) + Daemon (Node)
 
-Two processes, two runtimes, one reason: Playwright's
-`connectOverCDP` hangs under Bun 1.3.x. The daemon needs Node; the CLI
-benefits from Bun's fast startup + `--compile` single-binary output
-(portable, no `node_modules` in the shipped artifact).
+Two processes, two runtimes, one reason per runtime:
 
-This buys us:
-- **~30-40ms CLI spawn** (Bun compiled binary vs ~150ms cold Node).
-- **~65ms end-to-end per command warm** (CLI + RPC + daemon handler).
-  Benchmark vs other tools: gstack-browse 56ms/cmd, ghax 65ms/cmd,
-  agent-browser 178ms/cmd, playwright-cli 476ms/cmd.
+- **Daemon stays Node** because Playwright's `connectOverCDP` is Node-only.
+  The daemon is the working part of the stack; rewriting it means replacing
+  Playwright, which is a separate project.
+- **CLI moves to Rust** for distribution: the old Bun `--compile` output
+  was 61 MB per platform. A Rust binary is ~2.6 MB stripped on Apple
+  Silicon, ~10 MB on Linux x64. The HTTP RPC protocol is unchanged — Rust
+  sends the same `POST /rpc { cmd, args, opts }` that Bun did.
+
+Key performance numbers (Rust CLI vs old Bun CLI):
+- **Cold start:** ~20 ms P50 (was ~70 ms P50, P99 ~600 ms under Bun).
+- **Shell mode:** <15 ms/cmd (was ~30-40 ms/cmd).
+- **End-to-end warm:** similar to before; dominant cost is now the RPC round
+  trip to the daemon, not CLI startup.
 - **Zero re-attach cost** — the daemon persists across invocations.
-  Other tools re-attach to saved state per call.
 
-Both build artifacts land in `dist/` via `bun run build`:
-- `dist/ghax` — 61MB Mach-O (macOS), single-file CLI binary
-- `dist/ghax-daemon.mjs` — ~66KB Node ESM bundle (Playwright external)
+Build artifacts:
+- `dist/ghax` (or `dist/ghax-rust`) — Rust binary, ~2.6–10 MB depending on
+  platform. Built via `cargo build --release`.
+- `dist/ghax-daemon.mjs` — ~66 KB Node ESM bundle (Playwright external).
+  Built via `bun run build` (unchanged).
+- `dist/ghax` (Bun fallback) — kept as fallback during transition, removed
+  in v1.1.
+
+## Rust dependency surface
+
+| Crate | Purpose |
+|-------|---------|
+| `clap` (derive) | Argv parsing |
+| `reqwest` (blocking + stream) | HTTP client; blocking for simple commands, async for SSE |
+| `tokio` | Async runtime for SSE streams and shell REPL |
+| `serde` + `serde_json` | JSON encode / decode |
+| `rustyline` | Shell mode REPL (readline-compatible) |
+| `anyhow` | Error propagation |
+| `which` | Cross-platform PATH lookup (ffmpeg, git, gh, node) |
+| `ctrlc` | Clean Ctrl-C handling in REPL + canary poll loop |
+
+Daemon dependency surface is unchanged: Playwright, Node built-ins.
+
+## Daemon discovery (attach.rs)
+
+When `ghax attach` spawns the daemon subprocess, it resolves the bundle
+path in this order:
+
+1. `$GHAX_DAEMON_BUNDLE` env var — explicit override.
+2. Sibling of the CLI binary (`argv[0]/../ghax-daemon.mjs`) — covers
+   Homebrew and direct-download installs where both files land together.
+3. Dev fallback: `<repo root>/dist/ghax-daemon.mjs` — works from any
+   directory inside the git tree during local development.
+
+## Serde type mirroring
+
+The Rust CLI does not share TypeScript source with the daemon. Each RPC
+return shape has a corresponding Rust struct with `#[derive(Deserialize)]`
+in `crates/cli/src/`. These types are hand-mirrored from the TS
+interfaces in `src/daemon.ts`. When the daemon changes a return shape,
+the Rust struct must be updated in the same PR — see the CLAUDE.md
+invariant.
 
 ## State
 
@@ -217,16 +264,15 @@ lazy.
 
 ## Shell mode (REPL)
 
-`ghax shell` is a thin loop around the same `dispatch(argv)` function
-that `main()` calls. It reads stdin line-by-line, tokenises with
-shell-ish quoting (single/double quotes, backslash escapes — no glob,
-no env expansion), and re-enters dispatch per line.
+`ghax shell` is a `rustyline`-based REPL that tokenises each input line
+(shell-ish quoting: single/double quotes, backslash escapes — no glob,
+no env expansion) and re-enters the clap dispatcher per line.
 
-Why it matters: the per-command Bun spawn cost (~30-40ms for the
-compiled binary plus JS init) dominates the warm benchmark. In shell
-mode that cost happens once, not per command. Measured 138ms/cmd vs
-247ms/cmd across 10-command batches — 1.8x faster for multi-turn
-sessions.
+Why it matters: even at ~20 ms cold start, agents that issue dozens of
+commands per session benefit from zero-spawn overhead inside the REPL.
+Shell mode targets <15 ms/cmd (budget enforced by `test/perf-bench.ts`).
+Previously measured ~1.8x speedup vs separate invocations with the Bun
+binary; the Rust baseline is faster to begin with.
 
 The daemon doesn't care whether commands arrive from fresh CLI
 invocations or from a long-running shell process. Same HTTP RPC,
@@ -250,9 +296,23 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 
 ## What lives where
 
+### Rust CLI (`crates/cli/src/`)
+
+| File | Purpose |
+|------|---------|
+| `main.rs` | Entry point, clap dispatch |
+| `attach.rs` | Browser detection, CDP probe, daemon spawn, daemon discovery |
+| `rpc.rs` | `reqwest::blocking` HTTP client wrapper (`makeSimple` equivalent) |
+| `sse.rs` | Async SSE stream parser (`console --follow`, `network --follow`) |
+| `shell.rs` | `rustyline` REPL, tokenizer, dispatch loop |
+| `types.rs` | Serde structs mirroring every RPC return shape |
+| `commands/` | One file per complex verb (qa, canary, ship, review, …) |
+
+### Node daemon (`src/`)
+
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/cli.ts` | ~1700 | Argv parsing, verb dispatch, special-case handlers (attach, qa, ship, canary, review, pair, gif, try) |
+| `src/cli.ts` | ~1700 | Bun CLI (fallback path during transition; Rust is default) |
 | `src/daemon.ts` | ~1700 | RPC dispatch, all daemon-side handlers, SSE endpoints, capture wiring |
 | `src/browser-launch.ts` | ~230 | Browser detect, CDP probe, scan/findFreePort, launch-browser + headless |
 | `src/cdp-client.ts` | ~350 | Target pool, WebSocket management, raw CDP helpers |
@@ -260,9 +320,6 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
 | `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |
 | `src/config.ts` | ~80 | State file resolution |
-
-The whole codebase is ~5000 lines of TypeScript plus ~500 lines of test
-code. Short enough to read top-to-bottom.
 
 ## Security model
 

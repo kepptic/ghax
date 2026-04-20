@@ -359,7 +359,7 @@ pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
 
     if let Some(ref root) = crawl_root {
         let crawled = crawl_urls(root, crawl_depth, crawl_limit);
-        eprintln!("crawl discovered {} URLs under {}", crawled.len(), root);
+        println!("crawl discovered {} URLs under {}", crawled.len(), root);
         urls.extend(crawled);
     }
 

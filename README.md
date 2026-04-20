@@ -50,7 +50,7 @@ Attach to a running Chrome or Edge over CDP, then drive it:
   fresh Chromium on an auto-picked port for CI-style runs. Lives in its
   own window so it doesn't touch your daily-driver browser.
 - **Interactive shell** (`ghax shell`): REPL that keeps the CLI process
-  alive between commands. Skips the per-command Bun spawn cost — ~1.8x
+  alive between commands. Skips the per-command spawn cost — ~1.8x
   faster for multi-turn agent sessions. Works piped or interactive.
 - **Disconnect recovery**: if the browser crashes or you close it, the
   daemon self-shuts cleanly and subsequent commands print a helpful
@@ -62,20 +62,41 @@ Attach to a running Chrome or Edge over CDP, then drive it:
   `.ghax/recordings/<name>.json`; `ghax gif <recording>` stitches the
   frames via ffmpeg.
 
-## Quickstart
+## Install
 
-Prerequisites: Bun 1.3+, Node 20+.
+ghax ships as a platform-specific Rust binary (~2.6 MB stripped on
+Apple Silicon). Pick the path that fits you:
+
+```bash
+# Homebrew (macOS / Linux) — coming with v1.0.0
+brew install kepptic/tap/ghax
+
+# Cargo (for Rust toolchain users) — coming with v1.0.0
+cargo install ghax
+
+# npm — pulls the Rust binary from GitHub Releases on postinstall
+npm install -g @ghax/cli
+
+# Direct download (replace OS/arch as needed)
+curl -L https://github.com/kepptic/ghax/releases/latest/download/ghax-$(uname -s)-$(uname -m).tar.gz | tar xz
+mv ghax ~/.local/bin/ghax
+```
+
+**Runtime requirement:** the daemon needs **Node 20+**. If you have any
+Playwright-based tool installed you already have it; ghax doesn't add a
+new runtime expectation.
+
+**Build from source** (needs Rust 1.80+ and Bun 1.3+):
 
 ```bash
 bun install
-bun run build
-bun run install-link    # symlinks dist/ghax → ~/.local/bin/ghax
+bun run build:all    # compiles Rust CLI + bundles Node daemon (added in Phase 4B)
+bun run install-link    # symlinks the Rust binary → ~/.local/bin/ghax
 ```
 
-`install-link` is optional but makes `ghax` available from any
-directory without qualifying the path. `~/.local/bin` is on the
-default macOS user PATH. Re-run is idempotent; remove via
-`bun run uninstall-link`.
+`install-link` is optional but makes `ghax` available from any directory
+without qualifying the path. `~/.local/bin` is on the default macOS user
+PATH. Re-run is idempotent; remove via `bun run uninstall-link`.
 
 1. Launch your Edge or Chrome with CDP enabled:
 
@@ -138,19 +159,21 @@ user gestures, and doesn't expose `chrome.storage`. `ghax browse` fills that gap
 ## Architecture
 
 ```
-ghax CLI (Bun-compiled single binary)
+ghax CLI (Rust, ~2.6 MB, ~20 ms cold start)
         │  HTTP to 127.0.0.1:<random>
         ▼
-ghax daemon (Node, ESM bundle)
+ghax daemon (Node ESM bundle — dist/ghax-daemon.mjs)
         │  ├─ Playwright (chromium.connectOverCDP) — tab-level
         │  └─ Raw CDP WebSocket pool — service workers, sidepanels, gestures
         ▼
 User's running Chrome / Edge (--remote-debugging-port=9222)
 ```
 
-Why split CLI (Bun) and daemon (Node)? The CLI is short-lived and benefits from
-Bun's fast startup + `--compile` portable binary. The daemon uses Playwright's
-`connectOverCDP`, which hangs under Bun today — but runs reliably under Node.
+Why split CLI (Rust) and daemon (Node)? Playwright's `connectOverCDP` is
+Node-only — the daemon stays on Node unchanged. The CLI is a thin HTTP
+client that deserves a small, fast, platform-specific binary. Rust gives
+us ~2.6 MB per platform and ~20 ms cold start (was 61 MB and ~70 ms with
+the old Bun-compiled binary).
 
 The daemon auto-shuts after 30 minutes idle.
 

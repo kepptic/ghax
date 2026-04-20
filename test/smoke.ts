@@ -15,6 +15,12 @@
  * write to chrome.storage of any real extension, doesn't use the
  * --launch path (which would spawn a fresh browser window). `ship` is
  * exercised via --dry-run so no commits/pushes happen.
+ *
+ * Run against the Rust binary:
+ *   bun run build:rust && GHAX_BIN=$PWD/target/release/ghax bun run test:smoke
+ *
+ * Or shortcut (after Phase 4B adds it):
+ *   bun run test:rust-smoke
  */
 
 import * as fs from 'fs';
@@ -23,10 +29,10 @@ import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const ghax = path.join(root, 'dist', 'ghax');
+const ghax = process.env.GHAX_BIN ?? path.join(root, 'dist', 'ghax');
 
 if (!fs.existsSync(ghax)) {
-  fail(`dist/ghax missing — run 'bun run build' first`);
+  fail(`${ghax} missing — run 'bun run build' first (or set GHAX_BIN to the correct binary path)`);
 }
 
 interface RunResult {
