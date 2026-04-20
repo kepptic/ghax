@@ -27,17 +27,20 @@ pub struct FailedRequestEntry {
 }
 
 pub fn console_errors_since(port: u16, since_ms: u64, last: u64) -> Vec<ConsoleErrorEntry> {
-    let log = rpc::call(port, "console", json!([]), json!({ "last": last }))
-        .unwrap_or(Value::Array(vec![]));
+    // Daemon-side filter on `since` keeps the payload small when the buffer
+    // holds thousands of entries. `errors: true` lets the daemon drop
+    // non-error levels before it ships the JSON; the client just collects.
+    let log = rpc::call(
+        port,
+        "console",
+        json!([]),
+        json!({ "last": last, "since": since_ms, "errors": true }),
+    )
+    .unwrap_or(Value::Array(vec![]));
     log.as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| {
-            let level = e.get("level").and_then(|v| v.as_str()).unwrap_or("");
-            let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-            level == "error" && ts >= since_ms
-        })
         .map(|e| ConsoleErrorEntry {
             text: e.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             url: e.get("url").and_then(|v| v.as_str()).map(str::to_string),
@@ -46,17 +49,18 @@ pub fn console_errors_since(port: u16, since_ms: u64, last: u64) -> Vec<ConsoleE
 }
 
 pub fn failed_requests_since(port: u16, since_ms: u64, last: u64) -> Vec<FailedRequestEntry> {
-    let log = rpc::call(port, "network", json!([]), json!({ "last": last }))
-        .unwrap_or(Value::Array(vec![]));
+    let log = rpc::call(
+        port,
+        "network",
+        json!([]),
+        json!({ "last": last, "since": since_ms }),
+    )
+    .unwrap_or(Value::Array(vec![]));
     log.as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| {
-            let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-            let status = e.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
-            ts >= since_ms && status >= 400
-        })
+        .filter(|e| e.get("status").and_then(|v| v.as_u64()).unwrap_or(0) >= 400)
         .map(|e| FailedRequestEntry {
             url: e.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             status: e.get("status").and_then(|v| v.as_u64()).map(|n| n as u16),

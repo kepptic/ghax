@@ -143,7 +143,7 @@ against a stale tab's snapshot.
 that snapshotting tab A, switching to tab B, then clicking `@e1`
 fails with a refs-expired error instead of resolving against A.
 
-### 10. Daemon: `since:` filter on `console` + `network` RPCs
+### 10. Daemon: `since:` filter on `console` + `network` RPCs — [x]
 
 QA + canary both request `last:500` and then discard everything older
 than `page_start` client-side. On a busy page that ships ~500 entries

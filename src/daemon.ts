@@ -733,7 +733,9 @@ register('console', async (ctx, _args, opts) => {
   const dedup = Boolean(opts.dedup);
   const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
+  const since = opts.since !== undefined ? Number(opts.since) : 0;
   let entries = ctx.consoleBuf.last(n);
+  if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
 
   // --source-maps: resolve each entry's parsed stack back to original
@@ -815,7 +817,9 @@ register('network', async (ctx, _args, opts) => {
     }
   }
 
+  const since = opts.since !== undefined ? Number(opts.since) : 0;
   let entries = ctx.networkBuf.last(n);
+  if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (pattern) entries = entries.filter((e) => pattern.test(e.url));
   if (statusTest) entries = entries.filter((e) => statusTest!(e.status));
 
