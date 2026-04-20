@@ -7,8 +7,18 @@ members = ["cargo:."]
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["shell", "powershell", "npm", "homebrew", "msi"]
+# The installers to generate for each app.
+#
+# Decision: keep everything inside kepptic/ghax. shell + powershell installers
+# fetch artifacts from this repo's GitHub Releases — no external repos,
+# accounts, or registries needed.
+#
+# Deliberately NOT enabled:
+#   - homebrew  → would need a separate kepptic/homebrew-tap repo
+#   - npm       → would publish @ghax/cli to npmjs.com (irreversible)
+#   - msi       → Windows MSI generation; .zip in the release archive is enough
+# These can be added later when there's reason to use those distribution channels.
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # 6 triples per design/plan/06-rust-cli-rewrite.md §Distribution plan
 targets = [
@@ -29,18 +39,11 @@ install-updater = false
 # The workflow header, trigger scoping (tags only, no pull_request), and
 # runtime comments were manually adjusted per Phase 4A constraints.
 # If you need to regenerate CI from scratch: dist generate --allow-dirty
-allow-dirty = ["ci", "msi"]
+allow-dirty = ["ci"]
 # Ship the Node daemon bundle alongside the Rust binary in every release archive.
 # The daemon is a Node ESM bundle (dist/ghax-daemon.mjs) that ghax spawns locally.
 # RUNTIME REQUIREMENT: Node >= 20 must be installed by the end user — the daemon
-# requires it. Homebrew and direct-download users see this documented in README.
+# requires it. Direct-download users see this documented in README.
 # The Rust CLI discovers the daemon via: (1) path relative to argv[0], (2)
 # ~/.ghax/daemon/ghax-daemon.mjs, (3) GHAX_DAEMON_BUNDLE env var.
 include = ["dist/ghax-daemon.mjs"]
-
-# Homebrew tap configuration.
-# TODO: Create the tap repo at https://github.com/kepptic/homebrew-tap before
-# enabling the homebrew publish job in release.yml. Once the repo exists, set:
-#   tap = "kepptic/homebrew-tap"
-# and re-run `dist generate` to wire up the publish step.
-# brew install kepptic/tap/ghax will work after that.

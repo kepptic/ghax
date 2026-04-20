@@ -214,8 +214,9 @@ target triples.
 ### Added
 - 6-target release matrix via cargo-dist (macOS x64/ARM, Linux x64/ARM,
   Windows x64/ARM).
-- Homebrew tap, `cargo install`, `npm install -g @ghax/cli` distribution
-  paths.
+- Shell + PowerShell installer scripts that download from this repo's
+  GitHub Releases. All distribution stays inside `kepptic/ghax` — no
+  Homebrew tap, no crates.io publish, no npm publish required.
 - Daemon discovery precedence in `attach.rs`: (1) `$GHAX_DAEMON_BUNDLE`
   env var, (2) sibling of CLI binary, (3) dev fallback at
   `<repo root>/dist/ghax-daemon.mjs`.

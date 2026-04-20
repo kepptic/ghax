@@ -22,9 +22,9 @@
 # machine. ghax will check for `node` in PATH at `ghax attach` time and print
 # a clear error if Node is missing or too old.
 #
-# HOMEBREW TAP: The homebrew installer formula is generated but the publish
-# step is a no-op until the tap repo (kepptic/homebrew-tap) exists on GitHub.
-# See the TODO in dist-workspace.toml for the one-time setup step.
+# DISTRIBUTION SCOPE: Per dist-workspace.toml, only shell + powershell
+# installers are generated. No Homebrew tap, no crates.io publish, no npm
+# publish — everything stays inside this repo's GitHub Releases.
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.

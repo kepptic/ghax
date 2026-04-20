@@ -65,21 +65,19 @@ Attach to a running Chrome or Edge over CDP, then drive it:
 ## Install
 
 ghax ships as a platform-specific Rust binary (~2.6 MB stripped on
-Apple Silicon). Pick the path that fits you:
+Apple Silicon, ~10 MB on Linux x64). All distribution stays inside this
+repo's GitHub Releases — no external taps, registries, or accounts.
 
 ```bash
-# Homebrew (macOS / Linux) — coming with v1.0.0
-brew install kepptic/tap/ghax
+# macOS / Linux one-liner (downloads from this repo's GitHub Releases)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.sh | sh
 
-# Cargo (for Rust toolchain users) — coming with v1.0.0
-cargo install ghax
+# Windows PowerShell one-liner
+irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 | iex
 
-# npm — pulls the Rust binary from GitHub Releases on postinstall
-npm install -g @ghax/cli
-
-# Direct download (replace OS/arch as needed)
-curl -L https://github.com/kepptic/ghax/releases/latest/download/ghax-$(uname -s)-$(uname -m).tar.gz | tar xz
-mv ghax ~/.local/bin/ghax
+# Or just download and unpack the archive for your platform
+curl -L https://github.com/kepptic/ghax/releases/latest/download/ghax-aarch64-apple-darwin.tar.xz | tar xJ
 ```
 
 **Runtime requirement:** the daemon needs **Node 20+**. If you have any
