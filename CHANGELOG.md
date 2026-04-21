@@ -6,7 +6,80 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking
+- Two error-surface tightenings fell out of the `evalInTarget` helper
+  consolidation. Both are behavior improvements but worth flagging for
+  anyone with scripted error handling:
+  - `ext storage` used to return `{ ok: true }` when the underlying JS
+    expression threw. It now throws a `DaemonError` (exit code 4) with
+    the exception details, so a failed `chrome.storage.*.set` no longer
+    silently looks successful.
+  - `ext message` used to return `null` when the cross-extension
+    `chrome.runtime.sendMessage` threw outside its inner try/catch. It
+    now throws a `DaemonError` as well.
+
+### Added
+- `console --since <epoch-ms>` and `network --since <epoch-ms>` filter
+  buffer entries server-side, so callers (notably `qa` and `canary`)
+  don't have to ship hundreds of irrelevant entries across the HTTP
+  RPC just to discard them locally. `console` also accepts `errors:
+  true` via RPC opts so the daemon drops non-error levels before
+  serialising; the Rust CLI uses this on the hot path.
+
+### Fixed
+- **Invariant enforcement**: `ctx.refs` is now cleared when the active
+  tab changes (via `tab <id>` or `new-window`). Previously the
+  "refs survive only until next snapshot" rule held within a tab but
+  broke across tab switches — `@e3` from tab A could silently resolve
+  against tab B's DOM. A new smoke check (`refs cleared on tab
+  switch`) asserts the invariant.
+
 ### Changed
+- Daemon DRY pass: three new helpers collapse repeated shapes.
+  `evalInTarget()` centralises nine `Runtime.evaluate` sites with
+  consistent `exceptionDetails` handling (which also fixes a latent
+  bug in `ext.storage` where a thrown expression was silently
+  returned as `{ok: true}`). `getSwTarget()` owns the five-step
+  find-sw / pool.get / Runtime.enable dance across five extension
+  verbs. `withCdpSession()` owns the session open + try/finally +
+  detach lifecycle across five gesture/profile sites. The three
+  `ext.{panel,popup,options}.eval` handlers now register in a loop
+  since they differ only by URL filter + label.
+- Rust CLI DRY pass: new `time_util` module consolidates three
+  copies of the ISO-8601 / days-to-ymd logic (the `ship` copy was
+  using a slower year-loop algorithm than the other two); new
+  `qa_common` module shares the `console_errors_since` /
+  `failed_requests_since` filters between `qa` and `canary`, with
+  the filtering now happening daemon-side via the new `since:` opt.
+- `dispatch.rs` swaps a hand-rolled percent-encoder for the
+  `urlencoding` crate; `qa.rs` swaps a hand-rolled URL resolver for
+  `url::Url::join`. Adds `url` + `urlencoding` as direct deps (both
+  are tiny; `url` was already in the tree transitively via
+  `reqwest`).
+- `require_daemon` (Rust) now trusts `/health` as the liveness
+  signal and only falls back to the `kill(pid, 0)` syscall when
+  `/health` fails — every CLI invocation shaves a syscall.
+- `snapshot.ts` caches `getComputedStyle()` results per element for
+  the duration of one walk. The cursor-interactive pass used to
+  force-recalc styles O(n · depth) times on SPA-sized trees; now
+  O(n) via a scoped `WeakMap`.
+
+- Daemon: `pageTargetId()` caches the target id on a `WeakMap<Page>`.
+  Playwright target ids are stable for a page's lifetime, but reading
+  one costs a full `CDPSession.newCDPSession` + `Target.getTargetInfo`
+  + detach round-trip. Every command that walks tabs (`activePage`,
+  `tabs`, `find`, `status`, `tab`) used to pay that per page per call.
+  With the cache, the hot path is O(1).
+- Daemon: `tabs` and `find` handlers now fan out per-page
+  `pageTargetId` + `page.title()` in parallel with `Promise.all` instead
+  of a serial await loop. With N tabs open this drops N round-trips to 1.
+- `snapshot.ts`: the aria-tree disambiguation pass used to call
+  `parseLine()` twice per line (once to count role+name duplicates, once
+  to emit). Parsed once into a reused array — meaningful on large SPAs.
+- `dispatch.rs`: removed the dead `stub()` helper and
+  `EXIT_PHASE_PENDING` constant left over from the Rust-port phases,
+  and refreshed the stale "Phase 1 + 2" module doc.
+
 - `attach.rs` simplification (post-/simplify pass): collapsed the
   two-function `spawn_daemon` + `spawn_daemon_with_retry` recursion-with-
   flag into a single `for attempt in 0..2` loop inside `spawn_daemon`.
