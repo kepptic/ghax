@@ -6,6 +6,18 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking
+- Two error-surface tightenings fell out of the `evalInTarget` helper
+  consolidation. Both are behavior improvements but worth flagging for
+  anyone with scripted error handling:
+  - `ext storage` used to return `{ ok: true }` when the underlying JS
+    expression threw. It now throws a `DaemonError` (exit code 4) with
+    the exception details, so a failed `chrome.storage.*.set` no longer
+    silently looks successful.
+  - `ext message` used to return `null` when the cross-extension
+    `chrome.runtime.sendMessage` threw outside its inner try/catch. It
+    now throws a `DaemonError` as well.
+
 ### Added
 - `console --since <epoch-ms>` and `network --since <epoch-ms>` filter
   buffer entries server-side, so callers (notably `qa` and `canary`)

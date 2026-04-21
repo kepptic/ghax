@@ -197,6 +197,22 @@ function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Respon
  * Matches full strings; `*` expands to `.*`. No support for `**`
  * (would be identical to `*` under this semantics anyway) or `?`.
  */
+// Parse the `since` opt shared by console + network. Accepts positive
+// epoch-ms integers. Non-finite, negative, or zero → no filter. Rejects
+// NaN explicitly so `--since=garbage` doesn't silently return an empty
+// result set (was: Number("garbage") → NaN, every `ts >= NaN` is false).
+function parseSinceOpt(raw: unknown): number {
+  if (raw === undefined || raw === null) return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Bad --since "${String(raw)}". Expected an epoch-ms integer.`);
+  }
+  if (n < 0) {
+    throw new Error(`Bad --since "${String(raw)}". Expected a non-negative epoch-ms integer.`);
+  }
+  return n;
+}
+
 function globToRegExp(pattern: string): RegExp {
   if (pattern === '*' || pattern === '') return /.*/;
   const escaped = pattern
@@ -733,7 +749,7 @@ register('console', async (ctx, _args, opts) => {
   const dedup = Boolean(opts.dedup);
   const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
-  const since = opts.since !== undefined ? Number(opts.since) : 0;
+  const since = parseSinceOpt(opts.since);
   let entries = ctx.consoleBuf.last(n);
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
@@ -817,7 +833,7 @@ register('network', async (ctx, _args, opts) => {
     }
   }
 
-  const since = opts.since !== undefined ? Number(opts.since) : 0;
+  const since = parseSinceOpt(opts.since);
   let entries = ctx.networkBuf.last(n);
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (pattern) entries = entries.filter((e) => pattern.test(e.url));
@@ -1174,8 +1190,8 @@ async function getSwTarget(
 async function evalInTarget<T = unknown>(
   target: CdpTarget,
   expression: string,
-  opts: { awaitPromise?: boolean; wrapIife?: boolean; errorPrefix?: string } = {},
-): Promise<T | undefined> {
+  opts: { awaitPromise?: boolean; wrapIife?: boolean; errorPrefix?: string; fallbackDescription?: boolean } = {},
+): Promise<T | string | undefined> {
   const expr = opts.wrapIife ? `(async () => { return (${expression}); })()` : expression;
   const res = (await target.send('Runtime.evaluate', {
     expression: expr,
@@ -1187,6 +1203,14 @@ async function evalInTarget<T = unknown>(
       `${opts.errorPrefix ?? 'eval'} threw: ${JSON.stringify(res.exceptionDetails)}`,
       4,
     );
+  }
+  // `returnByValue: true` drops any result CDP can't JSON-encode (functions,
+  // undefined, chrome.runtime, BigInt, Map/Set, etc.) — the caller gets
+  // undefined. Opt-in fallback returns `description`, which CDP populates
+  // with a stringified preview for those cases. Used by ext.sw.eval where
+  // inspection of non-serialisable globals is the whole point.
+  if (opts.fallbackDescription && res.result?.value === undefined) {
+    return res.result?.description;
   }
   return res.result?.value;
 }
@@ -1449,6 +1473,7 @@ register('ext.sw.eval', async (ctx, args) => {
     awaitPromise: true,
     wrapIife: true,
     errorPrefix: 'SW eval',
+    fallbackDescription: true,
   });
   return value ?? null;
 });

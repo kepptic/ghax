@@ -44,10 +44,11 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N] [--dedup] [--source-maps]
+  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
+         # --since filters to entries newer than the epoch-ms timestamp
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
-  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--har <path>]
+  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
   cookies
 
 Extensions (MV3):

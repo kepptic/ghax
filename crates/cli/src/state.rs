@@ -132,12 +132,12 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
             cfg.state_file.display()
         )
     })?;
-    // /health is the authoritative liveness signal — if it responds, the
-    // daemon is alive. Skip the kill-probe syscall on the happy path and
-    // only fall back to it when /health fails, so we can still give the
-    // pid-specific "daemon not running" hint instead of a bare network
-    // timeout.
-    if health_check(state.port).is_ok() {
+    // /health is the authoritative liveness signal — but we also verify the
+    // pid in the response matches state.pid. Otherwise a stale state file
+    // pointing at a port now reused by a different ghax daemon (different
+    // project, colliding port) would silently route RPCs to the wrong
+    // browser session.
+    if health_check(state.port, state.pid).is_ok() {
         return Ok(state.port);
     }
     if !is_process_alive(state.pid) {
@@ -152,7 +152,7 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
     ))
 }
 
-fn health_check(port: u16) -> Result<()> {
+fn health_check(port: u16, expected_pid: i32) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/health");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(1500))
@@ -162,6 +162,19 @@ fn health_check(port: u16) -> Result<()> {
         return Err(anyhow!("health endpoint returned {}", resp.status()));
     }
     let body: serde_json::Value = resp.json()?;
+    // Defense against port collision: the daemon on this port MUST be the
+    // one recorded in our state file. If the pid disagrees, treat this
+    // health response as unrelated.
+    if let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) {
+        if pid != expected_pid as i64 {
+            return Err(anyhow!(
+                "port {} answered /health but with pid {} (expected {}) — stale state?",
+                port,
+                pid,
+                expected_pid
+            ));
+        }
+    }
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err(anyhow!("daemon reported unhealthy"));
     }
