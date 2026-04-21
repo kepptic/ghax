@@ -159,6 +159,62 @@ QA that needs a dedicated fixture rather than the real web.
    it before and after.
 5. Updated `CHANGELOG.md` under `## [Unreleased]`.
 
+## Known browser quirks
+
+These are not ghax bugs — they're browser / site behaviors that surface
+when driving a real browser over CDP. Document them here so the next
+person doesn't re-discover them.
+
+### Chrome v113+ refuses CDP on the default profile
+
+As of Chrome 113, `--remote-debugging-port` is ignored when the browser
+is using the default `--user-data-dir`. Launching Chrome without an
+explicit profile path silently opens DevTools-less — `ghax attach`
+will fail to find the `/json/version` endpoint.
+
+Workaround: point at a writable profile directory.
+
+```bash
+# Chrome — explicit profile
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/chrome-ghax" &
+```
+
+Edge is not affected (still honors CDP on its default profile as of
+2026-Q1). If you want Edge + a clean profile anyway, the same
+`--user-data-dir=<path>` flag works.
+
+### Google anti-bot on sensitive flows
+
+Chrome / Edge launched with `--remote-debugging-port` sets
+`navigator.webdriver = true` plus a few related fingerprintable flags.
+Google's anti-bot on sensitive pages (Business Profile verification,
+Drive sharing consent, some OAuth challenges, Google Ads campaign
+edits) refuses to render, throws a "disconnected" modal, or logs you
+out mid-flow.
+
+Cheap mitigation — add `--disable-blink-features=AutomationControlled`
+to the launch command:
+
+```bash
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --remote-debugging-port=9222 \
+  --disable-blink-features=AutomationControlled &
+```
+
+This clears the `navigator.webdriver` bit and unblocks most flows. It
+won't defeat determined server-side fingerprinting — for flows where
+even the mitigation fails (e.g. rapid form submits on Google Ads that
+trigger a "session disconnected" modal), the documented pattern is:
+
+1. `ghax detach`
+2. Do the Google-specific step manually in the browser.
+3. `ghax attach` and resume.
+
+Full stealth-mode JS injection is explicitly out of scope — cat-and-
+mouse maintenance isn't worth it for a dev tool.
+
 ## Reporting issues
 
 Include:
