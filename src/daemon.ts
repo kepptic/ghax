@@ -309,14 +309,39 @@ register('status', async (ctx) => {
   };
 });
 
-register('tabs', async (ctx) => {
+register('tabs', async (ctx, _args, opts) => {
   const pages = await allPages(ctx);
-  return Promise.all(
+  const filterStr = (opts.filter as string | undefined) ?? null;
+  let filterRe: RegExp | null = null;
+  if (filterStr) {
+    try {
+      filterRe = new RegExp(filterStr, 'i');
+    } catch (err: any) {
+      throw new Error(`tabs --filter: invalid regex: ${err?.message || filterStr}`);
+    }
+  }
+  // --fields accepts a csv list of keys to keep. Valid keys: id, title,
+  // url, active. Invalid keys are ignored silently so a typo can't kill
+  // the whole command mid-session. Omitted → return every field.
+  const fieldsArg = (opts.fields as string | undefined) ?? null;
+  const fields: Set<string> | null = fieldsArg
+    ? new Set(fieldsArg.split(',').map((s) => s.trim()).filter(Boolean))
+    : null;
+  const all = await Promise.all(
     pages.map(async (p) => {
       const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
       return { id, title, url: p.url(), active: id === ctx.activePageId };
     }),
   );
+  const matched = filterRe
+    ? all.filter((t) => filterRe!.test(t.url) || filterRe!.test(t.title))
+    : all;
+  if (!fields) return matched;
+  return matched.map((t) => {
+    const out: Record<string, unknown> = {};
+    for (const k of fields) if (k in t) out[k] = (t as any)[k];
+    return out;
+  });
 });
 
 register('tab', async (ctx, args, opts) => {

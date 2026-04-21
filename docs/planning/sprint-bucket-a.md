@@ -17,7 +17,7 @@ thin CLI wiring. Each is verifiable with one smoke assertion.
    only `--fullPage` works; the kebab form is the convention
    everywhere else in the CLI. Add the alias in the daemon's
    `screenshot` handler. Trivial.
-2. [ ] `tabs --filter <regex> --fields <csv>` (TOK-04). Server-side
+2. [x] `tabs --filter <regex> --fields <csv>` (TOK-04). Server-side
    regex filter on URL + title, field projection on the returned
    objects. Cuts ~200 bytes per google-product tab when filtering.
 3. [ ] `eval --max-bytes <N>` (TOK-02). Server-side truncation on

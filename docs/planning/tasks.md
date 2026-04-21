@@ -18,7 +18,6 @@
 
 ## 📝 To Do
 
-- **TASK-002**: `tabs --filter <regex> --fields <csv>` — 🟡 Medium · #feature · Backend · Spec: §2
 - **TASK-003**: `eval --max-bytes <N>` server-side truncation — 🟡 Medium · #feature · Backend · Spec: §3
 - **TASK-004**: `text --selector --length --skip` — 🟡 Medium · #feature · Backend · Spec: §4
 - **TASK-005**: `upload <@ref|selector> <path>` verb — 🟠 High · #feature · Backend · Spec: §5
@@ -31,3 +30,4 @@
 ## ✅ Done
 
 - **TASK-001**: `screenshot --full-page` kebab alias ✓
+- **TASK-002**: `tabs --filter --fields` ✓
