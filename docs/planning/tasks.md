@@ -18,7 +18,6 @@
 
 ## 📝 To Do
 
-- **TASK-004**: `text --selector --length --skip` — 🟡 Medium · #feature · Backend · Spec: §4
 - **TASK-005**: `upload <@ref|selector> <path>` verb — 🟠 High · #feature · Backend · Spec: §5
 - **TASK-006**: `snapshot --compact` suppresses cursor-interactive — 🟠 High · #feature · Backend · Spec: §6
 
@@ -31,3 +30,4 @@
 - **TASK-001**: `screenshot --full-page` kebab alias ✓
 - **TASK-002**: `tabs --filter --fields` ✓
 - **TASK-003**: `eval --max-bytes` truncation ✓
+- **TASK-004**: `text --selector --length --skip` ✓

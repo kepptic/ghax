@@ -24,7 +24,7 @@ thin CLI wiring. Each is verifiable with one smoke assertion.
    the stringified result. Protects LLM operators from accidental
    context blow-outs. Returns `{value, truncated: true, originalBytes}`
    when it trips.
-4. [ ] `text --selector <sel> --length <N> --skip <M>` (TOK-10).
+4. [x] `text --selector <sel> --length <N> --skip <M>` (TOK-10).
    Scoped, paged page-text dumps. Replaces hand-rolled
    `document.body.innerText.substring(...)`.
 5. [ ] `upload <@ref|selector> <path>` (JNR-07). First-class file

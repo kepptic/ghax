@@ -556,9 +556,28 @@ register('try', async (ctx, args, opts) => {
   return { value, ...(shot ? { shot } : {}) };
 });
 
-register('text', async (ctx) => {
+register('text', async (ctx, _args, opts) => {
   const page = await activePage(ctx);
-  const text = await page.evaluate(() => document.body.innerText);
+  const selector = (opts.selector as string | undefined) ?? null;
+  // --skip/--length paginate the returned string. The daemon still
+  // pulls full innerText — the win is on the wire, which is where
+  // the operator's context budget lives. Pagination uses code-unit
+  // offsets to match JavaScript's substring semantics; if/when a
+  // field report complains about emoji-splitting we'll switch to
+  // grapheme segmentation.
+  const skip = opts.skip !== undefined ? Math.max(0, Number(opts.skip)) : 0;
+  const lengthRaw = opts.length !== undefined ? Number(opts.length) : null;
+  const length = lengthRaw !== null && Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
+  let text: string;
+  if (selector) {
+    text = await page.locator(selector).first().innerText();
+  } else {
+    text = await page.evaluate(() => document.body.innerText);
+  }
+  if (skip > 0 || length !== null) {
+    const end = length !== null ? skip + length : undefined;
+    text = text.slice(skip, end);
+  }
   return text;
 });
 
