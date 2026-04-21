@@ -1082,7 +1082,7 @@ register('responsive', async (ctx, args, opts) => {
       // Let layout settle — some CSS grid + responsive components need a paint.
       await page.waitForTimeout(200);
       const outPath = `${prefix}-${preset.name}.png`;
-      await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage) });
+      await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage || opts['full-page']) });
       results.push({ ...preset, path: outPath });
     }
   } finally {
