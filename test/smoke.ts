@@ -153,6 +153,24 @@ c('text returns page body', async () => {
   assert(/Example Domain/i.test(r.stdout), 'text should contain "Example Domain"');
 });
 
+c('text --selector scopes to one element', async () => {
+  const r = await run(['text', '--selector', 'h1']);
+  assert(/^\s*Example Domain\s*$/i.test(r.stdout), `expected only h1 text, got: ${r.stdout}`);
+});
+
+c('text --length paginates the output', async () => {
+  const r = await run(['text', '--length', '10']);
+  // stdout has a trailing newline from println; trim for the length check.
+  assert(r.stdout.trim().length <= 10, `expected ≤10 chars, got ${r.stdout.trim().length}: ${r.stdout.trim()}`);
+});
+
+c('text --skip skips leading chars', async () => {
+  const full = (await run(['text'])).stdout.trim();
+  const skipped = (await run(['text', '--skip', '5'])).stdout.trim();
+  assert(full.startsWith(full.slice(0, 5)), 'sanity check on full text');
+  assert(skipped === full.slice(5), `--skip 5 mismatch: full=${full.slice(0, 20)}… skipped=${skipped.slice(0, 20)}…`);
+});
+
 c('html <selector> returns innerHTML', async () => {
   const r = await run(['html', 'h1']);
   assert(/Example Domain/i.test(r.stdout), 'h1 innerHTML should include "Example Domain"');
