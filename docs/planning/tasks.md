@@ -1,6 +1,6 @@
 # Task Board
 
-<!-- Config: Last Task ID: 0 -->
+<!-- Config: Last Task ID: 6 -->
 
 ## ⚙️ Configuration
 
@@ -18,8 +18,16 @@
 
 ## 📝 To Do
 
+- **TASK-002**: `tabs --filter <regex> --fields <csv>` — 🟡 Medium · #feature · Backend · Spec: §2
+- **TASK-003**: `eval --max-bytes <N>` server-side truncation — 🟡 Medium · #feature · Backend · Spec: §3
+- **TASK-004**: `text --selector --length --skip` — 🟡 Medium · #feature · Backend · Spec: §4
+- **TASK-005**: `upload <@ref|selector> <path>` verb — 🟠 High · #feature · Backend · Spec: §5
+- **TASK-006**: `snapshot --compact` suppresses cursor-interactive — 🟠 High · #feature · Backend · Spec: §6
+
 ## 🚀 In Progress
 
 ## 👀 In Review
 
 ## ✅ Done
+
+- **TASK-001**: `screenshot --full-page` kebab alias ✓
