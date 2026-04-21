@@ -143,7 +143,13 @@ export async function snapshot(
   // The scan walks both light DOM and any open shadow roots it encounters,
   // emitting Playwright-compatible chain selectors (`host >> inner`) when
   // it crosses a shadow boundary.
-  const wantCursor = opts.cursorInteractive || opts.interactive;
+  //
+  // `--compact` explicitly skips the cursor pass: on heavy SPAs it dominates
+  // the output size (hundreds of entries, each with a selector chain), and
+  // operators who asked for compact are saying "I want the ARIA tree and
+  // nothing else". `-C` (explicit cursorInteractive) still wins because it's
+  // an explicit ask — --compact only suppresses the implicit `-i` trigger.
+  const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
     try {
       const cursorElements = await target.evaluate(() => {
