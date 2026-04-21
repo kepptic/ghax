@@ -194,6 +194,20 @@ c('eval runs JS in the active tab', async () => {
   assert(r.stdout.trim() === '3', `eval 1+2 → ${r.stdout.trim()}`);
 });
 
+c('eval --max-bytes truncates oversized strings', async () => {
+  const r = await run(['eval', '"x".repeat(1000)', '--max-bytes', '50', '--json']);
+  const v = parseJson<{ value: string; truncated: boolean; originalBytes: number }>(r.stdout);
+  assert(v.truncated === true, 'expected truncated=true');
+  assert(v.originalBytes === 1000, `expected originalBytes=1000, got ${v.originalBytes}`);
+  assert(Buffer.byteLength(v.value, 'utf8') <= 50, `truncated value exceeds 50 bytes: ${Buffer.byteLength(v.value, 'utf8')}`);
+});
+
+c('eval --max-bytes pass-through when under cap', async () => {
+  const r = await run(['eval', '"short"', '--max-bytes', '100', '--json']);
+  const v = parseJson<unknown>(r.stdout);
+  assert(v === 'short', `expected 'short', got ${JSON.stringify(v)}`);
+});
+
 c('viewport sets the size', async () => {
   const r = await run(['viewport', '1024x768', '--json']);
   const v = parseJson<{ width: number; height: number }>(r.stdout);

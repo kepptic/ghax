@@ -461,11 +461,29 @@ register('reload', async (ctx) => {
   return { url: page.url() };
 });
 
-register('eval', async (ctx, args) => {
+register('eval', async (ctx, args, opts) => {
   const js = String(args[0] ?? '');
   if (!js) throw new Error('Usage: eval <js>');
   const page = await activePage(ctx);
   const result = await page.evaluate(js);
+  // --max-bytes caps the stringified result so an accidental
+  // `document.body.innerText` on a heavy page can't blow out the
+  // LLM operator's context window. Measured in UTF-8 bytes, not
+  // characters. When it trips we wrap the response so the caller
+  // can see what happened; when it doesn't trip we return the
+  // value unchanged (zero shape change for scripts that already
+  // expect the raw value).
+  const maxBytesRaw = opts['max-bytes'] ?? opts.maxBytes;
+  const maxBytes = maxBytesRaw !== undefined ? Number(maxBytesRaw) : null;
+  if (maxBytes !== null && Number.isFinite(maxBytes) && maxBytes > 0) {
+    const serialized = typeof result === 'string' ? result : JSON.stringify(result) ?? '';
+    const bytes = Buffer.byteLength(serialized, 'utf8');
+    if (bytes > maxBytes) {
+      // Slice in bytes — Buffer handles multi-byte UTF-8 correctly.
+      const truncated = Buffer.from(serialized, 'utf8').subarray(0, maxBytes).toString('utf8');
+      return { value: truncated, truncated: true, originalBytes: bytes };
+    }
+  }
   return result;
 });
 
