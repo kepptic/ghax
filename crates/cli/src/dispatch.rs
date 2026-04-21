@@ -46,6 +46,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "pair" => return small::cmd_pair(rest),
         "diff-state" => return small::cmd_diff_state(rest),
         "chain" => return small::cmd_chain(rest),
+        "batch" => return small::cmd_batch(rest),
         "replay" => return small::cmd_replay(rest),
         "gif" => return small::cmd_gif(rest),
         "qa" => return qa::cmd_qa(&args::parse(rest)),

@@ -128,6 +128,81 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Bucket B — architectural fixes** (sourced from the 2026-04-20
+  jnremache field report):
+  - `ghax batch '<json-array>'` — one-round-trip sequence executor
+    (TOK-09). Unlike `chain` (stdin, N round-trips), `batch` parses
+    the inline JSON client-side, ships the whole plan in a single
+    RPC, and **auto-re-snapshots between steps that reference
+    `@e<n>` refs** so the ref map always resolves against the
+    current DOM. That directly fixes the JNR-03 mid-sequence ref-
+    shift pattern observed on Material / React forms (comboboxes
+    opening mid-plan and reindexing the ARIA tree). Opt out of the
+    auto-snapshot with `--no-auto-snapshot`; `--no-stopOnError`
+    keeps running past a failed step. Results always emit as JSON.
+  - `snapshot` is now **dialog-aware by default** (JNR-06). When an
+    open modal is present (`[role=dialog]`, `[role=alertdialog]`,
+    native `<dialog open>`, or `[aria-modal=true]`), the walker
+    treats the top-most visible modal as the new root — so the
+    outer app's `aria-hidden="true"` no longer swallows every
+    interactive element inside the modal. Fall back to the old
+    body-rooted behavior with `--no-dialog-scope`.
+  - `fill` expands the framework-safe path to cover Angular and
+    Material (JNR-04). React's native-setter + `input` pattern was
+    already there; now the handler also dispatches `blur` (so
+    Angular's `FormControl.markAsTouched` runs and pristine/dirty
+    validators fire) and handles `contenteditable` hosts (Material
+    chip inputs, rich editors) via `textContent` + a proper
+    `InputEvent('insertText')`.
+  - `state.rs::require_daemon` gives a more actionable message when
+    state is stale (JNR-01): if a ghax daemon is alive on the
+    9222–9230 scan range but our state file is missing, the "no
+    daemon state" error now hints at the live port and says
+    `ghax attach` will re-pair with it; the pid-mismatch branch
+    spells out `ghax detach && ghax attach` as the fix.
+
+- **Bucket C papercut bundle** — five quality-of-life fixes for LLM
+  operators driving ghax (sourced from the 2026-04-20 jnremache field
+  report):
+  - `ghax attach` is now silent on fresh success (POSIX convention).
+    Pass `--verbose` or set `GHAX_VERBOSE=1` to restore the
+    `attached — pid / port / browser` one-liner. `already attached`
+    keeps printing because that's informational, not success.
+  - `ghax status` surfaces the active tab id + first 60 chars of its
+    title as a new `active` row — matters most in multi-agent sessions
+    where `new-window` parked the agent on a non-obvious tab.
+    `status --json` gains `activeTabId`, `activeTabTitle`,
+    `activeTabUrl` fields alongside the existing counts.
+  - `ghax eval` auto-retries once past a navigation-in-flight
+    (`Execution context was destroyed` / `Target closed` / frame
+    detached). The daemon waits up to 3s for the next `load` event
+    and re-issues the evaluate — matches what a human would do
+    manually with `wait --load && eval …`.
+  - Rust CLI's RPC client single-retries transient transport errors
+    (connection refused/reset/timeout) after a 50 ms pause, so a
+    daemon that briefly blinks (post-spawn warm-up, GC pause, hot
+    reload) doesn't bubble up a user-visible failure. Semantic
+    errors (daemon answered with `ok: false`) are not retried — those
+    are real command failures, not flake.
+  - `ghax --help` splits the overloaded `wait` line into three:
+    `wait <selector>` (most common), `wait <ms>`, and
+    `wait --networkidle | --load`. `eval` gains a `# auto-retries
+    once past a nav-in-flight` inline note. `attach` lists
+    `[--verbose]`.
+
+### Docs
+
+- **Known browser quirks** section in `CONTRIBUTING.md` covers two
+  not-a-ghax-bug patterns that surface when driving a real browser:
+  Chrome 113+ ignores `--remote-debugging-port` on the default
+  user-data-dir (fix: pass `--user-data-dir=<path>`); and Google's
+  anti-bot on sensitive pages refuses to render when
+  `navigator.webdriver` is set (mitigation: launch with
+  `--disable-blink-features=AutomationControlled`; for flows where
+  even that fails, detach / do the step manually / re-attach).
+
+### Added
+
 - `ghax xpath <expression> [--limit N]` — query the page's DOM with an
   XPath expression, return every matching element with its tag, text
   preview, and bounding box. XPath is also usable via Playwright's

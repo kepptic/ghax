@@ -6,11 +6,12 @@ pub const HELP: &str = r#"ghax — attach to your real Chrome/Edge via CDP and d
 Connection:
   attach [--port <n>] [--browser edge|chrome|chromium|brave|arc] [--launch]
          [--headless] [--load-extension <path>] [--data-dir <path>]
-         [--capture-bodies[=<url-glob>]]
+         [--capture-bodies[=<url-glob>]] [--verbose]
          # Without --port, scans :9222-9230. Multiple running → picker.
          # With --launch and no --port, auto-picks first free port in range.
          # --capture-bodies records JSON/text response bodies (opt-in,
          #   32KB cap per body). Glob filters by URL (e.g. '*/api/*').
+         # --verbose prints pid/port/browser on success (default: silent).
   status [--json]
   detach
   restart
@@ -22,7 +23,7 @@ Tab:
   new-window [url]                # new background window, same profile
   goto <url>
   back | forward | reload
-  eval <js>
+  eval <js>                       # auto-retries once past a nav-in-flight
   try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
@@ -35,7 +36,9 @@ Snapshot & interact:
   upload <@ref|selector> <path>[,<path>…]   # wraps setInputFiles
   press <key>
   type <text>
-  wait <selector|ms|--networkidle|--load>
+  wait <selector>                 # wait until selector appears (most common)
+  wait <ms>                       # fixed delay in milliseconds
+  wait --networkidle | --load     # wait for a navigation event
   viewport <WxH>
   responsive [prefix] [--fullPage]
   diff <url1> <url2>
@@ -72,6 +75,8 @@ Real user gestures:
 
 Batch / recording:
   chain < steps.json          (JSON array of {cmd, args?, opts?})
+  batch '<json-array>'        (one round-trip; auto re-snapshots between
+                               steps that use @e<n> refs)
   record start [name]
   record stop
   record status

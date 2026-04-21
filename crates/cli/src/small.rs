@@ -75,6 +75,18 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
         println!("attached    {} ({})", daemon_state.browser_kind, browser_url_short);
         println!("daemon      pid {}, port {}, up {}m", daemon_state.pid, daemon_state.port, up_min);
         println!("tabs        {}", data.get("tabCount").and_then(|v| v.as_u64()).unwrap_or(0));
+        // Surface the active tab so operators can sanity-check which page
+        // they're about to drive before issuing clicks / fills. Silently
+        // skipped if the daemon didn't send one (older daemon on new CLI).
+        if let Some(title) = data.get("activeTabTitle").and_then(|v| v.as_str()) {
+            let url = data.get("activeTabUrl").and_then(|v| v.as_str()).unwrap_or("");
+            let id = data.get("activeTabId").and_then(|v| v.as_str()).unwrap_or("");
+            if !id.is_empty() {
+                let title_trim = title.chars().take(60).collect::<String>();
+                let label = if title_trim.is_empty() { url.to_string() } else { title_trim };
+                println!("active      {} — {}", id, label);
+            }
+        }
         println!("targets     {}", data.get("targetCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("extensions  {}", data.get("extensionCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("cwd         {}", daemon_state.cwd);
@@ -413,6 +425,57 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
 
     // chain always outputs JSON (mirrors TS: `printResult(results, Boolean(parsed.flags.json) || true)`)
     output::print(&Value::Array(results), true);
+    Ok(if any_failed { EXIT_CDP_ERROR } else { EXIT_OK })
+}
+
+// ─── batch ───────────────────────────────────────────────────────────────────
+
+/// `ghax batch '<json-array>'` — one-round-trip sequence executor.
+///
+/// Unlike `chain` (which reads stdin and does N round-trips), `batch` parses
+/// the positional JSON argument client-side, ships the whole plan in one RPC,
+/// and re-snapshots between steps that reference `@e<n>` refs. That fixes
+/// the mid-sequence ref-shift on framework-heavy forms where the ARIA tree
+/// reindexes mid-plan.
+pub fn cmd_batch(rest: &[String]) -> Result<i32> {
+    let parsed = args::parse(rest);
+    let Some(json_src) = parsed.positional.first() else {
+        eprintln!("Usage: ghax batch '[{{\"cmd\":\"click\",\"args\":[\"@e7\"]}}, …]'");
+        return Ok(EXIT_USAGE);
+    };
+    let steps: Value = match serde_json::from_str(json_src) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ghax batch: invalid JSON — {e}");
+            return Ok(EXIT_USAGE);
+        }
+    };
+    if !matches!(&steps, Value::Array(_)) {
+        eprintln!("ghax batch: expected a top-level JSON array of {{cmd, args?, opts?}} steps");
+        return Ok(EXIT_USAGE);
+    }
+
+    let cfg = state::resolve_config();
+    let port = match state::require_daemon(&cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ghax: {e}");
+            return Ok(EXIT_NOT_ATTACHED);
+        }
+    };
+
+    // The daemon handler reads `args[0]` as the step array.
+    let args_payload = Value::Array(vec![steps]);
+    let data = rpc::call(port, "batch", args_payload, parsed.opts_without_json())?;
+    // `batch` results are always JSON — printing them any other way
+    // would defeat the machine-readability that motivates the verb.
+    output::print(&data, true);
+
+    // Exit non-zero if any step failed, mirroring `chain`.
+    let any_failed = data
+        .as_array()
+        .map(|arr| arr.iter().any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true)))
+        .unwrap_or(false);
     Ok(if any_failed { EXIT_CDP_ERROR } else { EXIT_OK })
 }
 
