@@ -218,6 +218,18 @@ Each group commits atomically. After all groups land:
 
 **Surfaced during run, not in this PR:**
 
+- **Google anti-automation on sensitive flows.** Chrome/Edge launched
+  with `--remote-debugging-port=9222` sets `navigator.webdriver = true`
+  and related fingerprintable flags. Google's anti-bot on sensitive
+  pages (Business Profile verification, Drive sharing consent, some
+  auth challenges) refuses to render. Cheap mitigation: document
+  adding `--disable-blink-features=AutomationControlled` to the
+  user's Edge launch command in `CONTRIBUTING.md`. Also document the
+  workaround pattern ("detach ghax → do the Google thing manually
+  → re-attach") for flows where even the mitigation doesn't help.
+  Full stealth-mode JS injection is out of scope — cat-and-mouse
+  maintenance burden isn't worth it for a dev tool.
+
 - **Download interception.** When ghax is attached, Playwright's
   `connectOverCDP` default flips `Browser.setDownloadBehavior` so
   downloads land in `/var/folders/.../T/playwright-artifacts-*/`
