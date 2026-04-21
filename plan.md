@@ -216,6 +216,19 @@ Each group commits atomically. After all groups land:
 
 (See "Non-goals" at the top — items explicitly out of scope.)
 
+**Surfaced during run, not in this PR:**
+
+- **Download interception.** When ghax is attached, Playwright's
+  `connectOverCDP` default flips `Browser.setDownloadBehavior` so
+  downloads land in `/var/folders/.../T/playwright-artifacts-*/`
+  under UUID filenames instead of `~/Downloads/` with the original
+  filename. Fix: after `connectOverCDP`, open a root CDP session
+  and `Browser.setDownloadBehavior { behavior: 'default' }` to
+  restore native browser download handling. Smoke check: click a
+  download link, assert file lands in `~/Downloads/` with the
+  Content-Disposition filename. Split into its own PR — this one
+  is already landing twelve items.
+
 ## Queued decisions
 
 (Empty at plan time. Populated during execution if a hard stop hits.)
