@@ -948,6 +948,27 @@ c('fill writes into a resolved input', async () => {
   assert(val === 'ghax-fill-value', `fill should produce ghax-fill-value, got ${JSON.stringify(val)}`);
 });
 
+c('upload sets a file onto a file input', async () => {
+  const uploadPath = `/tmp/ghax-smoke-upload-${Date.now()}.txt`;
+  fs.writeFileSync(uploadPath, 'smoke upload payload\n');
+  try {
+    await run(['goto', 'data:text/html,<input type=file id=up>']);
+    await run(['wait', '300']);
+    await run(['upload', '#up', uploadPath]);
+    const r = await run(['eval', 'document.getElementById("up").files[0].name']);
+    const name = r.stdout.trim().replace(/^"|"$/g, '');
+    assert(name === path.basename(uploadPath), `upload name mismatch: ${name}`);
+  } finally {
+    fs.unlinkSync(uploadPath);
+  }
+});
+
+c('upload rejects missing args', async () => {
+  const r = await run(['upload', '#only-one-arg'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'upload should fail when path missing');
+  assert(/Usage: ghax upload/.test(r.stderr + r.stdout), `expected usage hint, got: ${r.stderr || r.stdout}`);
+});
+
 c('pair status prints tunnel instructions while attached', async () => {
   const r = await run(['pair']);
   assert(/pair/i.test(r.stdout), `pair output missing header: ${r.stdout.slice(0, 120)}`);

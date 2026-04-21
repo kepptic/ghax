@@ -803,6 +803,23 @@ register('press', async (ctx, args) => {
   return { ok: true };
 });
 
+// ─── upload — first-class file upload via setInputFiles ────────
+//
+// Wraps Playwright's locator.setInputFiles so operators don't have to
+// hand-roll the DOM.setFileInputFiles CDP call every time. Accepts a
+// single path or a comma-separated list for multi-file inputs.
+// Paths are resolved relative to the daemon's cwd (captured at attach).
+register('upload', async (ctx, args) => {
+  const target = String(args[0] ?? '');
+  const pathArg = String(args[1] ?? '');
+  if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
+  const page = await activePage(ctx);
+  const loc = resolveRef(ctx, target, page);
+  const paths = pathArg.split(',').map((p) => p.trim()).filter(Boolean);
+  await loc.setInputFiles(paths.length === 1 ? paths[0] : paths);
+  return { ok: true, count: paths.length };
+});
+
 register('type', async (ctx, args) => {
   const text = String(args[0] ?? '');
   const page = await activePage(ctx);

@@ -26,12 +26,13 @@ Tab:
   try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
-  screenshot [<@ref|selector>] [--path <p>] [--fullPage]
+  screenshot [<@ref|selector>] [--path <p>] [--full-page]
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
   click <@ref|selector>
   fill <@ref|selector> <value>
+  upload <@ref|selector> <path>[,<path>…]   # wraps setInputFiles
   press <key>
   type <text>
   wait <selector|ms|--networkidle|--load>
