@@ -79,7 +79,6 @@ export async function snapshot(
     return { text: '(no accessible elements found)', refs: new Map(), count: 0 };
   }
 
-  const lines = ariaText.split('\n');
   const refs = new Map<string, RefEntry>();
   const output: string[] = [];
   let refCounter = 1;
@@ -88,16 +87,16 @@ export async function snapshot(
   const roleNameCounts = new Map<string, number>();
   const roleNameSeen = new Map<string, number>();
 
-  for (const line of lines) {
+  const nodes: ParsedNode[] = [];
+  for (const line of ariaText.split('\n')) {
     const node = parseLine(line);
     if (!node) continue;
+    nodes.push(node);
     const key = `${node.role}:${node.name || ''}`;
     roleNameCounts.set(key, (roleNameCounts.get(key) || 0) + 1);
   }
 
-  for (const line of lines) {
-    const node = parseLine(line);
-    if (!node) continue;
+  for (const node of nodes) {
 
     const depth = Math.floor(node.indent / 2);
     const isInteractive = INTERACTIVE_ROLES.has(node.role);
@@ -199,10 +198,25 @@ export async function snapshot(
           return chunks.join(' >> ');
         };
 
+        // Cache getComputedStyle() calls for the duration of this walk. The
+        // cursor-interactive pass reads style on every candidate in consider()
+        // and again for every ancestor of every candidate in isInFloating().
+        // On a 5k-element SPA that's O(n · depth) uncached reads, each one a
+        // forced style recalc. One WeakMap cuts it to O(n).
+        const styleCache = new WeakMap<Element, CSSStyleDeclaration>();
+        const styleOf = (el: Element): CSSStyleDeclaration => {
+          let s = styleCache.get(el);
+          if (!s) {
+            s = getComputedStyle(el);
+            styleCache.set(el, s);
+          }
+          return s;
+        };
+
         const isInFloating = (el: Element): boolean => {
           let p: Element | null = el;
           while (p && p !== document.documentElement) {
-            const ps = getComputedStyle(p);
+            const ps = styleOf(p);
             const floating = (ps.position === 'fixed' || ps.position === 'absolute') &&
               parseInt(ps.zIndex || '0', 10) >= 10;
             const portal = p.hasAttribute('data-radix-popper-content-wrapper') ||
@@ -219,7 +233,7 @@ export async function snapshot(
         const consider = (el: Element, inShadow: boolean) => {
           if (STANDARD.has(el.tagName)) return;
           if (!(el as HTMLElement).offsetParent && el.tagName !== 'BODY') return;
-          const style = getComputedStyle(el);
+          const style = styleOf(el);
           const cursorPointer = style.cursor === 'pointer';
           const onclick = el.hasAttribute('onclick');
           const tabindex = el.hasAttribute('tabindex') && parseInt(el.getAttribute('tabindex')!, 10) >= 0;

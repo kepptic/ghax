@@ -159,7 +159,10 @@ instead of silently attaching to Edge.
 map lives on the daemon's active tab. `ghax click @e3` looks up `@e3`
 against that map and drives a Playwright locator.
 
-Refs survive until the next snapshot. If the DOM changed and you run
+Refs survive until the next snapshot — and only on the tab they were
+taken on. `tab <id>` and `new-window` clear the ref map when the active
+page changes, so a stale `@e3` from a previous tab can't silently
+resolve against the wrong DOM. If the DOM changed and you run
 `click @e3`, Playwright fails with a clear "no element" error — fix by
 re-snapshotting.
 

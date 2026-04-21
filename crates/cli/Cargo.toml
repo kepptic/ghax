@@ -37,3 +37,10 @@ ctrlc = { version = "3", features = ["termination"] }
 rustyline = "15"
 # atty: TTY detection for shell-mode prompt and scripted-mode failure propagation.
 atty = "0.2"
+# url: standard URL parsing — used by qa.rs to resolve crawl-mode hrefs
+# against a base. Already in the tree transitively via reqwest, so pulling
+# it in directly adds no wall-clock cost to builds.
+url = "2"
+# urlencoding: tiny percent-encoding crate for the one place dispatch.rs
+# needs it (ext inspect). Replaces a hand-rolled byte table.
+urlencoding = "2"

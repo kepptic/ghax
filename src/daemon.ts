@@ -24,7 +24,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator } from 'playwright';
-import { CdpPool, type CdpTargetInfo } from './cdp-client';
+import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
@@ -100,12 +100,22 @@ async function allPages(ctx: Ctx): Promise<Page[]> {
   return pages;
 }
 
+// Target IDs are stable for a page's lifetime, but reading them costs a
+// full CDPSession open+detach round-trip. Every command that walks tabs
+// (activePage, tabs, find, status, tab) used to pay that per page per
+// call. Cache it on the Page via a WeakMap so the hot path stays O(1).
+const pageTargetIds = new WeakMap<Page, string>();
+
 async function pageTargetId(page: Page): Promise<string | null> {
+  const cached = pageTargetIds.get(page);
+  if (cached) return cached;
   try {
     const session = await page.context().newCDPSession(page);
     const info = await session.send('Target.getTargetInfo');
     await session.detach().catch(() => undefined);
-    return (info as any)?.targetInfo?.targetId ?? null;
+    const id = (info as any)?.targetInfo?.targetId ?? null;
+    if (id) pageTargetIds.set(page, id);
+    return id;
   } catch {
     return null;
   }
@@ -187,6 +197,22 @@ function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Respon
  * Matches full strings; `*` expands to `.*`. No support for `**`
  * (would be identical to `*` under this semantics anyway) or `?`.
  */
+// Parse the `since` opt shared by console + network. Accepts positive
+// epoch-ms integers. Non-finite, negative, or zero → no filter. Rejects
+// NaN explicitly so `--since=garbage` doesn't silently return an empty
+// result set (was: Number("garbage") → NaN, every `ts >= NaN` is false).
+function parseSinceOpt(raw: unknown): number {
+  if (raw === undefined || raw === null) return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Bad --since "${String(raw)}". Expected an epoch-ms integer.`);
+  }
+  if (n < 0) {
+    throw new Error(`Bad --since "${String(raw)}". Expected a non-negative epoch-ms integer.`);
+  }
+  return n;
+}
+
 function globToRegExp(pattern: string): RegExp {
   if (pattern === '*' || pattern === '') return /.*/;
   const escaped = pattern
@@ -285,17 +311,12 @@ register('status', async (ctx) => {
 
 register('tabs', async (ctx) => {
   const pages = await allPages(ctx);
-  const out = [];
-  for (const p of pages) {
-    const id = await pageTargetId(p);
-    out.push({
-      id,
-      title: await p.title().catch(() => ''),
-      url: p.url(),
-      active: id === ctx.activePageId,
-    });
-  }
-  return out;
+  return Promise.all(
+    pages.map(async (p) => {
+      const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+      return { id, title, url: p.url(), active: id === ctx.activePageId };
+    }),
+  );
 });
 
 register('tab', async (ctx, args, opts) => {
@@ -305,6 +326,13 @@ register('tab', async (ctx, args, opts) => {
   for (const p of pages) {
     const tid = await pageTargetId(p);
     if (tid === id) {
+      if (ctx.activePageId !== tid) {
+        // Refs are scoped to "the last snapshot on the active tab". Switching
+        // tabs invalidates them — otherwise `@e3` after `tab <other>` would
+        // resolve against the previous tab's locator and land in the wrong
+        // DOM. The CLAUDE.md invariant is explicit about this.
+        ctx.refs.clear();
+      }
       ctx.activePageId = tid;
       await instrumentPage(ctx, p);
       // --quiet skips bringToFront. Useful when an agent locks onto a tab
@@ -336,18 +364,13 @@ register('find', async (ctx, args) => {
   const pattern = String(args[0] ?? '');
   if (!pattern) throw new Error('Usage: find <url-substring>');
   const pages = await allPages(ctx);
-  const matches = [];
-  for (const p of pages) {
-    const url = p.url();
-    if (url.includes(pattern)) {
-      matches.push({
-        id: await pageTargetId(p),
-        url,
-        title: await p.title().catch(() => ''),
-      });
-    }
-  }
-  return matches;
+  const hits = pages.filter((p) => p.url().includes(pattern));
+  return Promise.all(
+    hits.map(async (p) => {
+      const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+      return { id, url: p.url(), title };
+    }),
+  );
 });
 
 register('newWindow', async (ctx, args) => {
@@ -373,6 +396,8 @@ register('newWindow', async (ctx, args) => {
     const id = await pageTargetId(newPage);
     // Auto-lock this tab as the active one so subsequent commands land
     // in the freshly-created window without an extra `ghax tab` step.
+    // Same refs-invalidation rule as the `tab` handler.
+    if (ctx.activePageId !== id) ctx.refs.clear();
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
     return {
@@ -724,7 +749,9 @@ register('console', async (ctx, _args, opts) => {
   const dedup = Boolean(opts.dedup);
   const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
+  const since = parseSinceOpt(opts.since);
   let entries = ctx.consoleBuf.last(n);
+  if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
 
   // --source-maps: resolve each entry's parsed stack back to original
@@ -806,7 +833,9 @@ register('network', async (ctx, _args, opts) => {
     }
   }
 
+  const since = parseSinceOpt(opts.since);
   let entries = ctx.networkBuf.last(n);
+  if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (pattern) entries = entries.filter((e) => pattern.test(e.url));
   if (statusTest) entries = entries.filter((e) => statusTest!(e.status));
 
@@ -1088,12 +1117,11 @@ register('ext.list', async (ctx) => {
       try {
         const target = await ctx.pool.get(probe);
         await target.send('Runtime.enable');
-        const r = (await target.send('Runtime.evaluate', {
-          expression:
-            '(() => { try { const m = chrome.runtime.getManifest(); return JSON.stringify({n: m.name, v: m.version}); } catch (e) { return "{}"; } })()',
-          returnByValue: true,
-        })) as { result?: { value?: string } };
-        const parsed = JSON.parse(r.result?.value || '{}') as { n?: string; v?: string };
+        const value = await evalInTarget<string>(
+          target,
+          '(() => { try { const m = chrome.runtime.getManifest(); return JSON.stringify({n: m.name, v: m.version}); } catch (e) { return "{}"; } })()',
+        );
+        const parsed = JSON.parse(value || '{}') as { n?: string; v?: string };
         name = parsed.n ?? '';
         version = parsed.v ?? '';
       } catch {
@@ -1131,21 +1159,74 @@ class DaemonError extends Error {
   }
 }
 
+// evalInTarget (below) throws DaemonError on exceptionDetails so silent
+// swallowing can't mask thrown expressions — ext.storage previously
+// returned {ok:true} on a thrown expr. Callers that want the old
+// behaviour wrap in try/catch.
+async function withCdpSession<T>(
+  page: Page,
+  fn: (session: import('playwright').CDPSession) => Promise<T>,
+): Promise<T> {
+  const session = await page.context().newCDPSession(page);
+  try {
+    return await fn(session);
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+}
+
+async function getSwTarget(
+  ctx: Ctx,
+  extId: string,
+): Promise<{ target: CdpTarget; info: CdpTargetInfo }> {
+  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
+  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
+  const info = sws[0];
+  const target = await ctx.pool.get(info);
+  await target.send('Runtime.enable');
+  return { target, info };
+}
+
+async function evalInTarget<T = unknown>(
+  target: CdpTarget,
+  expression: string,
+  opts: { awaitPromise?: boolean; wrapIife?: boolean; errorPrefix?: string; fallbackDescription?: boolean } = {},
+): Promise<T | string | undefined> {
+  const expr = opts.wrapIife ? `(async () => { return (${expression}); })()` : expression;
+  const res = (await target.send('Runtime.evaluate', {
+    expression: expr,
+    awaitPromise: opts.awaitPromise ?? false,
+    returnByValue: true,
+  })) as { result?: { value?: T; description?: string }; exceptionDetails?: unknown };
+  if (res.exceptionDetails) {
+    throw new DaemonError(
+      `${opts.errorPrefix ?? 'eval'} threw: ${JSON.stringify(res.exceptionDetails)}`,
+      4,
+    );
+  }
+  // `returnByValue: true` drops any result CDP can't JSON-encode (functions,
+  // undefined, chrome.runtime, BigInt, Map/Set, etc.) — the caller gets
+  // undefined. Opt-in fallback returns `description`, which CDP populates
+  // with a stringified preview for those cases. Used by ext.sw.eval where
+  // inspection of non-serialisable globals is the whole point.
+  if (opts.fallbackDescription && res.result?.value === undefined) {
+    return res.result?.description;
+  }
+  return res.result?.value;
+}
+
 register('ext.reload', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext reload <ext-id>');
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
   // Read content_scripts so we can warn — reload disconnects us before the promise resolves.
   let manifestCs: unknown[] = [];
   try {
-    const r = (await target.send('Runtime.evaluate', {
-      expression: 'JSON.stringify(chrome.runtime.getManifest().content_scripts || [])',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    manifestCs = JSON.parse(r.result?.value || '[]') as unknown[];
+    const value = await evalInTarget<string>(
+      target,
+      'JSON.stringify(chrome.runtime.getManifest().content_scripts || [])',
+    );
+    manifestCs = JSON.parse(value || '[]') as unknown[];
   } catch {
     // non-fatal; hint relies on it but reload itself doesn't
   }
@@ -1201,12 +1282,11 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   let contentScripts: ManifestContentScript[] = [];
   let oldVersion = '';
   try {
-    const r = (await oldTarget.send('Runtime.evaluate', {
-      expression:
-        'JSON.stringify({v: chrome.runtime.getManifest().version, cs: chrome.runtime.getManifest().content_scripts || []})',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    const parsed = JSON.parse(r.result?.value || '{}') as { v?: string; cs?: ManifestContentScript[] };
+    const value = await evalInTarget<string>(
+      oldTarget,
+      'JSON.stringify({v: chrome.runtime.getManifest().version, cs: chrome.runtime.getManifest().content_scripts || []})',
+    );
+    const parsed = JSON.parse(value || '{}') as { v?: string; cs?: ManifestContentScript[] };
     oldVersion = parsed.v ?? '';
     contentScripts = parsed.cs ?? [];
   } catch (err: any) {
@@ -1227,11 +1307,8 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   // Read the new version for reporting.
   let newVersion = '';
   try {
-    const r = (await newTarget.send('Runtime.evaluate', {
-      expression: 'chrome.runtime.getManifest().version',
-      returnByValue: true,
-    })) as { result?: { value?: string } };
-    newVersion = r.result?.value || '';
+    newVersion =
+      (await evalInTarget<string>(newTarget, 'chrome.runtime.getManifest().version')) || '';
   } catch {
     // non-fatal
   }
@@ -1282,15 +1359,11 @@ register('ext.hot-reload', async (ctx, args, opts) => {
         return JSON.stringify(out);
       })()
     `;
-    const r = (await newTarget.send('Runtime.evaluate', {
-      expression: expr,
+    const value = await evalInTarget<string>(newTarget, expr, {
       awaitPromise: true,
-      returnByValue: true,
-    })) as { result?: { value?: string }; exceptionDetails?: unknown };
-    if (r.exceptionDetails) {
-      throw new DaemonError(`hot-reload inject failed: ${JSON.stringify(r.exceptionDetails)}`, 4);
-    }
-    const results = JSON.parse(r.result?.value || '[]') as InjectResult[];
+      errorPrefix: 'hot-reload inject',
+    });
+    const results = JSON.parse(value || '[]') as InjectResult[];
     allResults.push(...results);
     if (verbose) {
       // Verbose output is surfaced via log — the structured response carries the per-tab detail.
@@ -1327,13 +1400,7 @@ async function ensureSwLogSubscription(ctx: Ctx, extId: string): Promise<SwLogSu
     ctx.swLogs.delete(extId);
   }
 
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) {
-    throw new DaemonError(`No service worker for ${extId}`, 3);
-  }
-  const targetInfo = sws[0];
-  const target = await ctx.pool.get(targetInfo);
-  await target.send('Runtime.enable');
+  const { target, info: targetInfo } = await getSwTarget(ctx, extId);
   const buf = new CircularBuffer<ConsoleEntry>(BUFFER_CAP);
   target.on((event) => {
     if (event.method === 'Runtime.consoleAPICalled') {
@@ -1401,20 +1468,14 @@ register('ext.sw.eval', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const js = String(args[1] ?? '');
   if (!extId || !js) throw new Error('Usage: ext sw <ext-id> eval <js>');
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => { return (${js}); })()`,
+  const { target } = await getSwTarget(ctx, extId);
+  const value = await evalInTarget(target, js, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: 'SW eval',
+    fallbackDescription: true,
   });
-  const r = res as { result?: { value?: unknown; description?: string }; exceptionDetails?: unknown };
-  if (r.exceptionDetails) {
-    throw new Error(`SW eval threw: ${JSON.stringify(r.exceptionDetails)}`);
-  }
-  return r.result?.value ?? r.result?.description ?? null;
+  return value ?? null;
 });
 
 register('ext.storage', async (ctx, args) => {
@@ -1423,10 +1484,7 @@ register('ext.storage', async (ctx, args) => {
   const op = String(args[2] ?? 'get');
   if (!extId) throw new Error('Usage: ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]');
   if (!['local', 'session', 'sync'].includes(area)) throw new Error(`Unknown area: ${area}`);
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new Error(`No service worker for ${extId}`);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
 
   let expr: string;
   if (op === 'get') {
@@ -1448,13 +1506,12 @@ register('ext.storage', async (ctx, args) => {
   } else {
     throw new Error(`Unknown op: ${op}`);
   }
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => ${expr})()`,
+  const value = await evalInTarget(target, expr, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: 'ext storage',
   });
-  const r = res as { result?: { value?: unknown } };
-  return r.result?.value ?? { ok: true };
+  return value ?? { ok: true };
 });
 
 register('ext.message', async (ctx, args) => {
@@ -1468,10 +1525,7 @@ register('ext.message', async (ctx, args) => {
     // Allow raw strings too — wrap as {data: <string>}
     payload = payloadRaw;
   }
-  const sws = await ctx.pool.findByExtensionId(extId, 'service_worker');
-  if (sws.length === 0) throw new DaemonError(`No service worker for ${extId}`, 3);
-  const target = await ctx.pool.get(sws[0]);
-  await target.send('Runtime.enable');
+  const { target } = await getSwTarget(ctx, extId);
   // chrome.runtime.sendMessage from inside the SW with a recipient extension
   // ID round-trips through the extension's own onMessage listeners. For
   // cross-extension messaging, the SW would need to already be authorised.
@@ -1485,12 +1539,11 @@ register('ext.message', async (ctx, args) => {
       }
     })()
   `;
-  const res = (await target.send('Runtime.evaluate', {
-    expression: expr,
+  const value = await evalInTarget(target, expr, {
     awaitPromise: true,
-    returnByValue: true,
-  })) as { result?: { value?: unknown } };
-  return res.result?.value ?? null;
+    errorPrefix: 'ext message',
+  });
+  return value ?? null;
 });
 
 // Shared eval-in-extension-page helper. `filter` decides which of the
@@ -1513,55 +1566,31 @@ async function extViewEval(
   }
   const target = await ctx.pool.get(pages[0]);
   await target.send('Runtime.enable');
-  const res = await target.send('Runtime.evaluate', {
-    expression: `(async () => { return (${js}); })()`,
+  const value = await evalInTarget(target, js, {
     awaitPromise: true,
-    returnByValue: true,
+    wrapIife: true,
+    errorPrefix: `${label} eval`,
   });
-  const r = res as { result?: { value?: unknown }; exceptionDetails?: unknown };
-  if (r.exceptionDetails) throw new Error(`${label} eval threw: ${JSON.stringify(r.exceptionDetails)}`);
-  return r.result?.value ?? null;
+  return value ?? null;
 }
 
-register('ext.panel.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/sidepanel\.html|sidePanel|panel\.html/i.test(url),
-    'panel',
-  );
-});
+// The three ext-view eval verbs differ only in label + URL filter.
+// Popups are transient (target only exists while open); options pages
+// are normal tabs (options.html / options_ui); panels live in the
+// side panel frame (sidepanel.html).
+const EXT_VIEW_FILTERS: Array<{ label: string; match: RegExp }> = [
+  { label: 'panel', match: /\/sidepanel\.html|sidePanel|panel\.html/i },
+  { label: 'popup', match: /\/popup\.html|\/popup\.htm|default_popup/i },
+  { label: 'options', match: /\/options\.html|\/options\/|options_ui/i },
+];
 
-register('ext.popup.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  // Popups are transient — a page target only exists while the popup is
-  // actually open. Matching by popup.html or action/default_popup path.
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/popup\.html|\/popup\.htm|default_popup/i.test(url),
-    'popup',
-  );
-});
-
-register('ext.options.eval', async (ctx, args) => {
-  const extId = String(args[0] ?? '');
-  const js = String(args[1] ?? '');
-  // Options pages open as normal tabs when the user clicks "Options" in
-  // the extensions panel. Path convention: options.html or options_ui.
-  return extViewEval(
-    ctx,
-    extId,
-    js,
-    (url) => /\/options\.html|\/options\/|options_ui/i.test(url),
-    'options',
-  );
-});
+for (const { label, match } of EXT_VIEW_FILTERS) {
+  register(`ext.${label}.eval`, async (ctx, args) => {
+    const extId = String(args[0] ?? '');
+    const js = String(args[1] ?? '');
+    return extViewEval(ctx, extId, js, (url) => match.test(url), label);
+  });
+}
 
 // ─── Gesture commands (real Input.dispatch*) ───────────────────
 
@@ -1574,14 +1603,11 @@ register('gesture.click', async (ctx, args) => {
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
   // Dispatch on the active tab's target.
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1669,7 +1695,7 @@ register('profile', async (ctx, _args, opts) => {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const base = `${dir}/${extId ? `ext-${extId}-${ts}` : `tab-${ts}`}`;
 
-  let startMetrics: Record<string, number>;
+  let startMetrics: Record<string, number> = {};
   let endMetrics: Record<string, number> | null = null;
   let target = extId ? `ext:${extId}` : 'active-tab';
   let heapPath: string | null = null;
@@ -1689,9 +1715,8 @@ register('profile', async (ctx, _args, opts) => {
     }
   } else {
     const page = await activePage(ctx);
-    const session = await page.context().newCDPSession(page);
-    const sendable = asCdpSend(session);
-    try {
+    await withCdpSession(page, async (session) => {
+      const sendable = asCdpSend(session);
       startMetrics = await takeMetricsViaSession(sendable);
       if (durationMs > 0) {
         await new Promise((r) => setTimeout(r, durationMs));
@@ -1701,9 +1726,7 @@ register('profile', async (ctx, _args, opts) => {
         heapPath = `${base}.heapsnapshot`;
         await captureHeapSnapshot(sendable, heapPath);
       }
-    } finally {
-      await session.detach().catch(() => undefined);
-    }
+    });
     target = `tab:${page.url()}`;
   }
 
@@ -1886,13 +1909,10 @@ register('gesture.key', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: gesture key <key>');
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key });
     await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1904,8 +1924,7 @@ register('gesture.dblclick', async (ctx, args) => {
   const y = Number(ys);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     // clickCount=2 on the second pressed/released is what Chrome treats as a
     // dblclick — firing pressed/released twice with clickCount=1 is NOT the
@@ -1914,9 +1933,7 @@ register('gesture.dblclick', async (ctx, args) => {
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
     await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
     await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true };
 });
 
@@ -1928,8 +1945,7 @@ register('gesture.scroll', async (ctx, args) => {
   }
   if (!Number.isFinite(amount)) throw new Error(`Invalid scroll amount: ${args[1]}`);
   const page = await activePage(ctx);
-  const session = await page.context().newCDPSession(page);
-  try {
+  await withCdpSession(page, async (session) => {
     // Dispatch on the viewport centre. Magnitude is the wheel delta.
     const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
     const x = viewport.width / 2;
@@ -1943,9 +1959,7 @@ register('gesture.scroll', async (ctx, args) => {
       deltaX,
       deltaY,
     });
-  } finally {
-    await session.detach().catch(() => undefined);
-  }
+  });
   return { ok: true, direction: dir, amount };
 });
 

@@ -1,8 +1,6 @@
-//! ghax — Rust CLI entry point.
-//!
-//! Phase 1 + 2: argv → daemon RPC → print, plus attach + medium verbs.
-//! Phase 3A: SSE streaming (sse.rs).
-//! Phase 3B: shell REPL (shell.rs).
+//! ghax — Rust CLI entry point. Dispatches argv to the daemon RPC, plus
+//! the medium verbs (attach, canary, qa, review, ship) that layer multi-
+//! RPC logic on top. SSE streaming lives in `sse`; the REPL in `shell`.
 
 mod args;
 mod attach;
@@ -11,6 +9,7 @@ mod dispatch;
 mod help;
 mod output;
 mod qa;
+mod qa_common;
 mod review;
 mod rpc;
 mod shell;
@@ -18,6 +17,7 @@ mod ship;
 mod small;
 mod sse;
 mod state;
+mod time_util;
 
 use std::process::ExitCode;
 

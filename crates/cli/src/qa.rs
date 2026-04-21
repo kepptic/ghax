@@ -25,26 +25,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use crate::qa_common::{console_errors_since, failed_requests_since, ConsoleErrorEntry, FailedRequestEntry};
 
 // ── JSON report types ──────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleErrorEntry {
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FailedRequestEntry {
-    url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<u16>,
-    method: String,
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,43 +81,7 @@ fn collect_repeated_flag<'a>(raw: &'a [String], flag: &str) -> Vec<&'a str> {
     out
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis() as u64
-}
-
-fn iso_now() -> String {
-    // Use chrono-free ISO-8601 formatting.
-    // Format: 2006-01-02T15:04:05.000Z
-    let ms = now_ms();
-    let secs = ms / 1000;
-    let millis = ms % 1000;
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400; // days since epoch
-    // Compute year/month/day from days-since-epoch (Gregorian proleptic calendar).
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
-}
-
-/// Minimal Gregorian calendar conversion, days since 1970-01-01.
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
+use crate::time_util::{iso_now, now_ms};
 
 /// Sanitise a URL for use as a PNG filename (matches TS impl).
 fn safe_filename(url: &str) -> String {
@@ -232,31 +181,8 @@ fn extract_href(tag: &str) -> Option<String> {
     if href.is_empty() { None } else { Some(href) }
 }
 
-/// Minimal URL resolution (absolute URLs pass through, relative paths are joined).
 fn resolve_url(base: &str, href: &str) -> Option<String> {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return Some(href.to_string());
-    }
-    // Extract origin + path from base.
-    let (scheme_end, _) = base.split_once("://")?;
-    let full_prefix = format!("{scheme_end}://");
-    let rest = &base[full_prefix.len()..];
-    let slash = rest.find('/');
-    let host = match slash {
-        Some(i) => &rest[..i],
-        None => rest,
-    };
-    let base_path = match slash {
-        Some(i) => &rest[i..],
-        None => "/",
-    };
-    if href.starts_with('/') {
-        Some(format!("{full_prefix}{host}{href}"))
-    } else {
-        // Relative: resolve against directory of base_path.
-        let dir = base_path.rfind('/').map_or("/", |i| &base_path[..=i]);
-        Some(format!("{full_prefix}{host}{dir}{href}"))
-    }
+    url::Url::parse(base).ok()?.join(href).ok().map(|u| u.to_string())
 }
 
 /// Crawl URLs under `root`: sitemap first, BFS fallback.
@@ -459,40 +385,8 @@ pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
                     screenshot_path = Some(path);
                 }
 
-                // ── Console errors ──
-                let console_log = rpc::call(port, "console", json!([]), json!({ "last": 200 })).unwrap_or(Value::Array(vec![]));
-                let console_errors: Vec<ConsoleErrorEntry> = console_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        let level = e.get("level").and_then(|v| v.as_str()).unwrap_or("");
-                        let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        level == "error" && ts >= page_start
-                    })
-                    .map(|e| ConsoleErrorEntry {
-                        text: e.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        url: e.get("url").and_then(|v| v.as_str()).map(str::to_string),
-                    })
-                    .collect();
-
-                // ── Failed network requests ──
-                let net_log = rpc::call(port, "network", json!([]), json!({ "last": 500 })).unwrap_or(Value::Array(vec![]));
-                let failed_requests: Vec<FailedRequestEntry> = net_log
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter(|e| {
-                        let ts = e.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let status = e.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
-                        ts >= page_start && status >= 400
-                    })
-                    .map(|e| FailedRequestEntry {
-                        url: e.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        status: e.get("status").and_then(|v| v.as_u64()).map(|n| n as u16),
-                        method: e.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string(),
-                    })
-                    .collect();
+                let console_errors = console_errors_since(port, page_start, 200);
+                let failed_requests = failed_requests_since(port, page_start, 500);
 
                 let err_tag = if console_errors.is_empty() { String::new() } else { format!(", {} console errors", console_errors.len()) };
                 let net_tag = if failed_requests.is_empty() { String::new() } else { format!(", {} failed requests", failed_requests.len()) };
