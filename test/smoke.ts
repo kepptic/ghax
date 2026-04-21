@@ -115,6 +115,34 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('tabs --filter matches by URL regex', async () => {
+  // goto example.com first so we know a matching tab exists in the set.
+  await run(['goto', 'https://example.com']);
+  const r = await run(['tabs', '--filter', 'example\\.com', '--json']);
+  const tabs = parseJson<Array<{ url: string }>>(r.stdout);
+  assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one example.com tab');
+  for (const t of tabs) {
+    assert(/example\.com/i.test(t.url), `tab leaked past filter: ${t.url}`);
+  }
+});
+
+c('tabs --fields projects only requested keys', async () => {
+  const r = await run(['tabs', '--fields', 'id,url', '--json']);
+  const tabs = parseJson<Array<Record<string, unknown>>>(r.stdout);
+  assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
+  for (const t of tabs) {
+    const keys = Object.keys(t).sort();
+    assert(JSON.stringify(keys) === JSON.stringify(['id', 'url']),
+      `unexpected keys on projected tab: ${JSON.stringify(keys)}`);
+  }
+});
+
+c('tabs --filter with invalid regex fails cleanly', async () => {
+  const r = await run(['tabs', '--filter', '[unclosed'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'invalid regex should fail');
+  assert(/invalid regex/i.test(r.stderr + r.stdout), `expected 'invalid regex' message, got: ${r.stderr || r.stdout}`);
+});
+
 c('goto example.com lands on example.com', async () => {
   const r = await run(['goto', 'https://example.com']);
   assert(/example\.com/.test(r.stdout), `goto output: ${r.stdout}`);
@@ -125,6 +153,24 @@ c('text returns page body', async () => {
   assert(/Example Domain/i.test(r.stdout), 'text should contain "Example Domain"');
 });
 
+c('text --selector scopes to one element', async () => {
+  const r = await run(['text', '--selector', 'h1']);
+  assert(/^\s*Example Domain\s*$/i.test(r.stdout), `expected only h1 text, got: ${r.stdout}`);
+});
+
+c('text --length paginates the output', async () => {
+  const r = await run(['text', '--length', '10']);
+  // stdout has a trailing newline from println; trim for the length check.
+  assert(r.stdout.trim().length <= 10, `expected ≤10 chars, got ${r.stdout.trim().length}: ${r.stdout.trim()}`);
+});
+
+c('text --skip skips leading chars', async () => {
+  const full = (await run(['text'])).stdout.trim();
+  const skipped = (await run(['text', '--skip', '5'])).stdout.trim();
+  assert(full.startsWith(full.slice(0, 5)), 'sanity check on full text');
+  assert(skipped === full.slice(5), `--skip 5 mismatch: full=${full.slice(0, 20)}… skipped=${skipped.slice(0, 20)}…`);
+});
+
 c('html <selector> returns innerHTML', async () => {
   const r = await run(['html', 'h1']);
   assert(/Example Domain/i.test(r.stdout), 'h1 innerHTML should include "Example Domain"');
@@ -133,6 +179,43 @@ c('html <selector> returns innerHTML', async () => {
 c('snapshot -i produces @e refs', async () => {
   const r = await run(['snapshot', '-i']);
   assert(/@e\d+/.test(r.stdout), `snapshot didn't produce @e refs: ${r.stdout.slice(0, 200)}`);
+});
+
+c('snapshot -i --compact suppresses the cursor-interactive section', async () => {
+  // Build a page with a cursor:pointer div so the cursor-scan has something
+  // to emit when unsuppressed. Then verify -i alone emits the scan header
+  // and -i --compact doesn't.
+  const html = `
+    <button>real button</button>
+    <div style="cursor:pointer;width:100px;height:20px" onclick="void 0">cursor div</div>
+  `;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const withScan = await run(['snapshot', '-i']);
+  assert(
+    /cursor-interactive/.test(withScan.stdout),
+    `expected cursor-interactive header on -i: ${withScan.stdout.slice(0, 200)}`,
+  );
+  const compact = await run(['snapshot', '-i', '--compact']);
+  assert(
+    !/cursor-interactive/.test(compact.stdout),
+    `expected no cursor-interactive section on -i --compact: ${compact.stdout.slice(0, 200)}`,
+  );
+  assert(
+    compact.stdout.length < withScan.stdout.length,
+    `compact output should be smaller (compact=${compact.stdout.length}, full=${withScan.stdout.length})`,
+  );
+});
+
+c('snapshot -C overrides --compact to force the cursor pass', async () => {
+  const html = `<div style="cursor:pointer" onclick="void 0">explicit</div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const r = await run(['snapshot', '-C', '--compact']);
+  assert(
+    /cursor-interactive/.test(r.stdout),
+    `expected cursor-interactive when -C is explicit, got: ${r.stdout.slice(0, 200)}`,
+  );
 });
 
 c('snapshot -a writes annotated PNG', async () => {
@@ -153,9 +236,31 @@ c('screenshot writes a PNG', async () => {
   fs.unlinkSync(outPath);
 });
 
+c('screenshot --full-page kebab alias writes a PNG', async () => {
+  const outPath = `/tmp/ghax-smoke-fp-${Date.now()}.png`;
+  await run(['screenshot', '--path', outPath, '--full-page']);
+  assert(fs.existsSync(outPath), 'full-page screenshot missing');
+  assert(fs.statSync(outPath).size > 500, 'full-page screenshot suspiciously small');
+  fs.unlinkSync(outPath);
+});
+
 c('eval runs JS in the active tab', async () => {
   const r = await run(['eval', '1 + 2']);
   assert(r.stdout.trim() === '3', `eval 1+2 → ${r.stdout.trim()}`);
+});
+
+c('eval --max-bytes truncates oversized strings', async () => {
+  const r = await run(['eval', '"x".repeat(1000)', '--max-bytes', '50', '--json']);
+  const v = parseJson<{ value: string; truncated: boolean; originalBytes: number }>(r.stdout);
+  assert(v.truncated === true, 'expected truncated=true');
+  assert(v.originalBytes === 1000, `expected originalBytes=1000, got ${v.originalBytes}`);
+  assert(Buffer.byteLength(v.value, 'utf8') <= 50, `truncated value exceeds 50 bytes: ${Buffer.byteLength(v.value, 'utf8')}`);
+});
+
+c('eval --max-bytes pass-through when under cap', async () => {
+  const r = await run(['eval', '"short"', '--max-bytes', '100', '--json']);
+  const v = parseJson<unknown>(r.stdout);
+  assert(v === 'short', `expected 'short', got ${JSON.stringify(v)}`);
 });
 
 c('viewport sets the size', async () => {
@@ -878,6 +983,27 @@ c('fill writes into a resolved input', async () => {
   await run(['fill', '#k', 'ghax-fill-value']);
   const val = (await run(['eval', 'document.getElementById("k").value'])).stdout.trim();
   assert(val === 'ghax-fill-value', `fill should produce ghax-fill-value, got ${JSON.stringify(val)}`);
+});
+
+c('upload sets a file onto a file input', async () => {
+  const uploadPath = `/tmp/ghax-smoke-upload-${Date.now()}.txt`;
+  fs.writeFileSync(uploadPath, 'smoke upload payload\n');
+  try {
+    await run(['goto', 'data:text/html,<input type=file id=up>']);
+    await run(['wait', '300']);
+    await run(['upload', '#up', uploadPath]);
+    const r = await run(['eval', 'document.getElementById("up").files[0].name']);
+    const name = r.stdout.trim().replace(/^"|"$/g, '');
+    assert(name === path.basename(uploadPath), `upload name mismatch: ${name}`);
+  } finally {
+    fs.unlinkSync(uploadPath);
+  }
+});
+
+c('upload rejects missing args', async () => {
+  const r = await run(['upload', '#only-one-arg'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'upload should fail when path missing');
+  assert(/Usage: ghax upload/.test(r.stderr + r.stdout), `expected usage hint, got: ${r.stderr || r.stdout}`);
 });
 
 c('pair status prints tunnel instructions while attached', async () => {
