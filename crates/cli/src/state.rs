@@ -127,8 +127,15 @@ unsafe fn libc_kill(_pid: i32, _sig: i32) -> i32 {
 /// standard "attach first" message that mirrors cli.ts.
 pub fn require_daemon(cfg: &Config) -> Result<u16> {
     let state = read_state(cfg).ok_or_else(|| {
+        // When state is missing but a ghax daemon is already alive on the
+        // scan-range ports, tell the operator — `ghax attach` will pair
+        // with it instead of launching a new one, which is almost
+        // certainly what they want.
+        let hint = probe_live_daemon_ports()
+            .map(|p| format!(" (a ghax daemon is live on :{p} — `ghax attach` will pair with it)"))
+            .unwrap_or_default();
         anyhow!(
-            "no daemon state at {} — run `ghax attach` first",
+            "no daemon state at {} — run `ghax attach` first{hint}",
             cfg.state_file.display()
         )
     })?;
@@ -137,8 +144,16 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
     // pointing at a port now reused by a different ghax daemon (different
     // project, colliding port) would silently route RPCs to the wrong
     // browser session.
-    if health_check(state.port, state.pid).is_ok() {
-        return Ok(state.port);
+    match health_check(state.port, state.pid) {
+        Ok(()) => return Ok(state.port),
+        Err(e) if e.to_string().contains("stale state") => {
+            // Explicit stale-state path: different daemon answered on our
+            // port. Tell the user the exact fix.
+            return Err(anyhow!(
+                "{e} — run `ghax detach && ghax attach` to re-pair with the running browser"
+            ));
+        }
+        Err(_) => {}
     }
     if !is_process_alive(state.pid) {
         return Err(anyhow!(
@@ -150,6 +165,29 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
         "daemon at :{} not responding to /health — run `ghax attach`",
         state.port
     ))
+}
+
+/// Scan 9222..=9230 for a live ghax daemon `/health` — used only to enrich
+/// the "no daemon state" error with an auto-reattach hint. Returns the
+/// first responsive port, or None.
+fn probe_live_daemon_ports() -> Option<u16> {
+    for port in 9222..=9230 {
+        let url = format!("http://127.0.0.1:{port}/health");
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .ok()?;
+        if let Ok(resp) = client.get(&url).send() {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn health_check(port: u16, expected_pid: i32) -> Result<()> {

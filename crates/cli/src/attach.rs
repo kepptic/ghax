@@ -1053,10 +1053,17 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
 
     let ep = endpoint.unwrap(); // always Some at this point
     let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref)?;
-    println!(
-        "attached — pid {}, port {}, browser {}",
-        state.pid, state.port, state.browser_kind
-    );
+    // POSIX convention — stay quiet on fresh success. `--verbose` restores
+    // the pid/port/browser one-liner for humans; the `already attached`
+    // branch above still prints because that's informational, not success.
+    let verbose = matches!(parsed.flags.get("verbose"), Some(serde_json::Value::Bool(true)))
+        || std::env::var("GHAX_VERBOSE").is_ok();
+    if verbose {
+        println!(
+            "attached — pid {}, port {}, browser {}",
+            state.pid, state.port, state.browser_kind
+        );
+    }
     Ok(EXIT_OK)
 }
 
