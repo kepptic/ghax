@@ -241,6 +241,69 @@ Each group commits atomically. After all groups land:
   Content-Disposition filename. Split into its own PR — this one
   is already landing twelve items.
 
+## Follow-up sprint (from 2026-04-20 jnremache field report)
+
+The 8h operator-driven session logged in
+`docs/sessions/2026-04-20-jnremache-field-report.md` surfaced
+40+ data points grouped into triage buckets for the next sprint.
+
+**Bucket A — high-ROI, same theme as item 10 (payload reduction):**
+
+- `snapshot --compact` (TOK-01). Drop the cursor-interactive tree
+  by default, one element per line. 50%+ token cut on snapshot.
+- `eval --max-bytes N` (TOK-02). Server-side truncation to protect
+  LLM operators from accidental context blow-outs.
+- `text --length N --skip M --selector <sel>` (TOK-10). Scoped,
+  paged page-text dumps. Replaces ~40 hand-rolled
+  `document.body.innerText.substring(...)` in one session.
+- `tabs --filter <regex> --fields id,title` (TOK-04). Server-side
+  regex + field selection on the tab list. Cuts ~200 bytes of
+  query-string noise per Google-product tab.
+- `upload <@ref|selector> <path>` (JNR-07). First-class file upload
+  verb that wraps CDP's `DOM.setFileInputFiles`. Used 5x in one
+  session via a hand-written 30-line Node + ws shim.
+- `--full-page` kebab alias for `--fullPage` (GHAX-FR-06). Trivial.
+
+**Bucket B — architectural, own PR each:**
+
+- Stable `@e` refs across DOM mutations within a tab (JNR-03).
+  Currently refs shift mid-click-sequence on Material / React
+  forms; the field report shows Saturday got toggled instead of
+  Friday on Google Ads because comboboxes opened and reindexed the
+  ARIA tree. Item 9 in this PR only handles the tab-boundary case.
+  Real fix needs hash-based refs (role + name + nth-of-type)
+  or semantic re-resolution on every interaction.
+- React/Angular/Material `fill` fallback (JNR-04). Detect
+  framework-managed inputs and use the native-setter +
+  `dispatchEvent('input'/'change')` pattern instead of
+  Playwright's `.fill()`.
+- Dialog-aware ARIA walker (JNR-06). When a `[role=dialog]` is
+  open, the snapshot should treat it as the new root instead of
+  inheriting `aria-hidden="true"` from the outer app.
+- Auto-reattach when state file stale but daemon alive (JNR-01).
+  Or at minimum a more actionable error than "no daemon state".
+- `ghax batch '[{"click":"@e7"},...]'` (TOK-09). One round-trip for
+  a sequence of ops, with atomic snapshot between steps — also
+  fixes the JNR-03 ref-shift naturally.
+
+**Bucket C — papercuts, bundle into one PR:**
+
+- RPC single-retry shim (JNR-02).
+- Quiet `ghax attach` on success (TOK-07, POSIX convention).
+- `ghax status` includes active tab id + title (GHAX-FR-04).
+- `ghax wait --selector` more prominent in help (GHAX-FR-02).
+- `ghax eval` auto-waits for navigation once before giving up
+  (GHAX-FR-01).
+
+**Bucket D — docs-only, goes with the google-antibot note:**
+
+- Chrome default-profile CDP restriction (JNR-08). Chrome v113+
+  blocks `--remote-debugging-port` on the default user-data-dir.
+  Document the `--user-data-dir=<path>` workaround in
+  CONTRIBUTING.md.
+- Google Ads "disconnect" modal on rapid form submits (GHAX-FR-05).
+  Known anti-bot pattern, not fixable, document as expected.
+
 ## Queued decisions
 
 (Empty at plan time. Populated during execution if a hard stop hits.)
