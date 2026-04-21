@@ -29,8 +29,28 @@ impl std::fmt::Display for RpcError {
 impl std::error::Error for RpcError {}
 
 pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
+    // Single-retry shim for transient-looking errors — connection
+    // refused/reset, broken pipe, request build failure — so a daemon
+    // that's briefly unresponsive (post-spawn warm-up, GC pause,
+    // mid-reload) doesn't bubble up a user-visible failure. Semantic
+    // errors (daemon answered with ok:false) are NOT retried — those
+    // are real command failures, not flake.
+    match call_once(port, cmd, &args, &opts) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if is_transient(&e) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                call_once(port, cmd, &args, &opts)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn call_once(port: u16, cmd: &str, args: &Value, opts: &Value) -> Result<Value> {
     let url = format!("http://127.0.0.1:{port}/rpc");
-    let body = Request { cmd, args: &args, opts: &opts };
+    let body = Request { cmd, args, opts };
     let client = reqwest::blocking::Client::builder()
         // No global timeout: long verbs (qa, perf, snapshot with --wait) can run for minutes.
         .build()?;
@@ -48,4 +68,19 @@ pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
         return Err(anyhow!(RpcError { message, exit_code }));
     }
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// Transient = transport-layer hiccup we'd retry. A daemon-side semantic
+/// failure (wrapped in `RpcError`) is never transient — it ran, it failed.
+fn is_transient(err: &anyhow::Error) -> bool {
+    if err.downcast_ref::<RpcError>().is_some() {
+        return false;
+    }
+    if let Some(re) = err.downcast_ref::<reqwest::Error>() {
+        // Connection refused / reset / broken pipe / timeout all look
+        // like the daemon blinked. `is_request` catches everything except
+        // a completed response.
+        return re.is_connect() || re.is_timeout() || re.is_request();
+    }
+    false
 }
