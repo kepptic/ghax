@@ -30,7 +30,7 @@ thin CLI wiring. Each is verifiable with one smoke assertion.
 5. [x] `upload <@ref|selector> <path>` (JNR-07). First-class file
    upload verb wrapping Playwright's `locator.setInputFiles`. Used
    5x in the field session via a hand-written shim.
-6. [ ] `snapshot --compact` suppresses cursor-interactive pass
+6. [x] `snapshot --compact` suppresses cursor-interactive pass
    (TOK-01). Today `--compact` only drops noise nodes from the
    ARIA tree; the cursor-interactive section still runs whenever
    `-i` is set and dominates the output on heavy SPAs. Gate the

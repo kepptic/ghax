@@ -181,6 +181,43 @@ c('snapshot -i produces @e refs', async () => {
   assert(/@e\d+/.test(r.stdout), `snapshot didn't produce @e refs: ${r.stdout.slice(0, 200)}`);
 });
 
+c('snapshot -i --compact suppresses the cursor-interactive section', async () => {
+  // Build a page with a cursor:pointer div so the cursor-scan has something
+  // to emit when unsuppressed. Then verify -i alone emits the scan header
+  // and -i --compact doesn't.
+  const html = `
+    <button>real button</button>
+    <div style="cursor:pointer;width:100px;height:20px" onclick="void 0">cursor div</div>
+  `;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const withScan = await run(['snapshot', '-i']);
+  assert(
+    /cursor-interactive/.test(withScan.stdout),
+    `expected cursor-interactive header on -i: ${withScan.stdout.slice(0, 200)}`,
+  );
+  const compact = await run(['snapshot', '-i', '--compact']);
+  assert(
+    !/cursor-interactive/.test(compact.stdout),
+    `expected no cursor-interactive section on -i --compact: ${compact.stdout.slice(0, 200)}`,
+  );
+  assert(
+    compact.stdout.length < withScan.stdout.length,
+    `compact output should be smaller (compact=${compact.stdout.length}, full=${withScan.stdout.length})`,
+  );
+});
+
+c('snapshot -C overrides --compact to force the cursor pass', async () => {
+  const html = `<div style="cursor:pointer" onclick="void 0">explicit</div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const r = await run(['snapshot', '-C', '--compact']);
+  assert(
+    /cursor-interactive/.test(r.stdout),
+    `expected cursor-interactive when -C is explicit, got: ${r.stdout.slice(0, 200)}`,
+  );
+});
+
 c('snapshot -a writes annotated PNG', async () => {
   const outPath = `/tmp/ghax-smoke-anno-${Date.now()}.png`;
   const r = await run(['snapshot', '-i', '-a', '-o', outPath]);

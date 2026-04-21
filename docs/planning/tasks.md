@@ -18,8 +18,6 @@
 
 ## 📝 To Do
 
-- **TASK-006**: `snapshot --compact` suppresses cursor-interactive — 🟠 High · #feature · Backend · Spec: §6
-
 ## 🚀 In Progress
 
 ## 👀 In Review
@@ -31,3 +29,4 @@
 - **TASK-003**: `eval --max-bytes` truncation ✓
 - **TASK-004**: `text --selector --length --skip` ✓
 - **TASK-005**: `upload` verb ✓
+- **TASK-006**: `snapshot --compact` suppresses cursor pass ✓
