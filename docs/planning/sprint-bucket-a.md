@@ -27,7 +27,7 @@ thin CLI wiring. Each is verifiable with one smoke assertion.
 4. [x] `text --selector <sel> --length <N> --skip <M>` (TOK-10).
    Scoped, paged page-text dumps. Replaces hand-rolled
    `document.body.innerText.substring(...)`.
-5. [ ] `upload <@ref|selector> <path>` (JNR-07). First-class file
+5. [x] `upload <@ref|selector> <path>` (JNR-07). First-class file
    upload verb wrapping Playwright's `locator.setInputFiles`. Used
    5x in the field session via a hand-written shim.
 6. [ ] `snapshot --compact` suppresses cursor-interactive pass
