@@ -115,6 +115,34 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('tabs --filter matches by URL regex', async () => {
+  // goto example.com first so we know a matching tab exists in the set.
+  await run(['goto', 'https://example.com']);
+  const r = await run(['tabs', '--filter', 'example\\.com', '--json']);
+  const tabs = parseJson<Array<{ url: string }>>(r.stdout);
+  assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one example.com tab');
+  for (const t of tabs) {
+    assert(/example\.com/i.test(t.url), `tab leaked past filter: ${t.url}`);
+  }
+});
+
+c('tabs --fields projects only requested keys', async () => {
+  const r = await run(['tabs', '--fields', 'id,url', '--json']);
+  const tabs = parseJson<Array<Record<string, unknown>>>(r.stdout);
+  assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
+  for (const t of tabs) {
+    const keys = Object.keys(t).sort();
+    assert(JSON.stringify(keys) === JSON.stringify(['id', 'url']),
+      `unexpected keys on projected tab: ${JSON.stringify(keys)}`);
+  }
+});
+
+c('tabs --filter with invalid regex fails cleanly', async () => {
+  const r = await run(['tabs', '--filter', '[unclosed'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'invalid regex should fail');
+  assert(/invalid regex/i.test(r.stderr + r.stdout), `expected 'invalid regex' message, got: ${r.stderr || r.stdout}`);
+});
+
 c('goto example.com lands on example.com', async () => {
   const r = await run(['goto', 'https://example.com']);
   assert(/example\.com/.test(r.stdout), `goto output: ${r.stdout}`);
