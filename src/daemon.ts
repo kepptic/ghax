@@ -121,6 +121,26 @@ async function pageTargetId(page: Page): Promise<string | null> {
   }
 }
 
+// Retry once past a navigation-in-flight. Playwright's `page.evaluate`
+// throws `Execution context was destroyed` / `Target closed` if the
+// active frame navigates mid-call; the pragmatic fix is to wait for
+// the next load state and retry once. Matches what a human would do
+// manually — `wait --load && eval …`.
+function isNavTransient(err: unknown): boolean {
+  const msg = String((err as { message?: string } | null)?.message ?? '');
+  return /Execution context was destroyed|Target closed|frame was detached|Navigation failed because/i.test(msg);
+}
+
+async function evalWithNavRetry(page: Page, js: string, maxWaitMs = 3000): Promise<unknown> {
+  try {
+    return await page.evaluate(js);
+  } catch (err) {
+    if (!isNavTransient(err)) throw err;
+    await page.waitForLoadState('load', { timeout: maxWaitMs }).catch(() => {});
+    return await page.evaluate(js);
+  }
+}
+
 async function activePage(ctx: Ctx): Promise<Page> {
   const pages = await allPages(ctx);
   if (pages.length === 0) throw new Error('No tabs open in attached browser.');
@@ -293,11 +313,95 @@ function resolveRef(ctx: Ctx, target: string, page: Page): Locator {
 
 // ─── Command handlers ──────────────────────────────────────────
 
+// Batch — execute N steps in a single daemon round-trip. Between steps
+// that reference `@e<n>` refs, re-snapshot automatically so the ref
+// map resolves against the *current* DOM. That's the core fix for
+// JNR-03: mid-click-sequence ARIA shifts (Material / React comboboxes
+// opening and reindexing) used to silently mis-resolve refs under
+// `ghax chain`. Auto-snapshot can be disabled with `--no-auto-snapshot`
+// for callers that want strict one-shot semantics.
+register('batch', async (ctx, args, opts) => {
+  const steps = Array.isArray(args[0]) ? (args[0] as unknown[]) : null;
+  if (!steps || steps.length === 0) {
+    throw new Error('Usage: batch \'[{"cmd":"click","args":["@e7"]}, …]\'');
+  }
+  const stopOnError = opts.stopOnError !== false;
+  const autoSnapshot = opts['auto-snapshot'] !== false && opts.autoSnapshot !== false;
+  const snapshotHandler = handlers.get('snapshot');
+  const results: Array<Record<string, unknown>> = [];
+
+  const usesRef = (step: { args?: unknown[]; opts?: Record<string, unknown> }) => {
+    const inArgs = Array.isArray(step.args)
+      ? step.args.some((v) => typeof v === 'string' && v.startsWith('@e'))
+      : false;
+    const inOpts = step.opts
+      ? Object.values(step.opts).some((v) => typeof v === 'string' && v.startsWith('@e'))
+      : false;
+    return inArgs || inOpts;
+  };
+
+  for (const raw of steps) {
+    if (!raw || typeof raw !== 'object') {
+      results.push({ cmd: '<invalid>', ok: false, error: 'step must be an object' });
+      if (stopOnError) break;
+      continue;
+    }
+    const step = raw as { cmd?: unknown; args?: unknown; opts?: unknown };
+    const cmd = typeof step.cmd === 'string' ? step.cmd : null;
+    if (!cmd) {
+      results.push({ cmd: '<missing>', ok: false, error: 'step missing cmd' });
+      if (stopOnError) break;
+      continue;
+    }
+    const stepArgs = Array.isArray(step.args) ? (step.args as unknown[]) : [];
+    const stepOpts = (step.opts && typeof step.opts === 'object') ? (step.opts as Record<string, unknown>) : {};
+    const handler = handlers.get(cmd);
+    if (!handler) {
+      results.push({ cmd, ok: false, error: `unknown cmd: ${cmd}` });
+      if (stopOnError) break;
+      continue;
+    }
+    // Refresh the ref map before any step that uses `@e<n>` — so the
+    // caller doesn't have to interleave manual snapshots.
+    if (autoSnapshot && snapshotHandler && usesRef({ args: stepArgs, opts: stepOpts })) {
+      try {
+        await snapshotHandler(ctx, [], { interactive: true });
+      } catch {
+        // A snapshot failure is informational — the step itself will
+        // surface the concrete "ref not found" error if it's still bad.
+      }
+    }
+    try {
+      const data = await handler(ctx, stepArgs, stepOpts);
+      results.push({ cmd, ok: true, data });
+    } catch (err) {
+      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err) });
+      if (stopOnError) break;
+    }
+  }
+  return results;
+});
+
 register('status', async (ctx) => {
   const pages = await allPages(ctx);
   const targets = await ctx.pool.list();
   const extIds = new Set<string>();
   for (const t of targets) if (t.extensionId) extIds.add(t.extensionId);
+  // Surface the active tab's id + title so `ghax status` can tell operators
+  // which tab they're about to drive — matters most in multi-agent sessions
+  // where `new-window` has parked the agent on a non-obvious tab.
+  let activeTabTitle = '';
+  let activeTabUrl = '';
+  if (ctx.activePageId) {
+    const entries = await Promise.all(
+      pages.map(async (p) => [await pageTargetId(p), p] as const),
+    );
+    const active = entries.find(([id]) => id === ctx.activePageId)?.[1];
+    if (active) {
+      activeTabTitle = await active.title().catch(() => '');
+      activeTabUrl = active.url();
+    }
+  }
   return {
     pid: process.pid,
     uptimeMs: Date.now() - ctx.startedAt,
@@ -306,6 +410,9 @@ register('status', async (ctx) => {
     tabCount: pages.length,
     targetCount: targets.length,
     extensionCount: extIds.size,
+    activeTabId: ctx.activePageId ?? null,
+    activeTabTitle,
+    activeTabUrl,
   };
 });
 
@@ -465,7 +572,10 @@ register('eval', async (ctx, args, opts) => {
   const js = String(args[0] ?? '');
   if (!js) throw new Error('Usage: eval <js>');
   const page = await activePage(ctx);
-  const result = await page.evaluate(js);
+  // Navigation in flight when eval lands will destroy the execution
+  // context mid-call. Wait for the next load state once and retry before
+  // giving up — matches what a human would do manually.
+  const result = await evalWithNavRetry(page, js);
   // --max-bytes caps the stringified result so an accidental
   // `document.body.innerText` on a heavy page can't blow out the
   // LLM operator's context window. Measured in UTF-8 bytes, not
@@ -572,7 +682,11 @@ register('text', async (ctx, _args, opts) => {
   if (selector) {
     text = await page.locator(selector).first().innerText();
   } else {
-    text = await page.evaluate(() => document.body.innerText);
+    // Same nav-in-flight retry as `eval` — heavy pages with still-running
+    // XHR-driven navigation will trip `Execution context was destroyed`
+    // the first time around; waiting for the next load event and
+    // retrying once rescues the operator from a spurious failure.
+    text = (await evalWithNavRetry(page, 'document.body.innerText')) as string;
   }
   if (skip > 0 || length !== null) {
     const end = length !== null ? skip + length : undefined;
@@ -679,6 +793,9 @@ register('snapshot', async (ctx, _args, opts) => {
     depth: opts.depth === undefined ? undefined : Number(opts.depth),
     selector: opts.selector as string | undefined,
     cursorInteractive: Boolean(opts.cursorInteractive),
+    // Default-on dialog scoping; callers opt out with --no-dialog-scope,
+    // which the arg parser surfaces as `no-dialog-scope: true`.
+    dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
   });
   ctx.refs = result.refs;
 
@@ -779,18 +896,39 @@ register('fill', async (ctx, args) => {
   if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
-  // React-safe path: set the value via the native setter and dispatch
-  // an 'input' event, so React's synthetic-event bookkeeping updates
-  // its internal state (plain page.fill() triggers the controlled-input
-  // "input value mismatch" bug on some code).
+  // Framework-safe path. React, Angular, and Material each intercept
+  // `value` assignment in a way plain `locator.fill()` doesn't reach:
+  //   - React:    tracks the value on a hidden internal property; the
+  //               native setter bypasses React's wrapper so a subsequent
+  //               'input' event refreshes its synthetic-event bookkeeping.
+  //   - Angular:  binds via `(input)`/`(change)` but most validators only
+  //               run on 'blur' — we dispatch one at the end.
+  //   - Material: often wraps the real <input> inside a host component
+  //               with `contenteditable` spans; falls through to the
+  //               textContent path when there's no native value setter.
   await loc.evaluate((el, v) => {
-    const e = el as HTMLInputElement | HTMLTextAreaElement;
-    const proto = Object.getPrototypeOf(e);
+    const e = el as HTMLElement;
+    // contenteditable path — Material's mat-chip / rich editors land here.
+    if (e.getAttribute('contenteditable') === 'true') {
+      e.focus();
+      e.textContent = v;
+      e.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: v }));
+      e.dispatchEvent(new Event('change', { bubbles: true }));
+      e.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+      return;
+    }
+    const input = e as HTMLInputElement | HTMLTextAreaElement;
+    const proto = Object.getPrototypeOf(input);
     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    if (setter) setter.call(e, v);
-    else (e as any).value = v;
-    e.dispatchEvent(new Event('input', { bubbles: true }));
-    e.dispatchEvent(new Event('change', { bubbles: true }));
+    input.focus();
+    if (setter) setter.call(input, v);
+    else (input as unknown as { value: string }).value = v;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    // Blur triggers Angular's `FormControl.markAsTouched` and most
+    // pristine/dirty-based validators. Most sites no-op if the focus
+    // never moved, so dispatching an explicit blur is safe.
+    input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
   }, value);
   return { ok: true };
 });

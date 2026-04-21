@@ -29,6 +29,14 @@ export interface SnapshotOptions {
   depth?: number;
   selector?: string;
   cursorInteractive?: boolean;
+  /**
+   * When true (default) and no explicit --selector was passed, auto-scope
+   * the snapshot to an open modal dialog if one is visible. Outer app is
+   * usually `aria-hidden="true"` while a modal is up, which means walking
+   * from `body` yields an empty-ish tree and every captured ref lives on
+   * a hidden ancestor. Pass `--no-dialog-scope` to force body.
+   */
+  dialogScope?: boolean;
 }
 
 export interface SnapshotResult {
@@ -68,10 +76,23 @@ export async function snapshot(
   target: Page | Frame,
   opts: SnapshotOptions = {},
 ): Promise<SnapshotResult> {
-  const rootLocator = opts.selector ? target.locator(opts.selector) : target.locator('body');
+  let rootLocator = opts.selector ? target.locator(opts.selector) : target.locator('body');
   if (opts.selector) {
     const count = await rootLocator.count();
     if (count === 0) throw new Error(`Selector not found: ${opts.selector}`);
+  } else if (opts.dialogScope !== false) {
+    // Dialog-aware walker — if a modal is open, walk from it instead of
+    // from `body`. Covers `[role=dialog]`, `[role=alertdialog]`, the
+    // native `<dialog open>`, and ad-hoc `[aria-modal=true]` scrims
+    // (Radix, Headless UI, Material). `.last()` picks the top-most
+    // modal if a stack is open. The `:visible` pseudo filters out
+    // detached / display:none dialogs that some frameworks leave in
+    // the DOM between openings.
+    const modalSel = '[role=dialog]:visible, [role=alertdialog]:visible, dialog[open]:visible, [aria-modal="true"]:visible';
+    const modal = target.locator(modalSel).last();
+    if ((await modal.count()) > 0) {
+      rootLocator = modal;
+    }
   }
 
   const ariaText = await rootLocator.ariaSnapshot();

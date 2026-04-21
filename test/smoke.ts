@@ -90,8 +90,11 @@ const c = (name: string, fn: () => Promise<void>) => checks.push({ name, fn });
 
 c('attach is idempotent (first call attaches)', async () => {
   const r = await run(['attach']);
+  // POSIX convention: fresh attach is silent on success (since TOK-07).
+  // The idempotent re-attach still prints `already attached` because
+  // that's informational — you asked to attach, we didn't.
   assert(
-    /attached/.test(r.stdout) || /already attached/.test(r.stdout),
+    r.stdout.trim() === '' || /attached/.test(r.stdout) || /already attached/.test(r.stdout),
     `unexpected attach output: ${r.stdout}`,
   );
 });
@@ -104,7 +107,17 @@ c('attach is idempotent (second call reuses)', async () => {
 c('status --json has expected shape', async () => {
   const r = await run(['status', '--json']);
   const s = parseJson<Record<string, unknown>>(r.stdout);
-  for (const key of ['pid', 'port', 'browserKind', 'tabCount', 'targetCount', 'extensionCount']) {
+  for (const key of [
+    'pid',
+    'port',
+    'browserKind',
+    'tabCount',
+    'targetCount',
+    'extensionCount',
+    'activeTabId',
+    'activeTabTitle',
+    'activeTabUrl',
+  ]) {
     assert(key in s, `status missing ${key}`);
   }
 });
@@ -333,6 +346,21 @@ c('chain executes multiple steps', async () => {
   const results = parseJson<Array<{ cmd: string; ok: boolean }>>(r.stdout);
   assert(results.length === 2, `expected 2 results, got ${results.length}`);
   assert(results.every((s) => s.ok), `chain had failures: ${JSON.stringify(results)}`);
+});
+
+c('batch runs a step sequence in one round-trip', async () => {
+  const steps = JSON.stringify([
+    { cmd: 'goto', args: ['https://example.com'] },
+    { cmd: 'wait', args: ['200'] },
+    { cmd: 'text' },
+  ]);
+  const r = await run(['batch', steps]);
+  const results = parseJson<Array<{ cmd: string; ok: boolean; data?: unknown }>>(r.stdout);
+  assert(results.length === 3, `expected 3 results, got ${results.length}`);
+  assert(results.every((s) => s.ok), `batch had failures: ${JSON.stringify(results)}`);
+  const textStep = results[2];
+  assert(typeof textStep.data === 'string' && (textStep.data as string).toLowerCase().includes('example'),
+    `expected example.com text, got ${JSON.stringify(textStep.data).slice(0, 100)}`);
 });
 
 c('record + replay round-trips', async () => {
