@@ -190,25 +190,31 @@ attach [--port N] [--browser edge|chrome|chromium|brave|arc] [--launch]
 status [--json]
 detach
 restart
-tabs
+tabs [--filter <regex>] [--fields <csv>]
+                                # --filter: case-insensitive regex on url+title
+                                # --fields: id,title,url,active — project only these
 tab <id> [--quiet]              # --quiet = don't bringToFront (agent mode)
 find <url-substring>            # list matching tabs (pipe into `tab`)
 new-window [url]                # new background window, same profile
 goto <url>
 back | forward | reload
-eval <js>
+eval <js> [--max-bytes N]       # --max-bytes caps result size to N utf-8 bytes
 try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
-text
+text [--selector <sel>] [--length N] [--skip M]
+                                # scoped, paged page-text dumps
 html [<selector>]
-screenshot [<@ref|selector>] [--path p] [--fullPage]
+screenshot [<@ref|selector>] [--path p] [--full-page]
 snapshot [-i] [-c] [-d N] [-s <sel>] [-C] [-a] [-o <path>]
+                                # --compact (-c) also suppresses cursor-interactive
+                                # when combined with -i; use -C to force it on
 click <@ref|selector>
 fill <@ref|selector> <value>
+upload <@ref|selector> <path>[,<path>…]     # wraps setInputFiles
 press <key>
 type <text>
 wait <selector|ms|--networkidle|--load>
 viewport <WxH>
-responsive [prefix] [--fullPage]
+responsive [prefix] [--full-page]
 diff <url1> <url2>
 is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
 xpath <expression> [--limit N]    # list matching elements with text + box

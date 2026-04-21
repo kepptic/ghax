@@ -25,6 +25,28 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   RPC just to discard them locally. `console` also accepts `errors:
   true` via RPC opts so the daemon drops non-error levels before
   serialising; the Rust CLI uses this on the hot path.
+- **Bucket A payload-reduction sprint** — six flags and one new verb
+  to cut context cost for LLM operators driving ghax (sourced from
+  the 2026-04-20 jnremache field report):
+  - `screenshot --full-page` — kebab-case alias for the v0.1
+    `--fullPage`, matching the rest of the CLI convention. Both
+    forms accepted.
+  - `tabs --filter <regex> --fields <csv>` — server-side regex
+    filter (case-insensitive, matched against url + title) and
+    field projection (id, title, url, active). Cuts ~200 bytes per
+    google-product tab.
+  - `eval --max-bytes <N>` — caps the stringified eval result at
+    N utf-8 bytes. On trip, returns `{value, truncated: true,
+    originalBytes}`; when under cap the shape is unchanged.
+  - `text --selector <sel> --length <N> --skip <M>` — scoped,
+    paged page-text dumps. Replaces hand-rolled
+    `document.body.innerText.substring(...)`.
+  - `upload <@ref|selector> <path>[,<path>…]` — first-class file
+    upload verb wrapping Playwright's `locator.setInputFiles`.
+    Comma-separated paths trigger multi-file mode.
+  - `snapshot --compact` now suppresses the cursor-interactive
+    pass when paired with `-i`. Explicit `-C` still forces it on.
+    Large SPAs shrink measurably in compact mode.
 
 ### Fixed
 - **Invariant enforcement**: `ctx.refs` is now cleared when the active
