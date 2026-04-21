@@ -20,7 +20,7 @@ thin CLI wiring. Each is verifiable with one smoke assertion.
 2. [x] `tabs --filter <regex> --fields <csv>` (TOK-04). Server-side
    regex filter on URL + title, field projection on the returned
    objects. Cuts ~200 bytes per google-product tab when filtering.
-3. [ ] `eval --max-bytes <N>` (TOK-02). Server-side truncation on
+3. [x] `eval --max-bytes <N>` (TOK-02). Server-side truncation on
    the stringified result. Protects LLM operators from accidental
    context blow-outs. Returns `{value, truncated: true, originalBytes}`
    when it trips.
