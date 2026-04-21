@@ -153,6 +153,14 @@ c('screenshot writes a PNG', async () => {
   fs.unlinkSync(outPath);
 });
 
+c('screenshot --full-page kebab alias writes a PNG', async () => {
+  const outPath = `/tmp/ghax-smoke-fp-${Date.now()}.png`;
+  await run(['screenshot', '--path', outPath, '--full-page']);
+  assert(fs.existsSync(outPath), 'full-page screenshot missing');
+  assert(fs.statSync(outPath).size > 500, 'full-page screenshot suspiciously small');
+  fs.unlinkSync(outPath);
+});
+
 c('eval runs JS in the active tab', async () => {
   const r = await run(['eval', '1 + 2']);
   assert(r.stdout.trim() === '3', `eval 1+2 → ${r.stdout.trim()}`);

@@ -530,10 +530,14 @@ register('screenshot', async (ctx, args, opts) => {
   const page = await activePage(ctx);
   const outPath = (opts.path as string) || `/tmp/ghax-shot-${Date.now()}.png`;
   const target = args[0] ? String(args[0]) : null;
+  // Accept both `--fullPage` (v0.1 camelCase) and `--full-page` (kebab,
+  // matches every other CLI flag). Kebab is the preferred form going
+  // forward; camelCase stays for back-compat with live scripts.
+  const fullPage = Boolean(opts.fullPage || opts['full-page']);
   if (target) {
     await resolveRef(ctx, target, page).screenshot({ path: outPath });
   } else {
-    await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage) });
+    await page.screenshot({ path: outPath, fullPage });
   }
   return { path: outPath };
 });
