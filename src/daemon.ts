@@ -309,14 +309,39 @@ register('status', async (ctx) => {
   };
 });
 
-register('tabs', async (ctx) => {
+register('tabs', async (ctx, _args, opts) => {
   const pages = await allPages(ctx);
-  return Promise.all(
+  const filterStr = (opts.filter as string | undefined) ?? null;
+  let filterRe: RegExp | null = null;
+  if (filterStr) {
+    try {
+      filterRe = new RegExp(filterStr, 'i');
+    } catch (err: any) {
+      throw new Error(`tabs --filter: invalid regex: ${err?.message || filterStr}`);
+    }
+  }
+  // --fields accepts a csv list of keys to keep. Valid keys: id, title,
+  // url, active. Invalid keys are ignored silently so a typo can't kill
+  // the whole command mid-session. Omitted → return every field.
+  const fieldsArg = (opts.fields as string | undefined) ?? null;
+  const fields: Set<string> | null = fieldsArg
+    ? new Set(fieldsArg.split(',').map((s) => s.trim()).filter(Boolean))
+    : null;
+  const all = await Promise.all(
     pages.map(async (p) => {
       const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
       return { id, title, url: p.url(), active: id === ctx.activePageId };
     }),
   );
+  const matched = filterRe
+    ? all.filter((t) => filterRe!.test(t.url) || filterRe!.test(t.title))
+    : all;
+  if (!fields) return matched;
+  return matched.map((t) => {
+    const out: Record<string, unknown> = {};
+    for (const k of fields) if (k in t) out[k] = (t as any)[k];
+    return out;
+  });
 });
 
 register('tab', async (ctx, args, opts) => {
@@ -436,11 +461,29 @@ register('reload', async (ctx) => {
   return { url: page.url() };
 });
 
-register('eval', async (ctx, args) => {
+register('eval', async (ctx, args, opts) => {
   const js = String(args[0] ?? '');
   if (!js) throw new Error('Usage: eval <js>');
   const page = await activePage(ctx);
   const result = await page.evaluate(js);
+  // --max-bytes caps the stringified result so an accidental
+  // `document.body.innerText` on a heavy page can't blow out the
+  // LLM operator's context window. Measured in UTF-8 bytes, not
+  // characters. When it trips we wrap the response so the caller
+  // can see what happened; when it doesn't trip we return the
+  // value unchanged (zero shape change for scripts that already
+  // expect the raw value).
+  const maxBytesRaw = opts['max-bytes'] ?? opts.maxBytes;
+  const maxBytes = maxBytesRaw !== undefined ? Number(maxBytesRaw) : null;
+  if (maxBytes !== null && Number.isFinite(maxBytes) && maxBytes > 0) {
+    const serialized = typeof result === 'string' ? result : JSON.stringify(result) ?? '';
+    const bytes = Buffer.byteLength(serialized, 'utf8');
+    if (bytes > maxBytes) {
+      // Slice in bytes — Buffer handles multi-byte UTF-8 correctly.
+      const truncated = Buffer.from(serialized, 'utf8').subarray(0, maxBytes).toString('utf8');
+      return { value: truncated, truncated: true, originalBytes: bytes };
+    }
+  }
   return result;
 });
 
@@ -513,9 +556,28 @@ register('try', async (ctx, args, opts) => {
   return { value, ...(shot ? { shot } : {}) };
 });
 
-register('text', async (ctx) => {
+register('text', async (ctx, _args, opts) => {
   const page = await activePage(ctx);
-  const text = await page.evaluate(() => document.body.innerText);
+  const selector = (opts.selector as string | undefined) ?? null;
+  // --skip/--length paginate the returned string. The daemon still
+  // pulls full innerText — the win is on the wire, which is where
+  // the operator's context budget lives. Pagination uses code-unit
+  // offsets to match JavaScript's substring semantics; if/when a
+  // field report complains about emoji-splitting we'll switch to
+  // grapheme segmentation.
+  const skip = opts.skip !== undefined ? Math.max(0, Number(opts.skip)) : 0;
+  const lengthRaw = opts.length !== undefined ? Number(opts.length) : null;
+  const length = lengthRaw !== null && Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
+  let text: string;
+  if (selector) {
+    text = await page.locator(selector).first().innerText();
+  } else {
+    text = await page.evaluate(() => document.body.innerText);
+  }
+  if (skip > 0 || length !== null) {
+    const end = length !== null ? skip + length : undefined;
+    text = text.slice(skip, end);
+  }
   return text;
 });
 
@@ -530,10 +592,14 @@ register('screenshot', async (ctx, args, opts) => {
   const page = await activePage(ctx);
   const outPath = (opts.path as string) || `/tmp/ghax-shot-${Date.now()}.png`;
   const target = args[0] ? String(args[0]) : null;
+  // Accept both `--fullPage` (v0.1 camelCase) and `--full-page` (kebab,
+  // matches every other CLI flag). Kebab is the preferred form going
+  // forward; camelCase stays for back-compat with live scripts.
+  const fullPage = Boolean(opts.fullPage || opts['full-page']);
   if (target) {
     await resolveRef(ctx, target, page).screenshot({ path: outPath });
   } else {
-    await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage) });
+    await page.screenshot({ path: outPath, fullPage });
   }
   return { path: outPath };
 });
@@ -735,6 +801,23 @@ register('press', async (ctx, args) => {
   const page = await activePage(ctx);
   await page.keyboard.press(key);
   return { ok: true };
+});
+
+// ─── upload — first-class file upload via setInputFiles ────────
+//
+// Wraps Playwright's locator.setInputFiles so operators don't have to
+// hand-roll the DOM.setFileInputFiles CDP call every time. Accepts a
+// single path or a comma-separated list for multi-file inputs.
+// Paths are resolved relative to the daemon's cwd (captured at attach).
+register('upload', async (ctx, args) => {
+  const target = String(args[0] ?? '');
+  const pathArg = String(args[1] ?? '');
+  if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
+  const page = await activePage(ctx);
+  const loc = resolveRef(ctx, target, page);
+  const paths = pathArg.split(',').map((p) => p.trim()).filter(Boolean);
+  await loc.setInputFiles(paths.length === 1 ? paths[0] : paths);
+  return { ok: true, count: paths.length };
 });
 
 register('type', async (ctx, args) => {
@@ -999,7 +1082,7 @@ register('responsive', async (ctx, args, opts) => {
       // Let layout settle — some CSS grid + responsive components need a paint.
       await page.waitForTimeout(200);
       const outPath = `${prefix}-${preset.name}.png`;
-      await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage) });
+      await page.screenshot({ path: outPath, fullPage: Boolean(opts.fullPage || opts['full-page']) });
       results.push({ ...preset, path: outPath });
     }
   } finally {

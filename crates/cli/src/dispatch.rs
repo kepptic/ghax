@@ -93,6 +93,15 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, "fill", parsed)
         }
 
+        "upload" => {
+            let parsed = args::parse(rest);
+            if parsed.positional.len() < 2 {
+                eprintln!("Usage: ghax upload <@ref|selector> <path>[,<path>…]");
+                return Ok(EXIT_USAGE);
+            }
+            simple(cfg, "upload", parsed)
+        }
+
         "is" => {
             let parsed = args::parse(rest);
             let port = state::require_daemon(cfg)?;

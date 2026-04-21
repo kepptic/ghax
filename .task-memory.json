@@ -1,0 +1,6 @@
+{
+  "planning_dir": "docs/planning",
+  "task_prefix": "TASK",
+  "min_engagements_to_block": 3,
+  "session_state_max_age_hours": 24
+}
