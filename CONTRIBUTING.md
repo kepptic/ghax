@@ -60,6 +60,25 @@ npm run typecheck              # tsc --noEmit
 During dev, editing `src/*.ts` requires `npm run build` again — the
 daemon is a bundle, not a live file.
 
+## Local checks (pre-commit)
+
+`scripts/check.sh` runs the same verifications GitHub Actions runs —
+TypeScript `tsc --noEmit`, `cargo check`, and the daemon bundle build —
+and completes in ~3s on an incremental checkout. **Always run it (or
+let the pre-commit hook run it) before pushing.**
+
+```bash
+bash scripts/check.sh       # one-shot
+SKIP_CHECK=1 git commit     # bypass the hook (discouraged)
+```
+
+The hook lives at `.githooks/pre-commit` (tracked in the repo). After
+cloning, wire it up once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Cutting a release
 
 The release flow is fully scripted and won't install a binary locally

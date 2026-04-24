@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run the same checks GitHub Actions runs, locally.
+# Bypass (not recommended): SKIP_CHECK=1 git commit
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+exec bash "$ROOT/scripts/check.sh"
