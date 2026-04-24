@@ -9,16 +9,24 @@ moving parts so you can land one without friction.
 ```
 ghax/
   bin/ghax                  Shell shim — launches the Rust binary from target/release/ghax
+  crates/cli/               Rust CLI — argv parsing, dispatch, daemon RPC. All user-facing verbs.
+    src/main.rs             Entry point + verb dispatch table
+    src/dispatch.rs         Per-verb routing to daemon RPC or local orchestration
+    src/attach.rs           Daemon spawn, CDP probe, port scan, bundle resolution
+    src/qa.rs               QA orchestrator (parallel URL crawl, screenshots, report)
+    src/canary.rs           Post-deploy canary monitor
+    src/ship.rs             Ship workflow (bump, changelog, commit, push, PR)
+    src/rpc.rs              HTTP+JSON client with transient-error retry
+    src/state.rs            State file resolution + daemon liveness
+    src/shell.rs            Interactive REPL (ghax shell)
   src/
-    cli.ts                  Argv → daemon RPC. Verb dispatcher + attach/detach specials.
     daemon.ts               Node HTTP daemon. Playwright connectOverCDP + raw CDP pool.
-    browser-launch.ts       Browser detect + CDP probe + scan/findFreePort + --launch/--headless.
     cdp-client.ts           /json/list target discovery + per-target WebSocket pool.
     config.ts               State file resolution (git root → .ghax/ghax.json).
     buffers.ts              CircularBuffer<T>, ConsoleEntry, NetworkEntry, parseStack().
-    snapshot.ts             aria tree → @e<n> refs, cursor-interactive + shadow-DOM pass.
+    snapshot.ts             aria tree → @e<n> refs, cursor-interactive + shadow-DOM + dialog-scope.
   test/
-    smoke.ts                Live-browser harness (70 checks, ~30s).
+    smoke.ts                Live-browser harness (95 checks, ~30s).
     cross-browser.ts        Iterate every detected Chromium browser; run smoke on each.
     benchmark.ts            Headless CLI benchmark vs gstack-browse, playwright-cli, agent-browser.
     hot-reload-smoke.ts     Scripted MV3 hot-reload probe against test/fixtures/test-extension/.
@@ -84,9 +92,17 @@ Both scripts share the same install path. Idempotent — safe to re-run.
 ## Adding a new command
 
 1. Register a handler in `daemon.ts` via `register('name', async (ctx, args, opts) => {...})`.
-2. Add a CLI case in `src/cli.ts` — usually one line with `makeSimple('name')`.
-3. Update the HELP constant + `README.md` + `design/plan/03-commands.md`.
-4. If it should be recorded by `ghax record`, do nothing (it's recorded
+2. Wire the Rust dispatch in `crates/cli/src/dispatch.rs`. For trivial
+   verbs (parse args → POST /rpc → print), add the verb name to one
+   of the existing `match` arms — `simple()` does the rest. For verbs
+   with CLI-side logic (custom print, multi-RPC, shell-out), add a
+   new module under `crates/cli/src/<verb>.rs` exposing
+   `pub fn cmd_<verb>(parsed: &Parsed) -> Result<i32>`, then wire it
+   in `dispatch.rs::dispatch_inner` and declare `mod <verb>;` in
+   `main.rs`. See `qa.rs`, `ship.rs`, `attach.rs` for templates.
+3. Update `crates/cli/src/help.rs` + `README.md` + `design/plan/03-commands.md`.
+4. Add a smoke check in `test/smoke.ts`.
+5. If it should be recorded by `ghax record`, do nothing (it's recorded
    by default). If it's meta / read-only, add the name to `NEVER_RECORD`
    in `daemon.ts`.
 5. If it has a custom exit code, throw `new DaemonError(msg, code)` and
@@ -126,7 +142,7 @@ npm run test:perf           # perf budget test — FAILS if P50 regresses past t
 ```
 
 The smoke test requires a running Chromium-family browser on
-`--remote-debugging-port=9222`. It attaches, runs **70 non-destructive
+`--remote-debugging-port=9222`. It attaches, runs **95 non-destructive
 commands** (navigation, snapshots, interaction, extensions, orchestrated
 verbs, `try`, `perf`, console dedup, network status/HAR, new-window
 workflow, `shell` mode tokenising), and detaches. Takes ~30s end-to-end.
