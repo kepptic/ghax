@@ -162,56 +162,93 @@ The quickstart covers option 1. Options 2 and 3 are one flag each.
 
 ## Use with AI coding agents
 
-Ghax was built for AI-driven browser work. Every capability has a CLI
-so any agent that can run shell commands can use it.
+Ghax is a plain CLI. Any agent that can run shell commands can drive
+a browser through it. Setup below is per-agent; the capabilities are
+the same everywhere.
 
 ### Claude Code
 
-The repo ships two skills under `.claude/skills/`:
+The repo ships two skills under [`.claude/skills/`](./.claude/skills/):
 
-- [`ghax`](./.claude/skills/ghax.md) — top-level router; Claude picks
-  it up when you say "attach to my browser", "test the extension",
-  "snapshot the dashboard", etc.
-- [`ghax-browse`](./.claude/skills/ghax-browse.md) — the flagship
-  skill; full workflow examples for QA, extension hot-reload, SaaS
-  dashboard automation, snapshot-interact-assert loops.
+- [`ghax.md`](./.claude/skills/ghax.md) — top-level router. Claude
+  picks it up when you say "attach to my browser", "test the
+  extension", "snapshot the dashboard", and routes to the right
+  sub-skill.
+- [`ghax-browse.md`](./.claude/skills/ghax-browse.md) — the flagship
+  skill with full workflow examples: QA runs, extension hot-reload,
+  SaaS-dashboard automation, snapshot-interact-assert loops.
 
-Both skills auto-register once the repo is on disk. If you run Claude
-Code globally, add ghax to your skill index (see your gstack
-`skill-registry` setup) and you're done.
+**Install the skills** (one of three ways):
 
-### Codex / Cursor / any shell-driving agent
+```bash
+# 1. User-global — available in every Claude Code session on this machine
+mkdir -p ~/.claude/skills
+cp .claude/skills/ghax.md .claude/skills/ghax-browse.md ~/.claude/skills/
 
-Ghax is a plain CLI. Give your agent three facts:
+# 2. Project-local — available only in this repo
+#    (They already live here. Claude Code picks up .claude/skills/*.md
+#    automatically when it opens this directory.)
 
-1. How to attach:
+# 3. Symlink, so future skill updates flow in without copying
+ln -s "$PWD/.claude/skills/ghax.md"        ~/.claude/skills/ghax.md
+ln -s "$PWD/.claude/skills/ghax-browse.md" ~/.claude/skills/ghax-browse.md
+```
 
-   ```bash
-   ghax attach           # scans :9222-9230, picks what's running
-   ghax attach --launch  # or spawn a scratch browser
-   ```
+**Verify:**
 
-2. The snapshot-then-interact pattern:
+```bash
+claude /skills            # should list `ghax` and `ghax-browse`
+```
 
-   ```bash
-   ghax snapshot -i --json     # returns the a11y tree + @e refs
-   ghax click @e3              # refs survive until next snapshot
-   ghax fill @e5 "hello"
-   ```
+Then just talk to Claude naturally: *"attach to my edge and snapshot
+the settings page"*, *"hot-reload the extension I just built"*, *"QA
+my staging deploy and screenshot any console errors"*. The skills
+describe the right ghax commands for each intent.
 
-3. How to batch for one round-trip:
+### Codex (OpenAI) / Cursor / Aider / Continue / any shell-driving agent
 
-   ```bash
-   ghax batch '[
-     {"cmd":"goto","args":["https://app.example.com"]},
-     {"cmd":"snapshot","opts":{"interactive":true}},
-     {"cmd":"click","args":["@e7"]},
-     {"cmd":"fill","args":["@e9","new-value"]}
-   ]'
-   ```
+These agents don't have a plug-in skill system like Claude Code. The
+clean integration is a project-level `AGENTS.md` (or equivalent
+memory file — Cursor reads `.cursorrules`, Aider reads
+`CONVENTIONS.md`, etc.) that tells the agent when to use ghax.
 
-Add `--json` to any command for machine-readable output. That's the
-whole integration.
+**Drop this into your project's `AGENTS.md` / `.cursorrules`:**
+
+```markdown
+## Browser automation: use ghax
+
+When a task requires a real browser (QA, dashboard automation,
+extension testing, anything behind SSO), use the `ghax` CLI instead
+of asking the user to paste screenshots or step through clicks.
+
+Three patterns cover 95% of use cases:
+
+1. Attach:
+     ghax attach            # scans :9222-9230 for a running browser
+     ghax attach --launch   # or spawn a scratch Chromium
+
+2. Snapshot-then-interact (refs survive until next snapshot):
+     ghax snapshot -i --json
+     ghax click @e3
+     ghax fill @e5 "hello"
+
+3. One-round-trip batch (auto re-snapshots between ref-using steps):
+     ghax batch '[{"cmd":"click","args":["@e7"]}, …]'
+
+Add `--json` to any command for machine-readable output.
+Full command surface: run `ghax --help`.
+```
+
+That's the integration. The agent reads the memory file at session
+start, knows ghax exists, and reaches for it when appropriate.
+
+### No-memory / raw-shell agents
+
+If you're scripting against an agent with no memory file
+(one-off API calls, custom harnesses), pass the same three-pattern
+brief as the system prompt. Ghax exits with standard codes (`0` ok,
+`2` not attached, `4` CDP error) and every verb takes `--json` — it
+behaves like any well-formed Unix CLI under an agent.
 
 ### Multi-agent on one browser
 
