@@ -116,6 +116,22 @@ You pick. Three modes, one flag each.
 
 ---
 
+## Browser compatibility
+
+Works on every Chromium-family browser: Edge, Chrome, Chromium, Brave, Arc. Firefox and Safari are out of scope — CDP-only.
+
+**Edge is the recommended daily driver.** It honors `--remote-debugging-port` on its default profile with no extra flags, so the quickstart above works verbatim.
+
+**Chrome has two sharp edges you'll hit if you don't know about them:**
+
+1. **Chrome 113+ silently ignores `--remote-debugging-port` on the default profile.** Launch Chrome without `--user-data-dir` and `ghax attach` will fail to find `/json/version`. Fix: always pass an explicit profile path to the Chrome launch command (the quickstart above already shows this). Edge has no such restriction.
+
+2. **Chrome updates more aggressively than Edge**, so CDP protocol changes, extension policy tweaks, and new anti-automation heuristics land there first. If a flow that worked yesterday breaks today, try the same thing on Edge — it's usually a week or two behind on the same change.
+
+**Both Chrome and Edge** set `navigator.webdriver = true` when launched with `--remote-debugging-port`, which a few sensitive Google services use as a bot signal. Mitigate with `--disable-blink-features=AutomationControlled` on the browser launch. Full notes on quirks and workarounds: [CONTRIBUTING.md → Known browser quirks](./CONTRIBUTING.md#known-browser-quirks).
+
+---
+
 ## What it does
 
 - **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role and name, not fragile CSS selectors. Walks open shadow roots for custom-element apps (Lit, Shoelace, web components) and emits chain selectors (`host >> inner`) that descend into shadow trees.
@@ -128,6 +144,27 @@ You pick. Three modes, one flag each.
 - **Framework-safe `fill`.** Native-setter + `input` for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors.
 - **Batch execution.** `ghax batch '[{"cmd":"click","args":["@e7"]}, …]'` ships a whole plan in one round-trip and auto-re-snapshots between steps that use refs, so a mid-plan combobox reshuffle doesn't break the rest of your sequence.
 - **Background-window workflow.** `new-window`, `find`, `tab --quiet` give an agent its own window in your browser without stealing focus.
+
+---
+
+## Performance
+
+Ghax is the fastest CLI in its class because it doesn't launch a browser — it connects to one you already have running. Zero per-command launch tax.
+
+Cold-start workflow (launch → goto → text → eval → screenshot → snapshot → close) on `example.com`, Apple Silicon:
+
+| Tool | Cold start | Warm steady-state |
+|------|-----------:|------------------:|
+| **ghax** | **1,560 ms** | **49 ms/cmd** |
+| gstack-browse | 6,697 ms | 58 ms/cmd |
+| agent-browser | 3,482 ms | 344 ms/cmd |
+| playwright-cli | 5,126 ms | 680 ms/cmd |
+
+On real-world content (Wikipedia `JavaScript` article, ~250 KB), the warm-loop gap widens further: ghax 117 ms/cmd vs playwright-cli 778 ms/cmd — 6.6× faster per command. Text extraction is 9× faster (ghax 154 ms vs playwright-cli 1,404 ms) because we hit the DOM that's already parsed instead of launching a browser just to query it.
+
+The binary itself: **~3 MB** stripped on Apple Silicon, **~20 ms** cold start for single-command invocations. The daemon bundle is **~80 KB** of JavaScript.
+
+Full methodology, per-operation breakdowns, and reproduction steps: [docs/BENCHMARK.md](./docs/BENCHMARK.md).
 
 ---
 
