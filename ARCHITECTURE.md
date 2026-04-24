@@ -166,6 +166,20 @@ resolve against the wrong DOM. If the DOM changed and you run
 `click @e3`, Playwright fails with a clear "no element" error — fix by
 re-snapshotting.
 
+`ghax batch` skips that re-snapshotting ceremony for you: when a step
+inside a batch plan references an `@e<n>` ref, the daemon auto-runs a
+fresh snapshot first and resolves the ref against the current DOM.
+That's the main reason batch exists — on framework-heavy forms where
+an earlier step (like opening a combobox) reshuffles the ARIA tree,
+the ref lookup inside the same batch still lands on the intended
+element. Opt out with `--no-auto-snapshot`.
+
+`ghax snapshot` is also **dialog-aware**: when a modal is open (by
+`[role=dialog]`, `[role=alertdialog]`, `<dialog open>`, or
+`[aria-modal=true]`), the walker treats the top-most visible modal
+as the new root instead of inheriting `aria-hidden="true"` from the
+outer app. `--no-dialog-scope` falls back to body-rooted.
+
 Shadow DOM: the cursor-interactive pass walks open shadow roots and
 emits Playwright chain selectors (`host >> inner`). This is the only
 form of selector Playwright accepts for descending into shadow trees

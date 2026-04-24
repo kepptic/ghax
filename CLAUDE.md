@@ -138,6 +138,25 @@ and type commands at the prompt. `exit`/`quit`/Ctrl-D to leave. Blank
 lines and `#` lines are ignored. Quoting works like a real shell:
 `try --css 'body { color: red }'` passes the whole CSS intact.
 
+### Run a plan in one round-trip (stable refs across the sequence)
+
+```bash
+ghax batch '[
+  {"cmd":"goto","args":["https://app.example.com/settings"]},
+  {"cmd":"snapshot","opts":{"interactive":true}},
+  {"cmd":"click","args":["@e7"]},
+  {"cmd":"wait","args":["200"]},
+  {"cmd":"fill","args":["@e9","new-value"]},
+  {"cmd":"click","args":["@e11"]}
+]'
+```
+
+Unlike `chain` (reads stdin, N round-trips), `batch` ships the whole
+plan in one RPC. Between steps that reference `@e<n>` refs, the
+daemon auto-re-snapshots so opening a combobox mid-plan doesn't
+reindex refs out from under you. Pass `--no-auto-snapshot` for
+strict one-shot semantics.
+
 ### Share the browser with a user who's actively working
 
 ```bash
@@ -172,7 +191,7 @@ Every change must pass:
 cargo build --release            # compile Rust CLI (crates/cli/)
 npm run typecheck                # tsc --noEmit (daemon TS + tests)
 npm run build                    # bundle daemon → dist/ghax-daemon.mjs (esbuild)
-npm run test:smoke               # 70-check smoke suite against a live Edge session
+npm run test:smoke               # 95-check smoke suite against a live Edge session
 ```
 
 For bigger changes also run:
@@ -212,7 +231,7 @@ design discussion:
   another machine" case.
 - **Skill acceptance eval harness** — scripted Claude API calls
   against the skills with tool-call assertions. Deferred indefinitely
-  because the 70-check E2E smoke catches the same regressions at zero
+  because the 95-check E2E smoke catches the same regressions at zero
   API cost.
 - ~~Source-map resolution for stack frames.~~ Shipped — opt-in via
   `ghax console --source-maps`.
