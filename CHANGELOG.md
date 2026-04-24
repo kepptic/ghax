@@ -29,8 +29,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `snapshot --compact` now suppresses the cursor-interactive
     pass when paired with `-i`. Explicit `-C` still forces it on.
     Large SPAs shrink measurably in compact mode.
-- **Bucket B — architectural fixes** (sourced from the 2026-04-20
-  field report):
+- **Bucket B — architectural fixes** (sourced from a field report):
   - `ghax batch '<json-array>'` — one-round-trip sequence executor
     (TOK-09). Unlike `chain` (stdin, N round-trips), `batch` parses
     the inline JSON client-side, ships the whole plan in a single
@@ -62,8 +61,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `ghax attach` will re-pair with it; the pid-mismatch branch
     spells out `ghax detach && ghax attach` as the fix.
 - **Bucket C papercut bundle** — five quality-of-life fixes for LLM
-  operators driving ghax (sourced from the 2026-04-20 operator field
-  report):
+  operators driving ghax (sourced from a field report):
   - `ghax attach` is now silent on fresh success (POSIX convention).
     Pass `--verbose` or set `GHAX_VERBOSE=1` to restore the
     `attached — pid / port / browser` one-liner. `already attached`
