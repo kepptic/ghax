@@ -1,0 +1,126 @@
+# ghax
+
+> A CLI that attaches to your real running Chrome or Edge via Chrome DevTools Protocol. Drive tabs, snapshot the accessibility tree, click and fill by role-name refs, work with MV3 extension internals, capture console and network traffic. No separate browser to install. Purpose-built for AI coding agents that need to drive a real browser session.
+
+ghax reaches into a Chromium-family browser the user already has running (with their SSO cookies, extensions, and open tabs) instead of launching a disposable one. Three modes: attach to the real profile, attach to a dedicated ghax profile, or launch a scratch profile (add `--headless` for CI). The CLI is Rust (~3 MB, ~20 ms cold start); the daemon is a Node bundle that speaks CDP.
+
+This file is written for AI coding agents. If you just arrived and the user asked you to install ghax, run the steps in "Install from source" top-to-bottom, verify, then ask the user what browser task they want done.
+
+## Install from source
+
+Prerequisites (check these first):
+
+```bash
+node --version      # need v20.0 or newer
+cargo --version     # need Rust 1.80 or newer
+git --version       # any recent version
+```
+
+If any are missing, tell the user which one and stop. Do not attempt to install system packages without the user's permission.
+
+Build and install:
+
+```bash
+npm install                  # installs esbuild, tsx, typescript, playwright
+npm run build:all            # compiles Rust CLI + bundles Node daemon
+npm run install-link         # symlinks target/release/ghax → ~/.local/bin/ghax
+```
+
+`install-link` also drops the daemon bundle at `~/.local/share/ghax/ghax-daemon.mjs` and bootstraps its node_modules (playwright + source-map). All idempotent, safe to re-run.
+
+Ensure `~/.local/bin` is on PATH. If `which ghax` comes back empty, tell the user to add this to their shell rc:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the install:
+
+```bash
+ghax --version               # should print "ghax 0.4.x"
+ghax --help                  # should print the full command surface
+```
+
+If both succeed, report to the user: "ghax installed. Run `ghax --help` to see the full surface."
+
+## First-time usage pattern
+
+ghax attaches to a Chrome or Edge running with `--remote-debugging-port=9222`. If the user doesn't have one running, either tell them to launch one:
+
+```bash
+# macOS Edge — most common setup
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --remote-debugging-port=9222 &
+
+# macOS Chrome (v113+ requires an explicit profile path)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/chrome-ghax" &
+```
+
+Or offer to launch a scratch browser for them:
+
+```bash
+ghax attach --launch              # spawns a scratch Chromium with CDP
+ghax attach --launch --headless   # no visible window (CI-style)
+```
+
+Then attach and drive:
+
+```bash
+ghax attach                        # scans :9222-9230, attaches to what's running
+ghax tabs --json                   # list open tabs
+ghax goto https://example.com
+ghax snapshot -i --json            # aria tree with @e refs
+ghax click @e3                     # refs survive until next snapshot
+ghax fill @e5 "hello"
+ghax screenshot --path /tmp/shot.png
+```
+
+Refs (@e1, @e2, ...) come from `snapshot -i` and are only valid until the next snapshot on the same tab. If you mutate the DOM (click anything, navigate, etc.), take a fresh snapshot before reusing refs. The `ghax batch` verb handles this automatically between steps:
+
+```bash
+ghax batch '[
+  {"cmd":"goto","args":["https://app.example.com"]},
+  {"cmd":"snapshot","opts":{"interactive":true}},
+  {"cmd":"click","args":["@e7"]},
+  {"cmd":"fill","args":["@e9","new-value"]}
+]'
+```
+
+## Command reference
+
+Ghax has no man pages. `ghax --help` prints the full command surface — currently 71 verbs covering attach/detach, tab operations, navigation, snapshot + interact, file uploads, real user gestures, MV3 extension internals (service workers, popups, options, side panels, chrome.storage), console + network capture, Core Web Vitals, screenshots, XPath, live CSS injection, batch execution, recording + replay, and orchestrated flows (qa, canary, perf, profile, ship, review).
+
+Add `--json` to any command for machine-readable output. Exit codes: `0` ok, `1` usage error, `2` not attached, `4` CDP error, `10` build/bootstrap failure.
+
+For specific task patterns:
+
+```bash
+ghax --help | less                 # browse the full surface
+ghax attach --help                 # per-verb help
+ghax ext --help                    # extension sub-commands
+```
+
+## Key files for deeper context
+
+- [README.md](./README.md): human-facing overview with use cases and examples.
+- [AGENTS.md](./AGENTS.md): generic agent memory — invariants, build commands, how to add a verb.
+- [CLAUDE.md](./CLAUDE.md): Claude Code specific instructions and workflow examples.
+- [ARCHITECTURE.md](./ARCHITECTURE.md): CLI/daemon split, CDP connection model, ref resolution.
+- [CONTRIBUTING.md](./CONTRIBUTING.md): dev loop, code style, smoke suite, PR conventions.
+- [SECURITY.md](./SECURITY.md): threat model (local-only daemon, no auth token, rationale).
+- [CHANGELOG.md](./CHANGELOG.md): per-version changes.
+
+## Optional
+
+- [.claude/skills/ghax.md](./.claude/skills/ghax.md): Claude Code skill (router) — auto-discovered when Claude Code opens this repo.
+- [.claude/skills/ghax-browse.md](./.claude/skills/ghax-browse.md): Claude Code skill (flagship) — full workflow examples.
+- [docs/BENCHMARK.md](./docs/BENCHMARK.md): latency numbers vs other CLIs.
+- [docs/sessions/](./docs/sessions/): field reports from production agent runs (useful for understanding edge cases).
+
+## Things not to do
+
+- Do not attempt to run the smoke suite (`npm run test:smoke`) without first confirming with the user — it drives a real browser for ~30 seconds and requires an Edge/Chrome running on port 9222.
+- Do not modify `Cargo.toml` version or push tags without the user's explicit request — releases are gated by `scripts/release.sh`.
+- Do not run destructive git operations (force-push, reset --hard, branch deletions on main).
+- The daemon auto-shuts after 30 minutes idle. If commands start failing with "not attached", run `ghax attach` again.

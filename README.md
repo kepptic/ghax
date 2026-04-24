@@ -1,231 +1,198 @@
 # ghax
 
-Drive your **real** running Chrome or Edge from the command line. Not a
-sandboxed copy. Your actual browser, with your actual auth, your actual
-extensions, and your actual open tabs.
+**Drive your real Chrome or Edge from the command line.** Not a sandboxed copy. Your actual browser, with your actual auth, your actual extensions, and your actual open tabs.
 
 ```bash
 ghax attach
 ghax goto https://app.example.com
-ghax snapshot -i              # aria tree with @e1, @e2, ... refs
+ghax snapshot -i                  # aria tree with @e1, @e2, … refs
 ghax click @e3
 ghax fill @e5 "hello"
 ```
 
-That's it. No separate browser to install. No fresh Chromium. No
-"please log in again." The browser you already have open is the
-browser you drive.
+That's it. No separate browser to install. No fresh Chromium. No *please log in again*. Or use a scratch profile if that's what you want. Your call.
 
-Prefer a scratch browser? That's one flag away — `ghax attach --launch
---headless` spawns a fresh Chromium in its own profile for CI-style
-runs without touching your daily driver.
+[Install →](#install) · [Quickstart →](#quickstart) · [Use with AI agents →](#install-with-an-ai-agent) · [Full commands →](#command-reference) · [License](#license)
+
+---
 
 ## Why this exists
 
-Every AI coding agent and every browser-automation script out there has
-the same problem: they launch their own browser. Which means they don't
-have your SSO session, don't have your Chrome extensions, don't know
-which tabs you're already working in, and will happily trigger
-Cloudflare bot protection on every SaaS dashboard worth QAing.
+Every AI coding agent and every browser-automation script has the same problem: they launch their own browser. So they don't have your SSO session, don't have your Chrome extensions, don't know which tabs you're already working in, and will happily trip Cloudflare bot protection on any SaaS dashboard.
 
-`ghax` attaches over CDP. One command. Real browser. Real state.
+ghax attaches over CDP. One command. Real browser. Real state.
 
-Or a scratch profile if that's what you want. Your call.
+---
 
-## What it does
+## Install with an AI agent
 
-- **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role
-  and name, not fragile CSS selectors. Walks open shadow roots for
-  custom-element apps (Lit, Shoelace, web components) and emits
-  chain selectors (`host >> inner`) that descend into shadow trees.
-- **Dialog-aware**. When a modal is open, snapshots walk the modal, not
-  the `aria-hidden="true"` app behind it. Saves you from empty trees
-  on Radix / Headless UI / Material dialogs.
-- **MV3 extension internals**. List extensions, reload them, eval JS in
-  service workers, read/write `chrome.storage.*`, interact with side
-  panels, popups, options pages. Hot-reload on rebuild so `pnpm build`
-  gives you new code in 5 seconds without losing tab state.
-- **Real user gestures** via CDP `Input.dispatch*`. Because
-  `chrome.sidePanel.open()` and friends refuse synthetic clicks.
-- **Console + network capture** from the moment you attach. Rolling 5k
-  buffers, `--errors` and `--pattern` filters, request + response
-  headers, HAR 1.2 export, stack-frame parsing, dedup grouping, and
-  **source-map resolution** (`main.abc123.js:1:48291` →
-  `src/AuthForm.tsx:42:12`).
-- **Core Web Vitals** (`ghax perf`). LCP (with the element that hit
-  it), FCP, CLS, TTFB, full nav timing. Buffered observers catch
-  entries that fired before you asked.
-- **Live fix-preview** (`ghax try`). Inject CSS or JS against the
-  running page, measure the result, screenshot it, all in one call.
-  Revert = reload.
-- **Framework-safe `fill`**. Native-setter + `input` for React,
-  explicit `blur` for Angular validators, `contenteditable` paths for
-  Material chip inputs and rich editors. Works on every framework you
-  actually hit.
-- **Batch execution**. `ghax batch '[{"cmd":"click","args":["@e7"]},
-  ...]'` ships a whole plan in one round-trip and auto-re-snapshots
-  between steps that use refs, so a mid-plan combobox reshuffle
-  doesn't break the rest of your sequence.
-- **Background-window workflow**. `new-window`, `find`, `tab --quiet`
-  give an agent its own window in your browser without stealing focus
-  from the window you're working in. Multi-agent isolation via
-  `GHAX_STATE_FILE`.
+Got Claude Code, Cursor, Codex, Aider, Continue, ChatGPT, or any other AI coding agent? Paste this into the chat:
 
-Full command reference in [ARCHITECTURE.md](./ARCHITECTURE.md).
+> **Clone `https://github.com/kepptic/ghax` and follow the install steps in its `llms.txt` file. Verify with `ghax --version` and report success.**
+
+The agent reads [llms.txt](./llms.txt), runs three build commands, verifies the install works, and tells you when it's done. Total time: under a minute on modern hardware.
+
+If you're running Claude Code, the repo ships with two skills under [.claude/skills/](./.claude/skills/) that light up automatically when Claude opens this directory. See [Use with AI coding agents](#use-with-ai-coding-agents) below for how to surface them in every session.
+
+---
 
 ## Install
 
-ghax ships as a platform-specific Rust binary. Under 3 MB stripped on
-Apple Silicon. Distribution is GitHub Releases only. No registries,
-no taps, no accounts.
-
-```bash
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.sh | sh
-
-# Windows PowerShell
-irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 | iex
-```
-
-Runtime needs **Node 20+** for the daemon. Most developer laptops
-already have it.
-
-Build from source (Rust 1.80+, Node 20+):
+Prerequisites: **Node 20+**, **Rust 1.80+**, git.
 
 ```bash
 git clone https://github.com/kepptic/ghax.git
 cd ghax
 npm install
-npm run build:all
-npm run install-link        # symlinks → ~/.local/bin/ghax
+npm run build:all        # compiles the Rust CLI + bundles the Node daemon
+npm run install-link     # symlinks target/release/ghax → ~/.local/bin/ghax
 ```
+
+Ensure `~/.local/bin` is on `PATH`. Then verify:
+
+```bash
+ghax --version           # → ghax 0.4.2
+ghax --help              # prints the full command surface (71 verbs)
+```
+
+To uninstall: `npm run uninstall-link`.
+
+**Pre-built release archives** (macOS, Linux, Windows) are published on [GitHub Releases](https://github.com/kepptic/ghax/releases) when CI is green. Install the latest with `npm run install-release`.
+
+---
 
 ## Quickstart
 
-1. Launch your browser with CDP enabled:
+### 1. Launch your browser with CDP enabled
 
-   ```bash
-   # macOS Edge
-   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
-     --remote-debugging-port=9222 &
+```bash
+# macOS Edge
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --remote-debugging-port=9222 &
 
-   # macOS Chrome (v113+ also needs an explicit profile path — see
-   # CONTRIBUTING.md "Known browser quirks")
-   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-     --remote-debugging-port=9222 \
-     --user-data-dir="$HOME/.config/chrome-ghax" &
-   ```
+# macOS Chrome v113+ — also needs an explicit profile path
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/chrome-ghax" &
+```
 
-2. Attach. Ghax scans ports 9222–9230 and picks the running browser:
+Linux and Windows launch commands are in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-   ```bash
-   ghax attach
-   ```
+### 2. Attach
 
-3. Drive it:
+```bash
+ghax attach              # scans :9222–:9230, picks the running browser
+```
 
-   ```bash
-   ghax tabs                          # list open tabs
-   ghax goto https://example.com
-   ghax snapshot -i                   # get @e refs
-   ghax click @e3
-   ghax fill @e5 "hello"
-   ghax screenshot --path /tmp/shot.png
-   ghax perf                          # Core Web Vitals
-   ```
+### 3. Drive it
 
-4. Detach when done:
+```bash
+ghax tabs                            # list open tabs
+ghax goto https://example.com
+ghax snapshot -i                     # interactive @e refs
+ghax click @e3
+ghax fill @e5 "hello"
+ghax screenshot --path /tmp/shot.png
+ghax perf                            # Core Web Vitals
+```
 
-   ```bash
-   ghax detach
-   ```
+### 4. Detach
+
+```bash
+ghax detach
+```
+
+---
 
 ## Which profile?
 
-You pick. Three modes:
+You pick. Three modes, one flag each.
 
-- **Your real profile** — launch Edge or Chrome with
-  `--remote-debugging-port=9222` (the quickstart above). You keep your
-  extensions, your SSO cookies, and your open tabs. Ghax just drives
-  what's already there.
-- **A dedicated ghax profile** — pass `--user-data-dir=<path>` to your
-  browser launch to keep ghax's tabs separate from your daily driver.
-  Same browser binary, different profile directory. Useful if you
-  don't want an agent touching your personal tabs.
-- **A fresh scratch profile** — `ghax attach --launch` spawns your
-  browser with a throwaway profile under `~/.ghax/<kind>-profile/`.
-  Add `--headless` for a no-window CI-style run. Zero overlap with
-  your daily driver.
+| Mode | Command | When |
+|------|---------|------|
+| **Your real profile** | Launch your browser yourself with `--remote-debugging-port=9222`, then `ghax attach` | Default. Keeps your SSO, extensions, and open tabs. |
+| **A dedicated ghax profile** | Same as above, but add `--user-data-dir=<path>` to the browser launch | You want to keep ghax traffic separate from your daily driver. |
+| **A throwaway scratch profile** | `ghax attach --launch` (add `--headless` for no window) | CI-style runs, reproducible environments, or you just don't want to launch the browser yourself. |
 
-The quickstart covers option 1. Options 2 and 3 are one flag each.
+---
+
+## What it does
+
+- **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role and name, not fragile CSS selectors. Walks open shadow roots for custom-element apps (Lit, Shoelace, web components) and emits chain selectors (`host >> inner`) that descend into shadow trees.
+- **Dialog-aware snapshots.** When a modal is open, `ghax snapshot` walks the modal instead of the `aria-hidden="true"` app behind it. Saves you from empty trees on Radix, Headless UI, and Material dialogs.
+- **MV3 extension internals.** List extensions, reload them, eval JS in service workers, read/write `chrome.storage.*`, interact with side panels, popups, and options pages. **Hot-reload** on rebuild: `pnpm build` → new code running in 5 seconds without losing tab state.
+- **Real user gestures** via CDP `Input.dispatch*`. Needed for APIs like `chrome.sidePanel.open()` that refuse synthetic clicks.
+- **Console + network capture** from the moment you attach. Rolling 5k buffers, `--errors` and `--pattern` filters, request + response headers, HAR 1.2 export, stack-frame parsing, dedup grouping, and source-map resolution (`main.abc123.js:1:48291` → `src/AuthForm.tsx:42:12`).
+- **Core Web Vitals** (`ghax perf`). LCP with the element that caused it, FCP, CLS, TTFB, full nav timing. Buffered observers catch entries that fired before you asked.
+- **Live fix-preview** (`ghax try`). Inject CSS or JS against the running page, measure the result, screenshot it, all in one call. Revert = reload.
+- **Framework-safe `fill`.** Native-setter + `input` for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors.
+- **Batch execution.** `ghax batch '[{"cmd":"click","args":["@e7"]}, …]'` ships a whole plan in one round-trip and auto-re-snapshots between steps that use refs, so a mid-plan combobox reshuffle doesn't break the rest of your sequence.
+- **Background-window workflow.** `new-window`, `find`, `tab --quiet` give an agent its own window in your browser without stealing focus.
+
+---
+
+## Command reference
+
+ghax ships 71 verbs. The full surface lives in `ghax --help` — no man pages, `--help` is authoritative.
+
+```bash
+ghax --help              # full command surface
+ghax --help | less       # scroll it
+ghax <verb> --help       # some verbs have per-verb help
+```
+
+Add `--json` to any command for machine-readable output.
+
+**Exit codes:** `0` ok · `1` usage error · `2` not attached · `4` CDP error · `10` build/bootstrap failure.
+
+---
 
 ## Use with AI coding agents
 
-Ghax is a plain CLI. Any agent that can run shell commands can drive
-a browser through it. Setup below is per-agent; the capabilities are
-the same everywhere.
+Ghax is a plain CLI. Any agent that can run shell commands can drive a browser through it.
 
 ### Claude Code
 
-The repo ships two skills under [`.claude/skills/`](./.claude/skills/):
+Two skills ship under [.claude/skills/](./.claude/skills/):
 
-- [`ghax.md`](./.claude/skills/ghax.md) — top-level router. Claude
-  picks it up when you say "attach to my browser", "test the
-  extension", "snapshot the dashboard", and routes to the right
-  sub-skill.
-- [`ghax-browse.md`](./.claude/skills/ghax-browse.md) — the flagship
-  skill with full workflow examples: QA runs, extension hot-reload,
-  SaaS-dashboard automation, snapshot-interact-assert loops.
+- [`ghax.md`](./.claude/skills/ghax.md) — top-level router. Claude picks it up when you say *"attach to my browser"*, *"test the extension"*, *"snapshot the dashboard"*.
+- [`ghax-browse.md`](./.claude/skills/ghax-browse.md) — flagship skill with full workflow examples (QA, hot-reload, SaaS automation, snapshot-interact-assert loops).
 
-**Install the skills** (one of three ways):
+Install them:
 
 ```bash
-# 1. User-global — available in every Claude Code session on this machine
+# Option 1: user-global (available in every Claude Code session)
 mkdir -p ~/.claude/skills
 cp .claude/skills/ghax.md .claude/skills/ghax-browse.md ~/.claude/skills/
 
-# 2. Project-local — available only in this repo
-#    (They already live here. Claude Code picks up .claude/skills/*.md
-#    automatically when it opens this directory.)
+# Option 2: project-local (auto-discovered when Claude opens this repo)
+# They already live here — nothing to do.
 
-# 3. Symlink, so future skill updates flow in without copying
+# Option 3: symlink so future updates flow in
 ln -s "$PWD/.claude/skills/ghax.md"        ~/.claude/skills/ghax.md
 ln -s "$PWD/.claude/skills/ghax-browse.md" ~/.claude/skills/ghax-browse.md
 ```
 
-**Verify:**
+Verify: `claude /skills` should list `ghax` and `ghax-browse`.
 
-```bash
-claude /skills            # should list `ghax` and `ghax-browse`
-```
+### Codex · Cursor · Aider · Continue · Windsurf
 
-Then just talk to Claude naturally: *"attach to my edge and snapshot
-the settings page"*, *"hot-reload the extension I just built"*, *"QA
-my staging deploy and screenshot any console errors"*. The skills
-describe the right ghax commands for each intent.
+These agents read a project memory file. For Codex and Cursor, the convention is `AGENTS.md` at the repo root. This repo already ships one: [AGENTS.md](./AGENTS.md). For Cursor specifically you can also symlink to `.cursorrules`, for Aider to `CONVENTIONS.md`.
 
-### Codex (OpenAI) / Cursor / Aider / Continue / any shell-driving agent
-
-These agents don't have a plug-in skill system like Claude Code. The
-clean integration is a project-level `AGENTS.md` (or equivalent
-memory file — Cursor reads `.cursorrules`, Aider reads
-`CONVENTIONS.md`, etc.) that tells the agent when to use ghax.
-
-**Drop this into your project's `AGENTS.md` / `.cursorrules`:**
+If you're adding ghax to **another project**, drop this snippet into that project's `AGENTS.md`:
 
 ```markdown
 ## Browser automation: use ghax
 
-When a task requires a real browser (QA, dashboard automation,
-extension testing, anything behind SSO), use the `ghax` CLI instead
-of asking the user to paste screenshots or step through clicks.
+When a task requires a real browser (QA, dashboard automation, extension
+testing, anything behind SSO), use the `ghax` CLI instead of asking the
+user for screenshots or step-by-step clicks.
 
-Three patterns cover 95% of use cases:
+Three patterns cover almost every case:
 
 1. Attach:
-     ghax attach            # scans :9222-9230 for a running browser
-     ghax attach --launch   # or spawn a scratch Chromium
+     ghax attach           # scans :9222-9230 for a running browser
+     ghax attach --launch  # or spawn a scratch browser
 
 2. Snapshot-then-interact (refs survive until next snapshot):
      ghax snapshot -i --json
@@ -235,64 +202,48 @@ Three patterns cover 95% of use cases:
 3. One-round-trip batch (auto re-snapshots between ref-using steps):
      ghax batch '[{"cmd":"click","args":["@e7"]}, …]'
 
-Add `--json` to any command for machine-readable output.
-Full command surface: run `ghax --help`.
+Full surface: `ghax --help`. JSON on any verb with `--json`.
 ```
 
-That's the integration. The agent reads the memory file at session
-start, knows ghax exists, and reaches for it when appropriate.
+### Raw-shell / scripted harnesses
 
-### No-memory / raw-shell agents
-
-If you're scripting against an agent with no memory file
-(one-off API calls, custom harnesses), pass the same three-pattern
-brief as the system prompt. Ghax exits with standard codes (`0` ok,
-`2` not attached, `4` CDP error) and every verb takes `--json` — it
-behaves like any well-formed Unix CLI under an agent.
+Ghax is a well-formed Unix CLI: documented exit codes (`0` ok, `2` not attached, `4` CDP error), `--json` on every verb, stable argv. Script against it the same way you'd script against `curl` or `rg`. See `ghax --help` for the full interface.
 
 ### Multi-agent on one browser
 
 Two agents, one browser, zero stepping on each other:
 
 ```bash
-# Agent A
-GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach
-GHAX_STATE_FILE=/tmp/ghax-a.json ghax new-window https://app-a.com
+# Agent A shell
+export GHAX_STATE_FILE=/tmp/ghax-a.json
+ghax attach
+ghax new-window https://app-a.com
 
-# Agent B (separate shell)
-GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach
-GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
+# Agent B shell
+export GHAX_STATE_FILE=/tmp/ghax-b.json
+ghax attach
+ghax new-window https://app-b.com
 ```
 
-Same browser, same profile, same auth. Different windows and separate
-daemon state. Neither agent sees the other's active-tab pointer.
+Same browser process, same profile, same auth. Different windows and separate daemon state. Neither agent sees the other's active-tab pointer.
 
-## When to reach for ghax
+---
 
-- You're running an AI agent against a SaaS dashboard behind SSO.
-  Fresh-browser tools break on login. Ghax uses the session you
-  already have.
-- You're developing a Chrome extension and want `pnpm build` to hot-
-  reload your service worker + content scripts without losing tab
-  state. No other tool does this.
-- You want Core Web Vitals on your real app with your real user
-  profile, not a headless clean-room.
-- You're QAing a deploy and need screenshots + console errors +
-  failed-request list in one report. `ghax qa --url <u>` does the
-  whole thing.
-- You need to automate a dashboard that actively refuses headless
-  browsers but you still want CI-style repeatability — attach to a
-  real visible browser locally, drive it the same way an agent would
-  in prod.
-- You want a clean-room disposable browser for CI. `ghax attach
-  --launch --headless` gives you one in its own scratch profile.
+## When ghax is the right call
 
-## When not to reach for ghax
+- You're running an AI agent against a SaaS dashboard behind SSO. Fresh-browser tools break on login; ghax uses the session you already have.
+- You're developing a Chrome extension and want `pnpm build` to hot-reload your service worker and content scripts without losing tab state.
+- You want Core Web Vitals on your real app with your real user profile, not a headless clean-room.
+- You need screenshots + console errors + failed requests in one deploy-verify report. `ghax qa --url <u>` does the whole thing in one shot.
+- You need to automate a site that refuses headless browsers, but you still want CI-style repeatability.
 
-- You need cross-browser testing on Firefox or Safari. Ghax is CDP-
-  only — Chrome family (Edge, Chrome, Chromium, Brave, Arc).
-- You want codegen from a UI recorder. Ghax records into its own JSON
-  format for replay, not for generating test code.
+## When ghax is the wrong call
+
+- You need cross-browser testing on Firefox or Safari. Ghax is CDP-only — Chromium family only (Edge, Chrome, Chromium, Brave, Arc).
+- You want UI-recorder codegen. Ghax records into its own JSON format for replay, not for generating test code.
+- You need a fully isolated clean-room browser. Use `ghax attach --launch --headless` for disposable runs, but recognize that it still uses your system Chromium.
+
+---
 
 ## Architecture
 
@@ -307,37 +258,36 @@ ghax daemon (Node ESM bundle, ~80 KB)
 Your running Chrome / Edge (--remote-debugging-port=9222)
 ```
 
-The CLI is a thin HTTP client so the binary stays small. The daemon
-owns every CDP session and auto-shuts after 30 minutes idle. Full
-notes in [ARCHITECTURE.md](./ARCHITECTURE.md).
+The CLI is a thin HTTP client so the binary stays small. The daemon owns every CDP session and auto-shuts after 30 minutes idle. Deeper notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
+
+---
 
 ## Security
 
-The daemon binds to `127.0.0.1` only. No auth token — this is a
-single-user, localhost tool. State lives in `.ghax/` relative to the
-current git root, or `~/.ghax/` with `GHAX_GLOBAL=1`.
+The daemon binds to `127.0.0.1` only. No auth token — this is a single-user localhost tool. State lives in `.ghax/` relative to the current git root, or `~/.ghax/` with `GHAX_GLOBAL=1`.
 
-`chrome.storage.local` often contains auth tokens. Treat
-`ghax ext storage` output like `localStorage.getItem` — don't paste
-it into chat.
+`chrome.storage.local` often contains auth tokens. Treat `ghax ext storage` output like `localStorage.getItem` — don't paste it into chat context, commit messages, or logs.
 
-See [SECURITY.md](./SECURITY.md) for the threat model and disclosure
-process.
+Full threat model: [SECURITY.md](./SECURITY.md).
+
+---
 
 ## Contributing
 
-Issues and PRs welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md)
-— it covers the Rust + Node split, the 95-check live-browser smoke
-suite, and the hard invariants that'll bite you if you skip them.
+Issues and PRs welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md) — it covers the Rust + Node split, the 95-check live-browser smoke suite, and the hard invariants. If you're a coding agent working on the repo, read [AGENTS.md](./AGENTS.md) first.
+
+This project follows the [Contributor Covenant v2.1](./CODE_OF_CONDUCT.md).
+
+---
 
 ## License
 
-MIT. Portions adapted from [gstack](https://github.com/garrytan/gstack)
-by Garry Tan (also MIT): `buffers.ts`, `config.ts`, and the
-accessibility-snapshot algorithm in `snapshot.ts`.
+MIT. See [LICENSE](./LICENSE).
+
+Portions adapted from [gstack](https://github.com/garrytan/gstack) by Garry Tan (also MIT): `buffers.ts`, `config.ts`, and the accessibility-snapshot algorithm in `snapshot.ts`.
+
+---
 
 ## Credits
 
-Shaped by months of running AI agents against real dashboards and
-logging every papercut. Field reports in
-[`docs/sessions/`](./docs/sessions/) if you want the receipts.
+Shaped by months of running AI agents against real browsers and logging every papercut. Field reports in [docs/sessions/](./docs/sessions/) for the receipts.

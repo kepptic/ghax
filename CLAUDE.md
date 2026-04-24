@@ -1,9 +1,13 @@
 # ghax — project instructions for Claude Code
 
-This file tells Claude (and other agents) how to work on this repo without
-friction. Human contributors should read [CONTRIBUTING.md](./CONTRIBUTING.md)
-instead — it has the same info plus the bits that don't matter to agents
-(code of conduct, PR style, issue reporting).
+Claude Code auto-loads this file when it opens the ghax repo. Other AI
+agents (Codex, Cursor, Aider, Continue) should read [AGENTS.md](./AGENTS.md)
+first — it covers the same ground in a vendor-neutral form. This file
+extends that with Claude-specific workflow examples.
+
+Human contributors: start with [CONTRIBUTING.md](./CONTRIBUTING.md) —
+it has the same info plus bits that don't matter to agents (code of
+conduct, PR style, issue reporting).
 
 ## What this repo is
 
