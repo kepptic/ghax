@@ -81,9 +81,10 @@ git config core.hooksPath .githooks
 
 ## Cutting a release
 
-The release flow is fully scripted and won't install a binary locally
-unless the GitHub Actions release workflow goes green first — so what
-you ship is exactly what you keep running.
+Before releasing, make sure `CHANGELOG.md` has a populated `## [Unreleased]`
+section — the release script refuses to run if it's empty, and the release
+workflow auto-injects the version section into the GitHub Release body so
+every tag ships with real notes.
 
 ```bash
 npm run release patch    # 0.4.2 → 0.4.3 (default)
@@ -94,13 +95,19 @@ npm run release 0.4.3    # explicit version
 
 Steps the script takes:
 1. Refuses to run if the working tree is dirty or you're not on `main`.
-2. Bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, commits, tags `v<version>`.
-3. Pushes the commit + tag.
-4. Polls the GitHub Actions release workflow with `gh run watch --exit-status`.
-5. **Only on green:** downloads the published archive, verifies its SHA-256,
+2. **Rolls the changelog:** renames `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
+   inserts a fresh empty `[Unreleased]` at top, and updates the link footer.
+   Refuses if `[Unreleased]` has no bullets / sections.
+3. Bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, commits
+   (Cargo.toml + Cargo.lock + CHANGELOG.md together), tags `v<version>`.
+4. Pushes the commit + tag.
+5. Polls the GitHub Actions release workflow with `gh run watch --exit-status`.
+   `cargo-dist` reads the new `## [X.Y.Z]` section and stitches it into the
+   release body alongside the install scripts + download table.
+6. **Only on green:** downloads the published archive, verifies its SHA-256,
    installs the binary to `~/.cargo/bin/ghax`, drops the daemon bundle into
    `~/.local/share/ghax/`, and bootstraps the daemon's `node_modules/`.
-6. **On red:** stops with a pointer to `gh run view --log-failed`. Nothing
+7. **On red:** stops with a pointer to `gh run view --log-failed`. Nothing
    gets installed locally — you keep running the previous version until you
    fix the build.
 

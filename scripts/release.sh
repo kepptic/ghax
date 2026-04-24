@@ -68,13 +68,69 @@ if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
   exit 1
 fi
 
-# ── 2. Bump version + commit + tag ────────────────────────────────
+# ── 2a. Roll CHANGELOG [Unreleased] → [NEW] ───────────────────────
+# cargo-dist auto-injects the matching `## [X.Y.Z]` section into the
+# GitHub Release body, so every tag ships with real notes.
+CHANGELOG="$REPO_ROOT/CHANGELOG.md"
+if [ ! -f "$CHANGELOG" ]; then
+  echo "release: CHANGELOG.md not found — refuse to release without notes" >&2
+  exit 1
+fi
+
+# Extract the body of `## [Unreleased]` (lines between it and the next
+# `## [...]` heading). Reject if empty — we don't ship headline-less
+# releases. Bullet-only blank lines and the trailing section separator
+# don't count as content.
+UNRELEASED_BODY="$(awk '
+  /^## \[Unreleased\]/ { in_block = 1; next }
+  in_block && /^## \[/ { exit }
+  in_block { print }
+' "$CHANGELOG")"
+if ! printf '%s' "$UNRELEASED_BODY" | grep -Eq '^(- |### )'; then
+  echo "release: CHANGELOG.md [Unreleased] is empty — add entries before releasing" >&2
+  echo "release: (at least one '- ' bullet or '### Added/Changed/Fixed' section required)" >&2
+  exit 1
+fi
+
+TODAY="$(date -u +%Y-%m-%d)"
+# In-place rewrite: rename the current [Unreleased] heading to [NEW] with
+# date, then insert a fresh empty [Unreleased] stub at the top, and update
+# the link footer so `[Unreleased]` points at the new tag-compare URL.
+python3 - "$CHANGELOG" "$NEW" "$TAG" "$TODAY" <<'PY'
+import sys, re, pathlib
+
+path, new_ver, new_tag, today = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+text = pathlib.Path(path).read_text()
+
+# 1. Rename current [Unreleased] → [NEW] - DATE.
+text = re.sub(
+    r"^## \[Unreleased\]\s*$",
+    f"## [Unreleased]\n\n_No changes yet._\n\n## [{new_ver}] - {today}",
+    text, count=1, flags=re.MULTILINE,
+)
+
+# 2. Update link footer.
+#    [Unreleased]: .../compare/vOLD...HEAD  →  .../compare/vNEW...HEAD
+#    insert new line for [NEW] comparing against previous tag.
+lines = text.splitlines()
+for i, ln in enumerate(lines):
+    m = re.match(r"^\[Unreleased\]:\s+(.+/compare/)(v[^.]+\.[^.]+\.[^.]+)\.\.\.HEAD\s*$", ln)
+    if m:
+        prefix, old_tag = m.group(1), m.group(2)
+        lines[i] = f"[Unreleased]: {prefix}{new_tag}...HEAD"
+        lines.insert(i + 1, f"[{new_ver}]: {prefix}{old_tag}...{new_tag}")
+        break
+
+pathlib.Path(path).write_text("\n".join(lines) + "\n")
+PY
+
+# ── 2b. Bump Cargo.toml + commit + tag ────────────────────────────
 sed -i.bak "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml && rm Cargo.toml.bak
 # Refresh Cargo.lock to reflect the version bump without paying for a full
 # release compile (the local artifact isn't consumed; CI builds the
 # authoritative one). cargo update --workspace just touches the lock entry.
 cargo update --workspace --quiet 2>&1 | tail -3
-git add Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release: $TAG"
 git tag -a "$TAG" -m "$TAG"
 

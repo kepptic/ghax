@@ -6,28 +6,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Breaking
-- Two error-surface tightenings fell out of the `evalInTarget` helper
-  consolidation. Both are behavior improvements but worth flagging for
-  anyone with scripted error handling:
-  - `ext storage` used to return `{ ok: true }` when the underlying JS
-    expression threw. It now throws a `DaemonError` (exit code 4) with
-    the exception details, so a failed `chrome.storage.*.set` no longer
-    silently looks successful.
-  - `ext message` used to return `null` when the cross-extension
-    `chrome.runtime.sendMessage` threw outside its inner try/catch. It
-    now throws a `DaemonError` as well.
-
 ### Added
-- `console --since <epoch-ms>` and `network --since <epoch-ms>` filter
-  buffer entries server-side, so callers (notably `qa` and `canary`)
-  don't have to ship hundreds of irrelevant entries across the HTTP
-  RPC just to discard them locally. `console` also accepts `errors:
-  true` via RPC opts so the daemon drops non-error levels before
-  serialising; the Rust CLI uses this on the hot path.
 - **Bucket A payload-reduction sprint** — six flags and one new verb
-  to cut context cost for LLM operators driving ghax (sourced from
-  the 2026-04-20 field report):
+  to cut context cost for LLM operators driving ghax (sourced from a
+  field report):
   - `screenshot --full-page` — kebab-case alias for the v0.1
     `--fullPage`, matching the rest of the CLI convention. Both
     forms accepted.
@@ -47,87 +29,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `snapshot --compact` now suppresses the cursor-interactive
     pass when paired with `-i`. Explicit `-C` still forces it on.
     Large SPAs shrink measurably in compact mode.
-
-### Fixed
-- **Invariant enforcement**: `ctx.refs` is now cleared when the active
-  tab changes (via `tab <id>` or `new-window`). Previously the
-  "refs survive only until next snapshot" rule held within a tab but
-  broke across tab switches — `@e3` from tab A could silently resolve
-  against tab B's DOM. A new smoke check (`refs cleared on tab
-  switch`) asserts the invariant.
-
-### Changed
-- Daemon DRY pass: three new helpers collapse repeated shapes.
-  `evalInTarget()` centralises nine `Runtime.evaluate` sites with
-  consistent `exceptionDetails` handling (which also fixes a latent
-  bug in `ext.storage` where a thrown expression was silently
-  returned as `{ok: true}`). `getSwTarget()` owns the five-step
-  find-sw / pool.get / Runtime.enable dance across five extension
-  verbs. `withCdpSession()` owns the session open + try/finally +
-  detach lifecycle across five gesture/profile sites. The three
-  `ext.{panel,popup,options}.eval` handlers now register in a loop
-  since they differ only by URL filter + label.
-- Rust CLI DRY pass: new `time_util` module consolidates three
-  copies of the ISO-8601 / days-to-ymd logic (the `ship` copy was
-  using a slower year-loop algorithm than the other two); new
-  `qa_common` module shares the `console_errors_since` /
-  `failed_requests_since` filters between `qa` and `canary`, with
-  the filtering now happening daemon-side via the new `since:` opt.
-- `dispatch.rs` swaps a hand-rolled percent-encoder for the
-  `urlencoding` crate; `qa.rs` swaps a hand-rolled URL resolver for
-  `url::Url::join`. Adds `url` + `urlencoding` as direct deps (both
-  are tiny; `url` was already in the tree transitively via
-  `reqwest`).
-- `require_daemon` (Rust) now trusts `/health` as the liveness
-  signal and only falls back to the `kill(pid, 0)` syscall when
-  `/health` fails — every CLI invocation shaves a syscall.
-- `snapshot.ts` caches `getComputedStyle()` results per element for
-  the duration of one walk. The cursor-interactive pass used to
-  force-recalc styles O(n · depth) times on SPA-sized trees; now
-  O(n) via a scoped `WeakMap`.
-
-- Daemon: `pageTargetId()` caches the target id on a `WeakMap<Page>`.
-  Playwright target ids are stable for a page's lifetime, but reading
-  one costs a full `CDPSession.newCDPSession` + `Target.getTargetInfo`
-  + detach round-trip. Every command that walks tabs (`activePage`,
-  `tabs`, `find`, `status`, `tab`) used to pay that per page per call.
-  With the cache, the hot path is O(1).
-- Daemon: `tabs` and `find` handlers now fan out per-page
-  `pageTargetId` + `page.title()` in parallel with `Promise.all` instead
-  of a serial await loop. With N tabs open this drops N round-trips to 1.
-- `snapshot.ts`: the aria-tree disambiguation pass used to call
-  `parseLine()` twice per line (once to count role+name duplicates, once
-  to emit). Parsed once into a reused array — meaningful on large SPAs.
-- `dispatch.rs`: removed the dead `stub()` helper and
-  `EXIT_PHASE_PENDING` constant left over from the Rust-port phases,
-  and refreshed the stale "Phase 1 + 2" module doc.
-
-- `attach.rs` simplification (post-/simplify pass): collapsed the
-  two-function `spawn_daemon` + `spawn_daemon_with_retry` recursion-with-
-  flag into a single `for attempt in 0..2` loop inside `spawn_daemon`.
-  Extracted `build_daemon_cmd()` (Command builder shared by both attempts)
-  and `is_missing_module()` (single sentinel for the BUG-001 detection,
-  used by both the auto-bootstrap path and the `daemon_failure` hint).
-  Pulled the playwright/source-map version literals out of
-  `bootstrap_daemon_runtime` into module-level constants
-  (`PLAYWRIGHT_VERSION`, `SOURCE_MAP_VERSION`) AND made the function
-  prefer a sibling `package.json` if one is present — so release archives
-  can ship a real package.json and skip the constants entirely.
-- Bash scripts factor out `scripts/bootstrap-daemon-runtime.sh` — now
-  the single source of truth for the daemon's `npm install` step.
-  `install-link.sh` and `install-release.sh` both delegate to it.
-  Includes version-mismatch detection (was only in install-link before),
-  so users upgrading across a playwright bump get a refreshed
-  node_modules without manual intervention.
-- `release.sh` swaps `cargo build --release` (30-90s, artifact unused)
-  for `cargo update --workspace` (~1s) — the local build was only there
-  to refresh `Cargo.lock` after the version sed; CI builds the
-  authoritative artifact.
-- Trimmed a "BUG-001" ticket label out of the user-facing daemon-failure
-  error message; the surrounding text already explains the fix.
-
-### Added
-
 - **Bucket B — architectural fixes** (sourced from the 2026-04-20
   field report):
   - `ghax batch '<json-array>'` — one-round-trip sequence executor
@@ -160,7 +61,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     daemon state" error now hints at the live port and says
     `ghax attach` will re-pair with it; the pid-mismatch branch
     spells out `ghax detach && ghax attach` as the fix.
-
 - **Bucket C papercut bundle** — five quality-of-life fixes for LLM
   operators driving ghax (sourced from the 2026-04-20 operator field
   report):
@@ -191,7 +91,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `[--verbose]`.
 
 ### Docs
-
 - **Known browser quirks** section in `CONTRIBUTING.md` covers two
   not-a-ghax-bug patterns that surface when driving a real browser:
   Chrome 113+ ignores `--remote-debugging-port` on the default
@@ -201,8 +100,71 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--disable-blink-features=AutomationControlled`; for flows where
   even that fails, detach / do the step manually / re-attach).
 
-### Added
+### Changed
+- Pre-commit hook (`.githooks/pre-commit`) + `scripts/check.sh` run
+  the same typecheck + `cargo check` + daemon bundle build that CI
+  runs, in ~3s on an incremental checkout — so breakage surfaces
+  before push. Enable per-clone with `git config core.hooksPath .githooks`.
 
+## [0.4.2] - 2026-04-20
+
+### Fixed
+- **BUG-001** — auto-bootstrap daemon's Playwright runtime on fresh
+  attach. Release archives ship `dist/ghax-daemon.mjs` without a
+  sibling `node_modules/`, so the first `ghax attach` against a
+  fresh install used to fail with `Cannot find package 'playwright'`.
+  `attach.rs` now detects the missing-module sentinel and runs
+  `scripts/bootstrap-daemon-runtime.sh` (npm install playwright +
+  source-map) before the second attempt. Version literals
+  (`PLAYWRIGHT_VERSION`, `SOURCE_MAP_VERSION`) live at module level
+  and can be overridden by a sibling `package.json` if one is
+  present — so release archives can ship a real package.json and
+  skip the constants entirely.
+
+### Docs
+- Reproducible cross-tool benchmark — `test/benchmark.ts` now reads
+  `GHAX_BIN` env var so the same 7-step workflow (launch → goto →
+  text → js → screenshot → snapshot → close) runs against any
+  binary. First published baseline: ghax 65ms/cmd, gstack 56ms/cmd,
+  agent-browser 178ms/cmd, playwright-cli 476ms/cmd.
+
+## [0.4.1] - 2026-04-19
+
+First public release. **The Rust CLI rewrite** — ghax is now a ~2.6 MB
+Rust binary that talks to the unchanged Node daemon over HTTP. ~3×
+faster cold start (P50 ~20 ms vs ~70 ms), ~20× smaller download,
+distributed as platform-specific binaries via cargo-dist for 5 target
+triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
+
+### Breaking
+- Two error-surface tightenings fell out of the `evalInTarget` helper
+  consolidation. Both are behavior improvements but worth flagging for
+  anyone with scripted error handling:
+  - `ext storage` used to return `{ ok: true }` when the underlying JS
+    expression threw. It now throws a `DaemonError` (exit code 4) with
+    the exception details, so a failed `chrome.storage.*.set` no longer
+    silently looks successful.
+  - `ext message` used to return `null` when the cross-extension
+    `chrome.runtime.sendMessage` threw outside its inner try/catch. It
+    now throws a `DaemonError` as well.
+
+### Added
+- 5-target release matrix via cargo-dist (macOS x64/ARM, Linux x64/ARM,
+  Windows x64).
+- Shell + PowerShell installer scripts that download from this repo's
+  GitHub Releases. All distribution stays inside `kepptic/ghax` — no
+  Homebrew tap, no crates.io publish, no npm publish required.
+- Daemon discovery precedence in `attach.rs`: (1) `$GHAX_DAEMON_BUNDLE`
+  env var, (2) sibling of CLI binary, (3) dev fallback at
+  `<repo root>/dist/ghax-daemon.mjs`.
+- Smoke suite (`test/smoke.ts`) reads `GHAX_BIN` env var so the same 80
+  checks run against any binary. 80/80 against the Rust binary in 31.3s.
+- `console --since <epoch-ms>` and `network --since <epoch-ms>` filter
+  buffer entries server-side, so callers (notably `qa` and `canary`)
+  don't have to ship hundreds of irrelevant entries across the HTTP
+  RPC just to discard them locally. `console` also accepts `errors:
+  true` via RPC opts so the daemon drops non-error levels before
+  serialising; the Rust CLI uses this on the hot path.
 - `ghax xpath <expression> [--limit N]` — query the page's DOM with an
   XPath expression, return every matching element with its tag, text
   preview, and bounding box. XPath is also usable via Playwright's
@@ -218,68 +180,47 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matching URLs so browsing doesn't blow memory on images or chunks.
   Bodies past 32KB truncate with a `[truncated N bytes]` marker.
   Included in HAR export when the content is available.
-- `ghax console --source-maps` — resolve bundled stack frames back to their
-  original source locations via the page's source maps. Each captured
-  `pageerror` already parses its stack; with `--source-maps`, every frame
-  is run through the daemon's source-map cache: fetch the script, read
-  its `sourceMappingURL` comment (or data: URI), parse the map, look up
-  the original position. Result includes the resolved `{url, line, col}`
-  plus `{bundledUrl, bundledLine, bundledCol}` for correlation. Silent
-  fallback to the bundled frame on any failure (script unreachable, no
-  map comment, parse error, position out of range). Adds ~60KB to the
+- `ghax console --source-maps` — resolve bundled stack frames back to
+  their original source locations via the page's source maps. Each
+  captured `pageerror` already parses its stack; with `--source-maps`,
+  every frame is run through the daemon's source-map cache. Silent
+  fallback to the bundled frame on any failure. Adds ~60KB to the
   daemon bundle for the `source-map` library; zero cost when the flag
   isn't used.
 - `ghax shell` — interactive REPL. Reads commands from stdin, tokenises
-  with shell-ish quoting (single/double quotes, backslash escapes),
-  re-enters the main dispatcher per line. One process for the whole
-  session, so the per-command Bun spawn cost goes away. Measured 1.8x
-  faster for 10-command batches (138ms/cmd vs 247ms/cmd for separate
-  invocations). Works as a pipe (`cat script.txt | ghax shell`) or
-  interactively (TTY prompt, history, Ctrl-D to exit). `exit`/`quit`
-  stop the loop; `#` lines are comments.
+  with shell-ish quoting, re-enters the main dispatcher per line. One
+  process for the whole session, so the per-command Bun spawn cost goes
+  away. Measured 1.8× faster for 10-command batches (138ms/cmd vs
+  247ms/cmd for separate invocations). Works as a pipe or TTY prompt.
 - Disconnect recovery. The daemon now listens for
   `browser.on('disconnected')` and self-shuts cleanly when the user's
   browser quits or a scratch browser crashes. State file gets cleared,
-  next `ghax attach` is fresh. CLI-side, "browser has been closed" /
-  "Target page has been closed" errors get rewritten to
-  "browser has disconnected — run `ghax attach` to reconnect" instead
-  of surfacing as a raw Playwright stack trace.
+  next `ghax attach` is fresh. CLI-side, Playwright "browser has been
+  closed" / "Target page has been closed" errors get rewritten to
+  "browser has disconnected — run `ghax attach` to reconnect".
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>]
   [--shot <path>]` — live-injection fix-preview. Composable wrapper over
   `page.evaluate` + `page.screenshot` for the "mutate the live page,
-  measure, maybe screenshot" loop. CSS appends `<style class="ghax-try">`;
-  JS is IIFE-wrapped with optional `el` binding; `--measure` runs
-  post-mutation. Revert = reload the page.
+  measure, maybe screenshot" loop. Revert = reload the page.
 - `ghax perf [--wait <ms>]` — Core Web Vitals + navigation timing. Reads
-  LCP (with size and URL), FCP, FP, CLS, TTFB, INP, long-task count,
-  plus full navTiming breakdown (DNS, TCP, TLS, TTFB, response,
-  DOMInteractive, DOMContentLoaded, load, transfer/encoded/decoded
-  sizes). LCP/CLS/longtask come via a buffered PerformanceObserver — they
-  don't live in the default timeline buffer.
+  LCP (with size + URL), FCP, FP, CLS, TTFB, INP, long-task count, plus
+  full navTiming breakdown. LCP/CLS/longtask come via a buffered
+  PerformanceObserver.
 - `ghax find <url-substring>` — list tabs whose URL contains the
-  substring. Returns `[{id, url, title}]`. Pipe the id into `ghax tab`
-  to attach to a matching tab, or fall through to `new-window`.
+  substring. Returns `[{id, url, title}]`.
 - `ghax new-window [url]` — open a new OS-level window via
   `Target.createTarget({ newWindow: true, background: true })`. Same
   profile, so auth + extensions carry over. Does NOT steal focus.
-  Auto-locks the new tab as the daemon's active tab so subsequent
-  commands land in the fresh window without an extra `tab` step.
 - `ghax tab <id> --quiet` — skip `bringToFront`. Lets an agent lock onto
-  a tab without raising the window or stealing focus from whatever
-  the user is actively doing.
-- `ghax attach` ergonomics: auto-port fallback (`--launch` without
-  `--port` scans :9222-9230 and picks the first free one, prints the
-  chosen port on fallback), multi-CDP picker (plain `ghax attach` with
-  multiple live CDPs shows a numbered selector), `--headless` flag
-  (scratch-profile only — spawns with `--headless=new` so extensions
-  still work), and a clearer kind-mismatch error when `--browser chrome`
-  is asked for but only Edge is running.
+  a tab without raising the window or stealing focus.
+- `ghax attach` ergonomics: auto-port fallback (scans :9222-9230 and
+  picks the first free one on `--launch`), multi-CDP picker, `--headless`
+  flag (scratch-profile only), and a clearer kind-mismatch error when
+  `--browser chrome` is asked for but only Edge is running.
 - `ghax console --dedup` — groups repeated entries by (level, text)
   into `[{level, text, count, firstAt, lastAt, url, source, stack}]`
-  sorted by count desc. Turns "500 identical errors" into one row with
-  count=500. On capture, `pageerror` events now include a parsed stack
-  `[{fn, url, line, col}]` via a new V8 stack-trace parser in
-  `buffers.ts`.
+  sorted by count desc. On capture, `pageerror` events now include a
+  parsed stack `[{fn, url, line, col}]` via a new V8 stack-trace parser.
 - `ghax network --status <code|family|range>` filter — `--status 404`
   (exact), `--status 4xx` (family), `--status 400-499` (range).
 - `ghax network --har <path>` — export captured entries as HAR 1.2 JSON
@@ -287,116 +228,62 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   DevTools network panel.
 - Request + response **headers** captured on every network entry (not
   just URL + status). Response `statusText` and `duration` also
-  captured. Bodies are still not captured by default (memory cost too
-  high for a 5k rolling buffer).
+  captured.
 - `test/cross-browser.ts` + `bun run test:cross-browser` — iterates every
   Chromium-family browser `detectBrowsers()` finds, launches each
   headless in a disposable scratch profile, runs the full smoke suite
-  against it, tabulates pass/fail + timing per browser. Arc is filtered
-  out (no CDP). First baseline: Edge 64/64 in 24.3s, Chrome 64/64 in
-  26.5s.
+  against it, tabulates pass/fail + timing per browser. First baseline:
+  Edge 64/64 in 24.3s, Chrome 64/64 in 26.5s.
 - `test/benchmark.ts` + `bun run test:benchmark` — headless CLI benchmark
   against gstack-browse, playwright-cli, and agent-browser on a
-  6-step workflow (launch → goto → text → js → screenshot → snapshot →
-  close). Reports cold (end-to-end) and warm (per-command, session
-  reused) numbers. First baseline: ghax 65ms/cmd, gstack 56ms/cmd,
-  agent-browser 178ms/cmd, playwright-cli 476ms/cmd.
+  6-step workflow.
 - `ghax profile [--duration sec] [--heap] [--extension <id>]` — CDP
   `Performance.getMetrics` snapshot for the active tab or an
   extension service worker. Optional duration-based delta capture and
   heap snapshot (writes a `.heapsnapshot` loadable in DevTools).
-  Report written to `.ghax/profiles/<ts>.json`.
 - `ghax console --follow` / `ghax network --follow` / `ghax ext sw <id>
   logs --follow` — live Server-Sent-Events streaming. Daemon exposes
-  `/sse/console`, `/sse/network`, `/sse/ext-sw-logs/<ext-id>`;
-  CLI consumes and prints each event as JSON. Ctrl-C exits 0.
+  `/sse/console`, `/sse/network`, `/sse/ext-sw-logs/<ext-id>`; CLI
+  consumes and prints each event as JSON. Ctrl-C exits 0.
 - `ghax ext sw <id> logs [--last N] [--errors]` — dedicated SW
   console buffer (subscribes to `Runtime.consoleAPICalled` +
   `Runtime.exceptionThrown` on first call). Persists across reads,
   auto-resubscribes after hot-reload.
 - `ghax ext popup <id> eval <js>` + `ghax ext options <id> eval <js>`
-  — same shape as `ext panel`, for the popup and options pages. URL
-  pattern matching against `/popup.html`, `/options.html`, etc.
+  — same shape as `ext panel`, for the popup and options pages.
 - `ghax diff-state <before.json> <after.json>` — structural JSON
-  diff. Emits RFC-6901-style paths (`/a/b/0`) with `+` / `-` / `~`
-  prefixes. Supports `--json` for machine output.
+  diff. Emits RFC-6901-style paths with `+` / `-` / `~` prefixes.
 - `ghax ship [--message "..."] [--no-check] [--no-build] [--no-pr]
-  [--dry-run]` — opinionated commit + push + PR workflow. Runs
-  typecheck + build first; on a non-main branch, fires
-  `gh pr create --fill` or reports the existing PR URL.
+  [--dry-run]` — opinionated commit + push + PR workflow.
 - `ghax canary <url> [--interval sec] [--max sec] [--out r.json]
   [--fail-fast]` — periodic prod health check. Goto + snapshot +
-  capture console errors + HTTP >=400 responses per cycle. Appends
-  a rolling log to `.ghax/canary-<host>.log`; writes a structured
-  JSON report on exit.
+  capture console errors + HTTP >=400 responses per cycle.
 - `ghax review [--base origin/main] [--diff]` — emits a Claude-ready
-  review prompt wrapping the branch's diff against a base. No API
-  calls — stdout only, user pipes to `claude` or pastes.
-- `ghax pair status` — v0 SSH-tunnel setup instructions. A proper
-  token-auth multi-tenant mode is deferred to v0.5.
-
-- `ghax qa` — orchestrated QA pass over a URL list. Flow: attach →
-  goto each URL → `snapshot -i` → record console errors + HTTP >=400
-  responses → write `qa-report.json`. Flags: `--url` (repeatable),
-  `--urls a,b,c`, positional URLs, or stdin JSON array. `--out`,
-  `--screenshots`, `--annotate`, `--gif`.
-- `ghax qa --crawl <root>` — auto URL discovery. Tries
-  `<root>/sitemap.xml` first; falls back to same-origin `<a href>`
-  scraping up to `--depth N` hops (default 1), capped by `--limit N`
-  (default 20).
-- `ghax is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>`
-  — assertion command. Exit 0 if condition holds, 1 otherwise.
-- `ghax storage [local|session] [get|set|remove|clear|keys] [key] [value]`
-  — page-level localStorage / sessionStorage.
+  review prompt wrapping the branch's diff against a base.
+- `ghax pair status` — v0 SSH-tunnel setup instructions.
+- `ghax qa` — orchestrated QA pass over a URL list.
+- `ghax qa --crawl <root>` — auto URL discovery via `<root>/sitemap.xml`,
+  falls back to same-origin `<a href>` scraping up to `--depth N` hops.
+- `ghax is <visible|hidden|enabled|disabled|checked|editable>
+  <@ref|selector>` — assertion command. Exit 0 if condition holds, 1
+  otherwise.
+- `ghax storage [local|session] [get|set|remove|clear|keys] [key]
+  [value]` — page-level localStorage / sessionStorage.
 - `ghax ext message <ext-id> <json-payload>` — `chrome.runtime.sendMessage`
   wrapper.
 - `ghax gesture dblclick <x,y>` + `ghax gesture scroll <dir> [amount]` —
   real CDP `Input.dispatch*` gestures.
 - `ghax attach --launch --load-extension <path> [--data-dir <path>]` —
   pass-through for Chrome's `--load-extension` + scratch profile.
-- `test/smoke.ts` — 64-check harness against a live browser (grew from
-  24 as the v0.4 + debugging-tier-1 surface landed).
+- **Invariant enforcement**: `ctx.refs` is now cleared when the active
+  tab changes (via `tab <id>` or `new-window`). Previously the
+  "refs survive only until next snapshot" rule held within a tab but
+  broke across tab switches — `@e3` from tab A could silently resolve
+  against tab B's DOM. A new smoke check (`refs cleared on tab switch`)
+  asserts the invariant.
+- `test/smoke.ts` — 80-check harness against a live browser.
 - `test/hot-reload-smoke.ts` — fully scripted hot-reload verification.
 - `test/fixtures/test-extension/` — minimal MV3 fixture.
-
-### Changed
-
-- `ghax ext list` enriches each entry with manifest-derived `name`,
-  `version`, and `enabled` fields.
-- `ghax attach` defaults changed: no `--port` now scans :9222-9230 for
-  existing CDPs (multiple → picker, one → attach). With `--launch` and
-  no `--port`, auto-picks the first free port in the same range. Pass
-  `--port <n>` explicitly to opt out of the scan.
-- `ghax attach --browser <kind>` now filters the scan too — so
-  requesting Chrome while Edge runs on :9222 correctly triggers launch
-  (with `--launch`) or a useful error (without it), instead of silently
-  attaching to the wrong browser.
-- `ghax tab <id>` gained a `--quiet` flag to skip `bringToFront`; default
-  behavior unchanged.
-- Network capture now stores request + response headers, response
-  `statusText`, and per-request `duration` in addition to the original
-  URL/status/method/resourceType.
-- README reflects v0.4 features, expanded surface, and new debugging
-  primitives (`perf`, `try`, `console --dedup`, `network --har`).
-- `bun run install-link` / `bun run uninstall-link` — symlink
-  `dist/ghax` into `~/.local/bin` so the binary resolves from any
-  shell + any Claude Code session without the caller qualifying the
-  path. Idempotent, reversible.
-
-### Fixed
-
-- Shadow-DOM selector generation: direct children of a `ShadowRoot`
-  were emitting an empty segment. Now falls back to `walker.parentNode`
-  when `parentElement` is null at the shadow boundary.
-- Shadow-DOM selectors use ` >> ` (Playwright's chain combinator)
-  instead of the invented `>>>`.
-
-## [1.0.0] - 2026-04-19 (UNRELEASED)
-
-The Rust CLI rewrite. ghax is now a 2.6 MB Rust binary that talks to the
-unchanged Node daemon over HTTP. 30x faster cold start, 24x smaller
-download, distributed as platform-specific binaries via cargo-dist for 6
-target triples.
 
 ### Changed
 - ghax CLI: TypeScript/Bun → Rust 2021 edition. Single source of truth.
@@ -405,33 +292,84 @@ target triples.
 - Cold start: ~70 ms (P50) → ~20 ms (P50). P99 ~600 ms → ~20 ms.
 - Build: now requires Rust toolchain (1.80+). Bun stays as a dev tool for
   the daemon bundle (`bun build --target=node`) and the test runner.
+- Daemon DRY pass: three new helpers collapse repeated shapes.
+  `evalInTarget()` centralises nine `Runtime.evaluate` sites with
+  consistent `exceptionDetails` handling. `getSwTarget()` owns the
+  find-sw / pool.get / Runtime.enable dance across five extension
+  verbs. `withCdpSession()` owns the session open + try/finally +
+  detach lifecycle across five gesture/profile sites.
+- Rust CLI DRY pass: new `time_util` module consolidates three copies
+  of the ISO-8601 / days-to-ymd logic; new `qa_common` module shares
+  the `console_errors_since` / `failed_requests_since` filters
+  between `qa` and `canary`, with the filtering now happening
+  daemon-side via the new `since:` opt.
+- `dispatch.rs` swaps a hand-rolled percent-encoder for the
+  `urlencoding` crate; `qa.rs` swaps a hand-rolled URL resolver for
+  `url::Url::join`.
+- `require_daemon` (Rust) now trusts `/health` as the liveness
+  signal and only falls back to the `kill(pid, 0)` syscall when
+  `/health` fails — every CLI invocation shaves a syscall.
+- `snapshot.ts` caches `getComputedStyle()` results per element for
+  the duration of one walk. The cursor-interactive pass used to
+  force-recalc styles O(n · depth) times on SPA-sized trees; now
+  O(n) via a scoped `WeakMap`.
+- Daemon: `pageTargetId()` caches the target id on a `WeakMap<Page>`.
+  Every command that walks tabs used to pay a full CDP round-trip
+  per page per call. With the cache, the hot path is O(1).
+- Daemon: `tabs` and `find` handlers now fan out per-page
+  `pageTargetId` + `page.title()` in parallel with `Promise.all`
+  instead of a serial await loop.
+- `snapshot.ts`: the aria-tree disambiguation pass used to call
+  `parseLine()` twice per line. Parsed once into a reused array —
+  meaningful on large SPAs.
+- `attach.rs` simplification (post-/simplify pass): collapsed the
+  two-function `spawn_daemon` + `spawn_daemon_with_retry` recursion-
+  with-flag into a single `for attempt in 0..2` loop. Extracted
+  `build_daemon_cmd()` and `is_missing_module()` helpers.
+- Bash scripts factor out `scripts/bootstrap-daemon-runtime.sh` — now
+  the single source of truth for the daemon's `npm install` step.
+  `install-link.sh` and `install-release.sh` both delegate to it.
+  Includes version-mismatch detection.
+- `release.sh` swaps `cargo build --release` (30-90s, artifact unused)
+  for `cargo update --workspace` (~1s) — the local build was only there
+  to refresh `Cargo.lock` after the version sed; CI builds the
+  authoritative artifact.
+- `ghax ext list` enriches each entry with manifest-derived `name`,
+  `version`, and `enabled` fields.
+- `ghax attach` defaults changed: no `--port` now scans :9222-9230 for
+  existing CDPs. Pass `--port <n>` explicitly to opt out of the scan.
+- `ghax attach --browser <kind>` now filters the scan too.
+- Network capture now stores request + response headers, response
+  `statusText`, and per-request `duration`.
+- `bun run install-link` / `bun run uninstall-link` — symlink
+  `dist/ghax` into `~/.local/bin` so the binary resolves from any
+  shell without the caller qualifying the path. Idempotent, reversible.
+- README reflects v0.4 features, expanded surface, and new debugging
+  primitives (`perf`, `try`, `console --dedup`, `network --har`).
+- Trimmed a "BUG-001" ticket label out of the user-facing daemon-failure
+  error message; the surrounding text already explains the fix.
 
-### Added
-- 6-target release matrix via cargo-dist (macOS x64/ARM, Linux x64/ARM,
-  Windows x64/ARM).
-- Shell + PowerShell installer scripts that download from this repo's
-  GitHub Releases. All distribution stays inside `kepptic/ghax` — no
-  Homebrew tap, no crates.io publish, no npm publish required.
-- Daemon discovery precedence in `attach.rs`: (1) `$GHAX_DAEMON_BUNDLE`
-  env var, (2) sibling of CLI binary, (3) dev fallback at
-  `<repo root>/dist/ghax-daemon.mjs`.
-- Smoke suite (`test/smoke.ts`) reads `GHAX_BIN` env var so the same 80
-  checks run against any binary. 80/80 against the Rust binary in 31.3s.
+### Fixed
+- Shadow-DOM selector generation: direct children of a `ShadowRoot`
+  were emitting an empty segment. Now falls back to `walker.parentNode`
+  when `parentElement` is null at the shadow boundary.
+- Shadow-DOM selectors use ` >> ` (Playwright's chain combinator)
+  instead of the invented `>>>`.
 
 ### Removed
-- The Bun CLI source — `src/cli.ts` (~2,071 lines) and `src/browser-launch.ts`
-  (~230 lines). The `bin/ghax` shim now resolves to `target/release/ghax`
-  (Rust) only; the Bun fallback paths are gone. If you need the Bun CLI
-  back, `git log --oneline -- src/cli.ts` will find it in history.
-- The `dev` package.json script (`bun run src/cli.ts`) — no source CLI to
-  hot-reload anymore. Use `cargo run --release` for the Rust equivalent.
-- The Bun-compiled `dist/ghax` binary — the `build` script now bundles
-  the daemon only.
+- The Bun CLI source — `src/cli.ts` (~2,071 lines) and
+  `src/browser-launch.ts` (~230 lines). The `bin/ghax` shim now
+  resolves to `target/release/ghax` (Rust) only; the Bun fallback
+  paths are gone.
+- The `dev` package.json script (`bun run src/cli.ts`) — no source
+  CLI to hot-reload anymore. Use `cargo run --release` for the Rust
+  equivalent.
+- The Bun-compiled `dist/ghax` binary — the `build` script now
+  bundles the daemon only.
 
 ## [0.3.0] — 2026-04-18
 
 ### Added
-
 - `ghax ext hot-reload <ext-id>` — MV3 seamless reload. Reads the extension
   manifest, fires `chrome.runtime.reload()` without awaiting, waits for the
   service worker to restart, then re-injects each declared `content_scripts`
@@ -453,7 +391,6 @@ target triples.
 ## [0.2.0] — 2026-04-18
 
 ### Added
-
 - `ghax snapshot -a -o <path>` — annotated screenshot: red overlay boxes +
   `@e<n>` labels composited onto a full-page screenshot via an injected SVG
   (avoids re-layout on React pages).
@@ -472,7 +409,6 @@ target triples.
 ## [0.1.0] — 2026-04-18
 
 ### Added
-
 - Flagship `ghax browse` — attach to a running Chrome or Edge via CDP.
 - Daemon architecture: compiled Bun CLI → HTTP → Node ESM bundle daemon
   (Playwright's `connectOverCDP` hangs under Bun 1.3.x, so the daemon runs
@@ -497,8 +433,9 @@ target triples.
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/kepptic/ghax/compare/v0.3.0...v1.0.0
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/kepptic/ghax/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/kepptic/ghax/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/kepptic/ghax/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kepptic/ghax/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kepptic/ghax/releases/tag/v0.1.0
