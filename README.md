@@ -7,7 +7,7 @@ instead of spinning up sandboxed copies.
 **Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
 layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
 `review`, `pair`, `try`) and a background-window workflow
-(`find`, `new-window`, `tab --quiet`) for multi-agent use. 70/70 smoke
+(`find`, `new-window`, `tab --quiet`) for multi-agent use. 95 smoke
 checks on Edge + Chrome. Repo is private under `kepptic` for now;
 open-source release paused.
 
@@ -57,10 +57,20 @@ Attach to a running Chrome or Edge over CDP, then drive it:
   message instead of a raw Playwright stack trace.
 - **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
   widths; `ghax viewport WxH` for one-offs.
-- **Batch + record + render**: pipe JSON to `ghax chain` for scripted flows;
-  `ghax record start / stop` captures every command into a replayable
-  `.ghax/recordings/<name>.json`; `ghax gif <recording>` stitches the
-  frames via ffmpeg.
+- **Batch + record + render**: `ghax batch '[{"cmd":"click","args":["@e7"]}, …]'`
+  ships a whole plan in one round-trip and auto-re-snapshots between
+  ref-using steps (so clicking a combobox that reshuffles the ARIA tree
+  doesn't wreck later refs); `ghax chain` reads the same shape from
+  stdin for ad-hoc flows; `ghax record start / stop` captures every
+  command into a replayable `.ghax/recordings/<name>.json`; `ghax gif
+  <recording>` stitches the frames via ffmpeg.
+- **Dialog-aware snapshots**: when a modal is open (`[role=dialog]`,
+  `<dialog open>`, `[aria-modal=true]`), `ghax snapshot` walks the
+  dialog instead of the body. Fall back with `--no-dialog-scope`.
+- **Framework-safe `fill`**: native-setter + `input` for React,
+  explicit `blur` for Angular validators, and `contenteditable` paths
+  for Material chip inputs and rich editors — so `fill @e5 "hello"`
+  actually updates state across every framework you'd hit in the wild.
 
 ## Install
 
