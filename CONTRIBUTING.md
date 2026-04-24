@@ -1,8 +1,14 @@
 # Contributing to ghax
 
 Thanks for your interest. ghax is pre-v1; expect rough edges and
-opinionated pushback. That said, PRs are welcome — this doc lists the
+opinionated pushback. That said, PRs are welcome. This doc lists the
 moving parts so you can land one without friction.
+
+**Working with an AI coding agent?** Point it at [llms.txt](./llms.txt)
+(install/usage) and [AGENTS.md](./AGENTS.md) (project memory). Those
+two files contain everything an agent needs to work on this repo; this
+document covers the same ground plus human-oriented bits (PR style,
+code of conduct, issue reporting).
 
 ## Repo layout
 
