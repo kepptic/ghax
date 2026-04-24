@@ -12,7 +12,28 @@ ghax fill @e5 "hello"
 
 That's it. No separate browser to install. No fresh Chromium. No *please log in again*. Or use a scratch profile if that's what you want. Your call.
 
-[Install →](#install) · [Quickstart →](#quickstart) · [Use with AI agents →](#install-with-an-ai-agent) · [Full commands →](#command-reference) · [License](#license)
+[Benchmarks →](#fast-really-fast) · [Install →](#install) · [Quickstart →](#quickstart) · [Use with AI agents →](#install-with-an-ai-agent) · [Full commands →](#command-reference) · [License](#license)
+
+---
+
+## Fast. Really fast.
+
+Ghax doesn't launch a browser — it connects to one you already have running. Zero per-command launch tax.
+
+| Tool | Cold start | Warm (per command) | Speedup |
+|------|-----------:|-------------------:|--------:|
+| **ghax** | **1.56 s** | **49 ms** | — |
+| gstack-browse | 6.70 s | 58 ms | ghax 4.3× faster cold |
+| agent-browser | 3.48 s | 344 ms | ghax 7.0× faster warm |
+| playwright-cli | 5.13 s | 680 ms | **ghax 13.9× faster warm** |
+
+Cold-start workflow: launch → goto → text → eval → screenshot → snapshot → close. Warm: per-command loop on an already-attached session. Apple Silicon, Edge on `--remote-debugging-port=9222`.
+
+On real-world content (Wikipedia's `JavaScript` article, ~250 KB), the warm-loop gap widens: **ghax 117 ms/cmd vs playwright-cli 778 ms/cmd.** Text extraction is 9× faster (154 ms vs 1,404 ms) because ghax hits a DOM that's already parsed instead of launching a fresh browser to query it.
+
+The binary: **~3 MB** stripped on Apple Silicon. The daemon bundle: **~80 KB** of JavaScript. Cold single-command invocation: **~20 ms**.
+
+Full methodology + per-operation breakdowns + reproduction steps in [docs/BENCHMARK.md](./docs/BENCHMARK.md).
 
 ---
 
@@ -144,27 +165,6 @@ Works on every Chromium-family browser: Edge, Chrome, Chromium, Brave, Arc. Fire
 - **Framework-safe `fill`.** Native-setter + `input` for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors.
 - **Batch execution.** `ghax batch '[{"cmd":"click","args":["@e7"]}, …]'` ships a whole plan in one round-trip and auto-re-snapshots between steps that use refs, so a mid-plan combobox reshuffle doesn't break the rest of your sequence.
 - **Background-window workflow.** `new-window`, `find`, `tab --quiet` give an agent its own window in your browser without stealing focus.
-
----
-
-## Performance
-
-Ghax is the fastest CLI in its class because it doesn't launch a browser — it connects to one you already have running. Zero per-command launch tax.
-
-Cold-start workflow (launch → goto → text → eval → screenshot → snapshot → close) on `example.com`, Apple Silicon:
-
-| Tool | Cold start | Warm steady-state |
-|------|-----------:|------------------:|
-| **ghax** | **1,560 ms** | **49 ms/cmd** |
-| gstack-browse | 6,697 ms | 58 ms/cmd |
-| agent-browser | 3,482 ms | 344 ms/cmd |
-| playwright-cli | 5,126 ms | 680 ms/cmd |
-
-On real-world content (Wikipedia `JavaScript` article, ~250 KB), the warm-loop gap widens further: ghax 117 ms/cmd vs playwright-cli 778 ms/cmd — 6.6× faster per command. Text extraction is 9× faster (ghax 154 ms vs playwright-cli 1,404 ms) because we hit the DOM that's already parsed instead of launching a browser just to query it.
-
-The binary itself: **~3 MB** stripped on Apple Silicon, **~20 ms** cold start for single-command invocations. The daemon bundle is **~80 KB** of JavaScript.
-
-Full methodology, per-operation breakdowns, and reproduction steps: [docs/BENCHMARK.md](./docs/BENCHMARK.md).
 
 ---
 
