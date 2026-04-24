@@ -1,312 +1,236 @@
 # ghax
 
-G's open-source developer toolkit. A collection of CLI tools + Claude Code skills
-that attach to your **real** environment (real browser, real auth, real extensions)
-instead of spinning up sandboxed copies.
+Drive your **real** running Chrome or Edge from the command line. Not a
+sandboxed copy. Your actual browser, with your actual auth, your actual
+extensions, and your actual open tabs.
 
-**Status**: v0.4 complete. Flagship `ghax browse` plus an orchestrated
-layer (`qa`, `perf`, `profile`, `diff-state`, `ship`, `canary`,
-`review`, `pair`, `try`) and a background-window workflow
-(`find`, `new-window`, `tab --quiet`) for multi-agent use. 95 smoke
-checks on Edge + Chrome. Repo is private under `kepptic` for now;
-open-source release paused.
+```bash
+ghax attach
+ghax goto https://app.example.com
+ghax snapshot -i              # aria tree with @e1, @e2, ... refs
+ghax click @e3
+ghax fill @e5 "hello"
+```
 
-## What ghax does today
+That's it. No Playwright install dance. No fresh Chromium. No "please
+log in again." The browser you already have open is the browser you
+drive.
 
-Attach to a running Chrome or Edge over CDP, then drive it:
+## Why this exists
 
-- **Tabs**: list, switch, navigate, back/forward/reload, screenshot, text, eval.
-- **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role + name,
-  not fragile CSS selectors. Cursor-interactive pass for Radix / Headless UI
-  popovers that never land in the a11y tree, and **shadow-DOM aware** —
-  walks open shadow roots and emits Playwright chain selectors
-  (`host >> inner`) for
-  custom-element-heavy apps (Lit, Shoelace, web components).
-- **Annotated snapshots** (`-a`): red overlay boxes + `@e<n>` labels drawn
-  onto a full-page screenshot — useful when an LLM needs to "see" the refs.
-- **MV3 extensions**: list all extensions, reload them, eval JS in a service
-  worker, read/write `chrome.storage.*`, interact with side panels.
-- **Seamless extension hot-reload** (`ghax ext hot-reload`): reload the SW
-  and re-inject content scripts + CSS into every matching tab, so
-  `pnpm build` → new code running in ~5s without killing your tab state.
-- **Real user gestures** via CDP `Input.dispatch*` (needed for APIs like
-  `chrome.sidePanel.open()` that refuse synthetic clicks).
-- **Console + network capture** from the moment you attach — rolling 5k-entry
-  buffers, `--errors` and `--pattern` filters, request+response headers,
-  HAR 1.2 export, stack-frame parsing on page errors, dedup grouping,
-  **source-map resolution** (`--source-maps` maps `main.abc123.js:1:48291`
-  back to `src/AuthForm.tsx:42:12`).
-- **Core Web Vitals** (`ghax perf`): LCP (with size + source URL), FCP,
-  CLS, TTFB + full navigation-timing breakdown. Buffered
-  PerformanceObserver so you catch entries that fired before you asked.
-- **Live-injection fix-preview** (`ghax try`): mutate the live page via
-  CSS/JS, optional measurement and screenshot in one call. Revert =
-  reload the page.
-- **Background-window workflow** (`ghax find` / `new-window` /
-  `tab --quiet`): agent gets its own OS window in the same browser +
-  profile, zero focus steal, user keeps working in their other tabs.
-  Multi-agent isolation comes free via `GHAX_STATE_FILE`.
-- **Headless scratch mode** (`ghax attach --launch --headless`): spawn a
-  fresh Chromium on an auto-picked port for CI-style runs. Lives in its
-  own window so it doesn't touch your daily-driver browser.
-- **Interactive shell** (`ghax shell`): REPL that keeps the CLI process
-  alive between commands. Skips the per-command spawn cost — ~1.8x
-  faster for multi-turn agent sessions. Works piped or interactive.
-- **Disconnect recovery**: if the browser crashes or you close it, the
-  daemon self-shuts cleanly and subsequent commands print a helpful
-  message instead of a raw Playwright stack trace.
-- **Responsive testing**: `ghax responsive` snaps mobile / tablet / desktop
-  widths; `ghax viewport WxH` for one-offs.
-- **Batch + record + render**: `ghax batch '[{"cmd":"click","args":["@e7"]}, …]'`
-  ships a whole plan in one round-trip and auto-re-snapshots between
-  ref-using steps (so clicking a combobox that reshuffles the ARIA tree
-  doesn't wreck later refs); `ghax chain` reads the same shape from
-  stdin for ad-hoc flows; `ghax record start / stop` captures every
-  command into a replayable `.ghax/recordings/<name>.json`; `ghax gif
-  <recording>` stitches the frames via ffmpeg.
-- **Dialog-aware snapshots**: when a modal is open (`[role=dialog]`,
-  `<dialog open>`, `[aria-modal=true]`), `ghax snapshot` walks the
-  dialog instead of the body. Fall back with `--no-dialog-scope`.
-- **Framework-safe `fill`**: native-setter + `input` for React,
-  explicit `blur` for Angular validators, and `contenteditable` paths
-  for Material chip inputs and rich editors — so `fill @e5 "hello"`
-  actually updates state across every framework you'd hit in the wild.
+Every AI coding agent and every browser-automation script out there has
+the same problem: they launch their own browser. Which means they don't
+have your SSO session, don't have your Chrome extensions, don't know
+which tabs you're already working in, and will happily trigger
+Cloudflare bot protection on every SaaS dashboard worth QAing.
+
+`ghax` attaches over CDP. One command. Real browser. Real state.
+
+It's the tool I wish existed when I was running an agent against
+Autotask / Hudu / Azure Portal / Google Ads / any other dashboard
+behind a 15-step SSO flow.
+
+## What it does
+
+- **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role
+  and name, not fragile CSS selectors. Walks open shadow roots for
+  custom-element apps (Lit, Shoelace, web components) and emits
+  Playwright chain selectors (`host >> inner`) automatically.
+- **Dialog-aware**. When a modal is open, snapshots walk the modal, not
+  the `aria-hidden="true"` app behind it. Saves you from empty trees
+  on Radix / Headless UI / Material dialogs.
+- **MV3 extension internals**. List extensions, reload them, eval JS in
+  service workers, read/write `chrome.storage.*`, interact with side
+  panels, popups, options pages. Hot-reload on rebuild so `pnpm build`
+  gives you new code in 5 seconds without losing tab state.
+- **Real user gestures** via CDP `Input.dispatch*`. Because
+  `chrome.sidePanel.open()` and friends refuse synthetic clicks.
+- **Console + network capture** from the moment you attach. Rolling 5k
+  buffers, `--errors` and `--pattern` filters, request + response
+  headers, HAR 1.2 export, stack-frame parsing, dedup grouping, and
+  **source-map resolution** (`main.abc123.js:1:48291` →
+  `src/AuthForm.tsx:42:12`).
+- **Core Web Vitals** (`ghax perf`). LCP (with the element that hit
+  it), FCP, CLS, TTFB, full nav timing. Buffered observers catch
+  entries that fired before you asked.
+- **Live fix-preview** (`ghax try`). Inject CSS or JS against the
+  running page, measure the result, screenshot it, all in one call.
+  Revert = reload.
+- **Framework-safe `fill`**. Native-setter + `input` for React,
+  explicit `blur` for Angular validators, `contenteditable` paths for
+  Material chip inputs and rich editors. Works on every framework you
+  actually hit.
+- **Batch execution**. `ghax batch '[{"cmd":"click","args":["@e7"]},
+  ...]'` ships a whole plan in one round-trip and auto-re-snapshots
+  between steps that use refs, so a mid-plan combobox reshuffle
+  doesn't break the rest of your sequence.
+- **Background-window workflow**. `new-window`, `find`, `tab --quiet`
+  give an agent its own window in your browser without stealing focus
+  from the window you're working in. Multi-agent isolation via
+  `GHAX_STATE_FILE`.
+
+Full command reference in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Install
 
-ghax ships as a platform-specific Rust binary (~2.6 MB stripped on
-Apple Silicon, ~10 MB on Linux x64). All distribution stays inside this
-repo's GitHub Releases — no external taps, registries, or accounts.
+ghax ships as a platform-specific Rust binary. Under 3 MB stripped on
+Apple Silicon. Distribution is GitHub Releases only. No registries,
+no taps, no accounts.
 
 ```bash
-# macOS / Linux one-liner (downloads from this repo's GitHub Releases)
+# macOS / Linux
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.sh | sh
 
-# Windows PowerShell one-liner
+# Windows PowerShell
 irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 | iex
-
-# Or just download and unpack the archive for your platform
-curl -L https://github.com/kepptic/ghax/releases/latest/download/ghax-aarch64-apple-darwin.tar.xz | tar xJ
 ```
 
-**Runtime requirement:** the daemon needs **Node 20+**. If you have any
-Playwright-based tool installed you already have it; ghax doesn't add a
-new runtime expectation.
+Runtime needs **Node 20+** for the daemon. If you have Playwright
+installed anywhere, you already have it.
 
-**Build from source** (needs Rust 1.80+ and Node 20+):
+Build from source (Rust 1.80+, Node 20+):
 
 ```bash
+git clone https://github.com/kepptic/ghax.git
+cd ghax
 npm install
-npm run build:all    # compiles Rust CLI + bundles Node daemon
-npm run install-link    # symlinks the Rust binary → ~/.local/bin/ghax
+npm run build:all
+npm run install-link        # symlinks → ~/.local/bin/ghax
 ```
 
-`install-link` is optional but makes `ghax` available from any directory
-without qualifying the path. `~/.local/bin` is on the default macOS user
-PATH. Re-run is idempotent; remove via `npm run uninstall-link`.
+## Quickstart
 
-1. Launch your Edge or Chrome with CDP enabled:
+1. Launch your browser with CDP enabled:
 
    ```bash
-   # macOS — Edge
+   # macOS Edge
    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
      --remote-debugging-port=9222 &
+
+   # macOS Chrome (v113+ also needs an explicit profile path — see
+   # CONTRIBUTING.md "Known browser quirks")
+   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+     --remote-debugging-port=9222 \
+     --user-data-dir="$HOME/.config/chrome-ghax" &
    ```
 
-2. Attach:
+2. Attach. Ghax scans ports 9222–9230 and picks the running browser:
 
    ```bash
-   ./bin/ghax attach
-   # attached — pid 12345, port 54321, browser edge
+   ghax attach
    ```
 
 3. Drive it:
 
    ```bash
-   ./bin/ghax tabs
-   ./bin/ghax goto https://example.com
-   ./bin/ghax snapshot -i
-   ./bin/ghax click @e3
-   ./bin/ghax fill @e5 "hello"
-   ./bin/ghax screenshot --path /tmp/shot.png
-
-   # Extension work
-   ./bin/ghax ext list
-   ./bin/ghax ext sw <ext-id> eval "chrome.runtime.getManifest().version"
-   ./bin/ghax ext storage <ext-id> local get
-   ./bin/ghax ext storage <ext-id> local set someKey '{"a":1}'
+   ghax tabs                          # list open tabs
+   ghax goto https://example.com
+   ghax snapshot -i                   # get @e refs
+   ghax click @e3
+   ghax fill @e5 "hello"
+   ghax screenshot --path /tmp/shot.png
+   ghax perf                          # Core Web Vitals
    ```
 
 4. Detach when done:
 
    ```bash
-   ./bin/ghax detach
+   ghax detach
    ```
 
-Don't want to relaunch your browser manually? `ghax attach --launch` will spawn
-Edge (or `--browser chrome`) with a scratch profile under `~/.ghax/<kind>-profile/`.
-Using your **real** profile without relaunching is a v0.2 item — it needs a
-profile-copy dance to keep cookies working.
+## When to reach for ghax
 
-## Why not just use gstack browse?
+- You're running an AI agent against a SaaS dashboard behind SSO.
+  Fresh-browser tools break on login. Ghax uses the session you
+  already have.
+- You're developing a Chrome extension and want `pnpm build` to hot-
+  reload your service worker + content scripts without losing tab
+  state. No other tool does this.
+- You want Core Web Vitals on your real app with your real user
+  profile, not a headless clean-room.
+- You're QAing a deploy and need screenshots + console errors +
+  failed-request list in one report. `ghax qa --url <u>` does the
+  whole thing.
+- You need to automate a dashboard that actively refuses headless
+  browsers (Google Ads, Business Profile, Drive sharing, some Azure
+  flows).
 
-`gstack browse` launches its own Chromium. That's right for disposable testing
-but wrong when:
+## When not to reach for ghax
 
-- You're QAing SaaS dashboards behind SSO and don't want to re-auth every run.
-- You're testing a Chrome extension you wrote — it's installed in your *real*
-  browser, unpacked. `gstack`'s Chromium doesn't have it.
-- You want to observe your real day-to-day usage, not a clean-room replay.
-
-`gstack browse` has a `--browser-url` CDP mode that attaches to a running
-browser, but it only talks to tab DOM. It doesn't enumerate MV3 extension
-targets (service workers, sidepanels, content scripts), doesn't dispatch real
-user gestures, and doesn't expose `chrome.storage`. `ghax browse` fills that gap.
+- You want a clean-room / disposable Chromium for CI. Use
+  [Playwright](https://playwright.dev) or `ghax attach --launch
+  --headless`.
+- You need cross-browser testing on Firefox or Safari. Ghax is CDP-
+  only — Chrome family only (Edge, Chrome, Chromium, Brave, Arc).
+- You want a recorder that generates Playwright code. Use Playwright's
+  recorder. Ghax records into its own JSON format for replay, not for
+  code generation.
 
 ## Architecture
 
 ```
-ghax CLI (Rust, ~2.6 MB, ~20 ms cold start)
+ghax CLI (Rust, ~3 MB, ~20 ms cold start)
         │  HTTP to 127.0.0.1:<random>
         ▼
-ghax daemon (Node ESM bundle — dist/ghax-daemon.mjs)
+ghax daemon (Node ESM bundle, ~80 KB)
         │  ├─ Playwright (chromium.connectOverCDP) — tab-level
-        │  └─ Raw CDP WebSocket pool — service workers, sidepanels, gestures
+        │  └─ Raw CDP WebSocket pool — service workers, side panels, gestures
         ▼
-User's running Chrome / Edge (--remote-debugging-port=9222)
+Your running Chrome / Edge (--remote-debugging-port=9222)
 ```
 
-Why split CLI (Rust) and daemon (Node)? Playwright's `connectOverCDP` is
-Node-only — the daemon stays on Node unchanged. The CLI is a thin HTTP
-client that deserves a small, fast, platform-specific binary. Rust gives
-us ~2.6 MB per platform and ~20 ms cold start (was 61 MB and ~70 ms with
-the old Bun-compiled binary).
+The split exists because Playwright's `connectOverCDP` is Node-only,
+but the CLI deserves a small fast native binary. The daemon auto-
+shuts after 30 minutes idle. Full notes in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
 
-The daemon auto-shuts after 30 minutes idle.
+## Multi-agent / parallel work
 
-## Full command surface
+Each agent gets its own state file, its own daemon, its own window:
 
-See [`design/plan/03-commands.md`](./design/plan/03-commands.md) for the full
-planned surface. Commands shipped today:
+```bash
+# Agent A
+export GHAX_STATE_FILE=/tmp/ghax-agent-a.json
+ghax attach
+ghax new-window https://app-a.com
 
-```
-attach [--port N] [--browser edge|chrome|chromium|brave|arc] [--launch]
-       [--headless] [--load-extension <path>] [--data-dir <path>]
-       [--capture-bodies[=<url-glob>]]
-       # Without --port, scans :9222-9230. Multiple running → picker.
-       # With --launch and no --port, auto-picks first free port in range.
-       # --capture-bodies records JSON/text response bodies (32KB cap).
-status [--json]
-detach
-restart
-tabs [--filter <regex>] [--fields <csv>]
-                                # --filter: case-insensitive regex on url+title
-                                # --fields: id,title,url,active — project only these
-tab <id> [--quiet]              # --quiet = don't bringToFront (agent mode)
-find <url-substring>            # list matching tabs (pipe into `tab`)
-new-window [url]                # new background window, same profile
-goto <url>
-back | forward | reload
-eval <js> [--max-bytes N]       # --max-bytes caps result size to N utf-8 bytes
-try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
-text [--selector <sel>] [--length N] [--skip M]
-                                # scoped, paged page-text dumps
-html [<selector>]
-screenshot [<@ref|selector>] [--path p] [--full-page]
-snapshot [-i] [-c] [-d N] [-s <sel>] [-C] [-a] [-o <path>]
-                                # --compact (-c) also suppresses cursor-interactive
-                                # when combined with -i; use -C to force it on
-click <@ref|selector>
-fill <@ref|selector> <value>
-upload <@ref|selector> <path>[,<path>…]     # wraps setInputFiles
-press <key>
-type <text>
-wait <selector|ms|--networkidle|--load>
-viewport <WxH>
-responsive [prefix] [--full-page]
-diff <url1> <url2>
-is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>
-xpath <expression> [--limit N]    # list matching elements with text + box
-box <@ref|selector>               # bounding box {x, y, width, height}
-storage [local|session] [get|set|remove|clear|keys] [key] [value]
-chain < steps.json
-record start [name] | stop | status
-replay <file>
-gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
-console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
-network [--pattern re] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
-cookies
-ext list
-ext targets <ext-id>
-ext reload <ext-id>
-ext hot-reload <ext-id> [--wait N] [--no-inject] [--verbose]
-ext sw <ext-id> eval <js>
-ext panel <ext-id> eval <js>
-ext popup <ext-id> eval <js>
-ext options <ext-id> eval <js>
-ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]
-ext message <ext-id> <json-payload>
-gesture click <x,y>
-gesture dblclick <x,y>
-gesture scroll <up|down|left|right> [amount]
-gesture key <key>
-qa --url <u> [--url <u> ...] [--urls a,b,c]
-   [--crawl <root> [--depth N] [--limit N]]
-   [--out report.json] [--screenshots <dir>] [--no-screenshots]
-   [--annotate] [--gif <out.gif>]
-profile [--duration sec] [--heap] [--extension <ext-id>]
-perf [--wait <ms>]              # Core Web Vitals + navigation timing
-diff-state <before.json> <after.json>
-canary <url> [--interval 60] [--max 3600] [--out report.json] [--fail-fast]
-ship [--message "..."] [--no-check] [--no-build] [--no-pr] [--dry-run]
-review [--base origin/main] [--diff]
-pair [status]
-shell                             # interactive REPL — skip per-command spawn cost
-
-# Live tail (SSE)
-console --follow
-network --follow
-ext sw <id> logs --follow
+# Agent B (different terminal, different state)
+export GHAX_STATE_FILE=/tmp/ghax-agent-b.json
+ghax attach
+ghax new-window https://app-b.com
 ```
 
-Add `--json` on any command for machine-readable output.
-
-## Roadmap
-
-See [`design/plan/04-roadmap.md`](./design/plan/04-roadmap.md).
-
-- **v0.1** — flagship `ghax browse` working against real browsers. ✓
-- **v0.2** — annotated snapshots, responsive, diff, chain, record/replay. ✓
-- **v0.3** — hot-reload, shadow-DOM, gif, Claude Code skills, CI. ✓
-- **v1.0** — internal hardening: smoke tests, live hot-reload
-  verification, `--load-extension` pass-through. ✓
-- **v0.4** — orchestrated layer (`qa`, `profile`, `diff-state`,
-  `ship`, `canary`, `review`, `pair`) + SSE tail mode on console /
-  network / ext sw logs + `ext popup` / `ext options` / `ext message`
-  + attach ergonomics (auto-port, `--headless`, multi-CDP picker)
-  + background-window workflow (`find`, `new-window`, `tab --quiet`)
-  + `ghax try` live-injection preview
-  + debugging depth tier 1 (`perf`, `console --dedup` + stack parsing,
-  `network --status`, `network --har`)
-  + cross-browser smoke harness + headless CLI benchmark. ✓
-- **v0.5** — multi-tenant token-auth pair mode (flagged not-planned for
-  solo use). Skill-eval harness deferred indefinitely in favor of the
-  64-check smoke suite.
-- Public release (npm publish, docs site, announce) paused by decision.
+Same browser process, same profile, same auth. Different windows.
+Zero focus steal on either agent's operations.
 
 ## Security
 
-The daemon binds to `127.0.0.1` only. No auth token in v0.1 (single-user,
-localhost). State lives in `.ghax/` relative to the current git root, or
-`~/.ghax/` if you export `GHAX_GLOBAL=1`. `ghax detach` shuts the daemon
-cleanly; a crashed daemon's state file is detected and replaced on next attach.
+The daemon binds to `127.0.0.1` only. No auth token — this is a
+single-user, localhost tool. State lives in `.ghax/` relative to the
+current git root, or `~/.ghax/` with `GHAX_GLOBAL=1`.
 
-`chrome.storage.local` often contains auth tokens. Treat `ghax ext storage`
-output like you would `localStorage.getItem` — don't paste it into chat.
+`chrome.storage.local` often contains auth tokens. Treat
+`ghax ext storage` output like `localStorage.getItem` — don't paste
+it into chat.
+
+See [SECURITY.md](./SECURITY.md) for the threat model and disclosure
+process.
+
+## Contributing
+
+Issues and PRs welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md)
+— it covers the Rust + Node split, the 95-check live-browser smoke
+suite, and the hard invariants that'll bite you if you skip them.
 
 ## License
 
-MIT. Portions adapted from [gstack](https://github.com/garrytan/gstack) by Garry
-Tan (also MIT) — `buffers.ts`, `config.ts`, and the accessibility-snapshot
-algorithm in `snapshot.ts`.
+MIT. Portions adapted from [gstack](https://github.com/garrytan/gstack)
+by Garry Tan (also MIT): `buffers.ts`, `config.ts`, and the
+accessibility-snapshot algorithm in `snapshot.ts`.
+
+## Credits
+
+Shaped by months of running AI agents against real dashboards and
+logging every papercut. Field reports in
+[`docs/sessions/`](./docs/sessions/) if you want the receipts.
