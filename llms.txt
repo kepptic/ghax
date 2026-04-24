@@ -126,7 +126,6 @@ ghax ext --help                    # extension sub-commands
 - [.claude/skills/ghax.md](./.claude/skills/ghax.md): Claude Code skill (router) — auto-discovered when Claude Code opens this repo.
 - [.claude/skills/ghax-browse.md](./.claude/skills/ghax-browse.md): Claude Code skill (flagship) — full workflow examples.
 - [docs/BENCHMARK.md](./docs/BENCHMARK.md): full latency comparison vs gstack-browse, playwright-cli, agent-browser (ghax is 3.5–9× faster warm, 1.5–5× faster cold).
-- [docs/sessions/](./docs/sessions/): field reports from production agent runs (useful for understanding edge cases).
 
 ## Things not to do
 
