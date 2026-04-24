@@ -64,6 +64,16 @@ ghax attach --launch              # spawns a scratch Chromium with CDP
 ghax attach --launch --headless   # no visible window (CI-style)
 ```
 
+**Chrome vs Edge — important.** Edge works out of the box with the launch command above. Chrome 113+ silently ignores `--remote-debugging-port` when it's using the default user-data-dir, so always pass an explicit profile path to Chrome:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/chrome-ghax" &
+```
+
+If `ghax attach` reports that nothing is on :9222 after you launched Chrome, this is almost certainly the reason. Full quirks list in [CONTRIBUTING.md → Known browser quirks](./CONTRIBUTING.md#known-browser-quirks).
+
 Then attach and drive:
 
 ```bash
@@ -115,7 +125,7 @@ ghax ext --help                    # extension sub-commands
 
 - [.claude/skills/ghax.md](./.claude/skills/ghax.md): Claude Code skill (router) — auto-discovered when Claude Code opens this repo.
 - [.claude/skills/ghax-browse.md](./.claude/skills/ghax-browse.md): Claude Code skill (flagship) — full workflow examples.
-- [docs/BENCHMARK.md](./docs/BENCHMARK.md): latency numbers vs other CLIs.
+- [docs/BENCHMARK.md](./docs/BENCHMARK.md): full latency comparison vs gstack-browse, playwright-cli, agent-browser (ghax is 3.5–9× faster warm, 1.5–5× faster cold).
 - [docs/sessions/](./docs/sessions/): field reports from production agent runs (useful for understanding edge cases).
 
 ## Things not to do
