@@ -12,9 +12,13 @@ ghax click @e3
 ghax fill @e5 "hello"
 ```
 
-That's it. No Playwright install dance. No fresh Chromium. No "please
-log in again." The browser you already have open is the browser you
-drive.
+That's it. No separate browser to install. No fresh Chromium. No
+"please log in again." The browser you already have open is the
+browser you drive.
+
+Prefer a scratch browser? That's one flag away — `ghax attach --launch
+--headless` spawns a fresh Chromium in its own profile for CI-style
+runs without touching your daily driver.
 
 ## Why this exists
 
@@ -26,16 +30,14 @@ Cloudflare bot protection on every SaaS dashboard worth QAing.
 
 `ghax` attaches over CDP. One command. Real browser. Real state.
 
-It's the tool I wish existed when I was running an agent against
-Autotask / Hudu / Azure Portal / Google Ads / any other dashboard
-behind a 15-step SSO flow.
+Or a scratch profile if that's what you want. Your call.
 
 ## What it does
 
 - **Accessibility-tree snapshots** with `@e<n>` refs. Interact by role
   and name, not fragile CSS selectors. Walks open shadow roots for
   custom-element apps (Lit, Shoelace, web components) and emits
-  Playwright chain selectors (`host >> inner`) automatically.
+  chain selectors (`host >> inner`) that descend into shadow trees.
 - **Dialog-aware**. When a modal is open, snapshots walk the modal, not
   the `aria-hidden="true"` app behind it. Saves you from empty trees
   on Radix / Headless UI / Material dialogs.
@@ -86,8 +88,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 | iex
 ```
 
-Runtime needs **Node 20+** for the daemon. If you have Playwright
-installed anywhere, you already have it.
+Runtime needs **Node 20+** for the daemon. Most developer laptops
+already have it.
 
 Build from source (Rust 1.80+, Node 20+):
 
@@ -139,6 +141,95 @@ npm run install-link        # symlinks → ~/.local/bin/ghax
    ghax detach
    ```
 
+## Which profile?
+
+You pick. Three modes:
+
+- **Your real profile** — launch Edge or Chrome with
+  `--remote-debugging-port=9222` (the quickstart above). You keep your
+  extensions, your SSO cookies, and your open tabs. Ghax just drives
+  what's already there.
+- **A dedicated ghax profile** — pass `--user-data-dir=<path>` to your
+  browser launch to keep ghax's tabs separate from your daily driver.
+  Same browser binary, different profile directory. Useful if you
+  don't want an agent touching your personal tabs.
+- **A fresh scratch profile** — `ghax attach --launch` spawns your
+  browser with a throwaway profile under `~/.ghax/<kind>-profile/`.
+  Add `--headless` for a no-window CI-style run. Zero overlap with
+  your daily driver.
+
+The quickstart covers option 1. Options 2 and 3 are one flag each.
+
+## Use with AI coding agents
+
+Ghax was built for AI-driven browser work. Every capability has a CLI
+so any agent that can run shell commands can use it.
+
+### Claude Code
+
+The repo ships two skills under `.claude/skills/`:
+
+- [`ghax`](./.claude/skills/ghax.md) — top-level router; Claude picks
+  it up when you say "attach to my browser", "test the extension",
+  "snapshot the dashboard", etc.
+- [`ghax-browse`](./.claude/skills/ghax-browse.md) — the flagship
+  skill; full workflow examples for QA, extension hot-reload, SaaS
+  dashboard automation, snapshot-interact-assert loops.
+
+Both skills auto-register once the repo is on disk. If you run Claude
+Code globally, add ghax to your skill index (see your gstack
+`skill-registry` setup) and you're done.
+
+### Codex / Cursor / any shell-driving agent
+
+Ghax is a plain CLI. Give your agent three facts:
+
+1. How to attach:
+
+   ```bash
+   ghax attach           # scans :9222-9230, picks what's running
+   ghax attach --launch  # or spawn a scratch browser
+   ```
+
+2. The snapshot-then-interact pattern:
+
+   ```bash
+   ghax snapshot -i --json     # returns the a11y tree + @e refs
+   ghax click @e3              # refs survive until next snapshot
+   ghax fill @e5 "hello"
+   ```
+
+3. How to batch for one round-trip:
+
+   ```bash
+   ghax batch '[
+     {"cmd":"goto","args":["https://app.example.com"]},
+     {"cmd":"snapshot","opts":{"interactive":true}},
+     {"cmd":"click","args":["@e7"]},
+     {"cmd":"fill","args":["@e9","new-value"]}
+   ]'
+   ```
+
+Add `--json` to any command for machine-readable output. That's the
+whole integration.
+
+### Multi-agent on one browser
+
+Two agents, one browser, zero stepping on each other:
+
+```bash
+# Agent A
+GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach
+GHAX_STATE_FILE=/tmp/ghax-a.json ghax new-window https://app-a.com
+
+# Agent B (separate shell)
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
+```
+
+Same browser, same profile, same auth. Different windows and separate
+daemon state. Neither agent sees the other's active-tab pointer.
+
 ## When to reach for ghax
 
 - You're running an AI agent against a SaaS dashboard behind SSO.
@@ -153,19 +244,18 @@ npm run install-link        # symlinks → ~/.local/bin/ghax
   failed-request list in one report. `ghax qa --url <u>` does the
   whole thing.
 - You need to automate a dashboard that actively refuses headless
-  browsers (Google Ads, Business Profile, Drive sharing, some Azure
-  flows).
+  browsers but you still want CI-style repeatability — attach to a
+  real visible browser locally, drive it the same way an agent would
+  in prod.
+- You want a clean-room disposable browser for CI. `ghax attach
+  --launch --headless` gives you one in its own scratch profile.
 
 ## When not to reach for ghax
 
-- You want a clean-room / disposable Chromium for CI. Use
-  [Playwright](https://playwright.dev) or `ghax attach --launch
-  --headless`.
 - You need cross-browser testing on Firefox or Safari. Ghax is CDP-
-  only — Chrome family only (Edge, Chrome, Chromium, Brave, Arc).
-- You want a recorder that generates Playwright code. Use Playwright's
-  recorder. Ghax records into its own JSON format for replay, not for
-  code generation.
+  only — Chrome family (Edge, Chrome, Chromium, Brave, Arc).
+- You want codegen from a UI recorder. Ghax records into its own JSON
+  format for replay, not for generating test code.
 
 ## Architecture
 
@@ -174,35 +264,15 @@ ghax CLI (Rust, ~3 MB, ~20 ms cold start)
         │  HTTP to 127.0.0.1:<random>
         ▼
 ghax daemon (Node ESM bundle, ~80 KB)
-        │  ├─ Playwright (chromium.connectOverCDP) — tab-level
+        │  ├─ CDP tab driver — navigation, snapshot, interact
         │  └─ Raw CDP WebSocket pool — service workers, side panels, gestures
         ▼
 Your running Chrome / Edge (--remote-debugging-port=9222)
 ```
 
-The split exists because Playwright's `connectOverCDP` is Node-only,
-but the CLI deserves a small fast native binary. The daemon auto-
-shuts after 30 minutes idle. Full notes in
-[ARCHITECTURE.md](./ARCHITECTURE.md).
-
-## Multi-agent / parallel work
-
-Each agent gets its own state file, its own daemon, its own window:
-
-```bash
-# Agent A
-export GHAX_STATE_FILE=/tmp/ghax-agent-a.json
-ghax attach
-ghax new-window https://app-a.com
-
-# Agent B (different terminal, different state)
-export GHAX_STATE_FILE=/tmp/ghax-agent-b.json
-ghax attach
-ghax new-window https://app-b.com
-```
-
-Same browser process, same profile, same auth. Different windows.
-Zero focus steal on either agent's operations.
+The CLI is a thin HTTP client so the binary stays small. The daemon
+owns every CDP session and auto-shuts after 30 minutes idle. Full
+notes in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Security
 
