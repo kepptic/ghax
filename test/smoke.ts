@@ -337,6 +337,84 @@ c('click @e<n> resolves against the last snapshot', async () => {
   assert(r.stdout.trim() !== 'https://example.com/', `click @e1 should navigate away: ${r.stdout}`);
 });
 
+c('click reports dialogDismissed when a modal closes', async () => {
+  // Fixture: a [role=dialog] open at load with a button that hides itself.
+  // Mirrors the HubSpot confirm-modal shape — synchronous dismissal so the
+  // 300ms default budget catches it on the first poll.
+  const html = `
+    <div role="dialog" aria-modal="true" id="d">
+      <button id="ok" onclick="document.getElementById('d').style.display='none'">OK</button>
+    </div>
+  `;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '200']);
+  await run(['snapshot', '-i']);
+  const r = await run(['click', '@e1', '--json']);
+  const data = parseJson<{ ok: boolean; dialogDismissed: boolean; preDialogCount: number; postDialogCount: number }>(r.stdout);
+  assert(data.ok === true, 'click should return ok');
+  assert(data.dialogDismissed === true, `expected dialogDismissed=true, got ${JSON.stringify(data)}`);
+  assert(data.preDialogCount === 1 && data.postDialogCount === 0, `expected pre=1 post=0, got pre=${data.preDialogCount} post=${data.postDialogCount}`);
+});
+
+c('click reports dialogDismissed=false when nothing changes', async () => {
+  // Inert button, no dialog on the page → both flags should be false and
+  // pre/postDialogCount both 0. Lets agents distinguish "click landed,
+  // nothing happened" from "click closed something."
+  const html = `<button id="b" onclick="void 0">noop</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '200']);
+  await run(['snapshot', '-i']);
+  const r = await run(['click', '@e1', '--observe-ms', '100', '--json']);
+  const data = parseJson<{ ok: boolean; dialogDismissed: boolean; urlChanged: boolean }>(r.stdout);
+  assert(data.ok === true, 'click should return ok');
+  assert(data.dialogDismissed === false, `expected dialogDismissed=false, got ${JSON.stringify(data)}`);
+  assert(data.urlChanged === false, `expected urlChanged=false, got ${JSON.stringify(data)}`);
+});
+
+c('click --no-observe skips post-click observation', async () => {
+  // Opt-out path: caller wants raw `{ok:true}` (e.g. in benchmarks where
+  // the extra count() round-trip is measurable). Verify no extra fields.
+  const html = `<button>x</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '200']);
+  await run(['snapshot', '-i']);
+  const r = await run(['click', '@e1', '--no-observe', '--json']);
+  const data = parseJson<Record<string, unknown>>(r.stdout);
+  assert(data.ok === true, 'click should return ok');
+  assert(!('dialogDismissed' in data) && !('urlChanged' in data), `expected no observation fields, got keys=${Object.keys(data)}`);
+});
+
+c('snapshot scopes locators to the auto-detected modal', async () => {
+  // Two buttons named "Confirm": one in the modal, one outside (hidden by
+  // an aria-hidden parent the way most React libs hide the page behind a
+  // scrim). The snapshot's modal-scope walker shows only the modal's
+  // button — but the OLD code built `getByRole` page-wide, so on a page
+  // with a unique-named button it'd accidentally match the outside one.
+  // Here both have the same accessible name, so a page-wide locator hits
+  // strict-mode (2 matches) and click would error. With modal-scoped
+  // locators, click resolves uniquely to the modal button and dismisses
+  // the dialog.
+  const html = `
+    <div aria-hidden="true">
+      <button id="outside" onclick="window.__outside=true">Confirm</button>
+    </div>
+    <div role="dialog" aria-modal="true" id="d">
+      <button id="inside" onclick="window.__inside=true; document.getElementById('d').style.display='none'">Confirm</button>
+    </div>
+  `;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '200']);
+  await run(['snapshot', '-i']);
+  const r = await run(['click', '@e1', '--json']);
+  const data = parseJson<{ ok: boolean; dialogDismissed: boolean }>(r.stdout);
+  assert(data.ok === true, `click should not error under strict-mode: ${JSON.stringify(data)}`);
+  assert(data.dialogDismissed === true, `expected modal button to dismiss the dialog, got ${JSON.stringify(data)}`);
+  // And confirm we hit the inside one, not the outside one.
+  const which = await run(['eval', 'JSON.stringify({inside: !!window.__inside, outside: !!window.__outside})']);
+  const flags = parseJson<{ inside: boolean; outside: boolean }>(which.stdout);
+  assert(flags.inside === true && flags.outside === false, `expected inside-button click, got ${JSON.stringify(flags)}`);
+});
+
 c('chain executes multiple steps', async () => {
   const steps = JSON.stringify([
     { cmd: 'goto', args: ['https://example.com'] },
@@ -533,13 +611,20 @@ c('perf returns CWV + navigation timing shape', async () => {
 });
 
 c('console --dedup collapses repeats with count', async () => {
-  // Seed 5 identical errors + 1 unique one, then dedup.
-  await run(['eval', 'for (let i = 0; i < 5; i++) { try { throw new Error("ghax-smoke-repeat"); } catch (e) { console.error(e.message); } } console.error("ghax-smoke-unique")']);
+  // Seed 5 identical errors + 1 unique one, then dedup. The console
+  // buffer persists across smoke runs against the same daemon, so use
+  // a per-run marker — re-running smoke against a warm daemon would
+  // otherwise see 5 entries from the previous run plus 5 new ones and
+  // fail with `expected count=5, got 10`.
+  const tag = `ghax-smoke-${Date.now().toString(36)}`;
+  const repeatText = `${tag}-repeat`;
+  const uniqueText = `${tag}-unique`;
+  await run(['eval', `for (let i = 0; i < 5; i++) { try { throw new Error(${JSON.stringify(repeatText)}); } catch (e) { console.error(e.message); } } console.error(${JSON.stringify(uniqueText)})`]);
   await run(['wait', '100']);
   const r = await run(['console', '--errors', '--dedup', '--last', '50', '--json']);
   const groups = parseJson<Array<{ text: string; count: number }>>(r.stdout);
-  const repeat = groups.find((g) => g.text === 'ghax-smoke-repeat');
-  const unique = groups.find((g) => g.text === 'ghax-smoke-unique');
+  const repeat = groups.find((g) => g.text === repeatText);
+  const unique = groups.find((g) => g.text === uniqueText);
   assert(repeat && repeat.count === 5, `expected repeat count=5, got ${repeat?.count}`);
   assert(unique && unique.count === 1, `expected unique count=1, got ${unique?.count}`);
 });

@@ -6,6 +6,37 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `click` no longer reports `{ ok: true }` for clicks that landed but
+  produced no observable effect. The handler now takes a cheap
+  before/after observation and returns `dialogDismissed`, `urlChanged`,
+  `preDialogCount`, `postDialogCount`, and `observedMs` alongside `ok`.
+  Default budget is 300ms, configurable with `--observe-ms <n>` (e.g.
+  `1500` for HubSpot-style confirm modals that wait on a network save
+  before unmounting). `--no-observe` skips the observation entirely
+  for callers that want the old shape (benchmarks, tight loops).
+  Real-world repro: a HubSpot "Save changes?" alertdialog where the
+  trusted click was dispatched correctly but `loc.click()` resolved
+  ~1.3s before React actually unmounted the dialog — agents would see
+  `ok: true`, retry, and double-save. With the new fields, callers
+  can branch on `dialogDismissed === false`.
+- `snapshot` now scopes per-node Locators to the auto-detected modal
+  when dialog-scope kicks in, not just the rendered ARIA tree. Before
+  this fix, the displayed tree was modal-only but `getByRole(...)`
+  ran against the whole page — any same-named button outside the
+  modal (e.g. a hidden zombie left by the previous render) could
+  trigger strict-mode errors or, on layouts where Playwright's pick
+  resolved uniquely, silently click the wrong element. Stacked
+  dialogs (HubSpot puts an `alertdialog` over an already-open
+  `dialog`) hit this routinely.
+- `console --dedup` smoke check is now resilient to a warm daemon.
+  The console `CircularBuffer` persists across smoke runs against
+  the same daemon, and the test previously seeded a literal marker
+  string and asserted `count === 5` — re-running smoke without
+  detaching merged 5 leftover entries with 5 fresh ones and reported
+  count=10. The seeded marker is now per-run (Date-based), so prior
+  buffer state cannot collide with a fresh run's emits.
+
 ### Added
 - **Bucket A payload-reduction sprint** — six flags and one new verb
   to cut context cost for LLM operators driving ghax (sourced from a
