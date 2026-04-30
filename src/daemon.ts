@@ -29,7 +29,7 @@ import { resolveConfig, type DaemonState, writeState, readState } from './config
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
 import type { RefEntry } from './snapshot';
-import { snapshot as takeSnapshot } from './snapshot';
+import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import * as fs from 'fs';
 import * as http from 'http';
 import type { AddressInfo } from 'net';
@@ -881,13 +881,80 @@ async function annotateScreenshot(
   }
 }
 
-register('click', async (ctx, args) => {
+// Click — Playwright's `loc.click()` resolves the moment the trusted mouse
+// event has been dispatched. That tells you "the click was sent" but says
+// nothing about whether the page reacted. Real-world failure mode: a
+// confirm-modal "Save" button accepts the click but doesn't dismiss for
+// >1s because the React handler kicks off an async network round-trip
+// before unmounting the dialog. Callers see `{ ok: true }` and assume the
+// click no-op'd.
+//
+// Fix: take a cheap before/after observation around the click and report
+// whether observable downstream effects happened within a short budget.
+// Two signals worth tracking:
+//   - dialogDismissed → a visible modal disappeared (count went down)
+//   - urlChanged      → location.href changed (navigation/SPA route)
+// Both are O(1) DOM queries; the poll loop short-circuits on first signal,
+// so the cost is ~one round-trip when the click is effective.
+//
+// Defaults: observe on, 300ms budget. Opt-outs:
+//   --no-observe        → skip entirely (back to old behavior, no extras)
+//   --observe-ms <n>    → custom budget (e.g. --observe-ms 1500 for HubSpot
+//                          confirm modals that wait on a network save).
+register('click', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   if (!target) throw new Error('Usage: click <@ref|selector>');
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
+
+  const observe = opts.observe !== false && opts['no-observe'] !== true;
+  const observeMs = (() => {
+    const raw = opts['observe-ms'] ?? opts.observeMs;
+    if (raw === undefined) return 300;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 300;
+  })();
+
+  const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
+  const preUrl = observe ? page.url() : '';
+
   await loc.click();
-  return { ok: true };
+
+  if (!observe) return { ok: true };
+
+  // Poll for downstream effects. 30ms steps trades a tiny bit of CPU for
+  // promptness — most React modal dismissals land in the next animation
+  // frame (~16ms), and 30ms means the first poll catches them without a
+  // wasted full sleep when the click was instant.
+  //
+  // Always do a final fresh dialog-count sample after the loop so callers
+  // never see stale `postDialogCount`. Without this, a click that
+  // navigated AND dismissed a modal would report `urlChanged: true` plus
+  // an outdated `postDialogCount` (the pre-navigation count) — confusing.
+  const deadline = Date.now() + observeMs;
+  let urlChanged = false;
+  let postDialogCount = preDialogCount;
+  while (Date.now() < deadline) {
+    postDialogCount = await page.locator(MODAL_SEL).count();
+    if (page.url() !== preUrl) { urlChanged = true; break; }
+    if (postDialogCount < preDialogCount) break;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  // Final sample — covers (a) the early-break-on-urlChanged path where the
+  // pre-break sample may now be stale post-navigation and (b) the early-
+  // break-on-dismissal path which is already fresh (no extra cost beyond
+  // one count() round-trip).
+  postDialogCount = await page.locator(MODAL_SEL).count().catch(() => postDialogCount);
+  const dialogDismissed = postDialogCount < preDialogCount;
+
+  return {
+    ok: true,
+    dialogDismissed,
+    urlChanged,
+    preDialogCount,
+    postDialogCount,
+    observedMs: observeMs,
+  };
 });
 
 register('fill', async (ctx, args) => {

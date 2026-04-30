@@ -52,6 +52,20 @@ const INTERACTIVE_ROLES = new Set([
   'treeitem',
 ]);
 
+/**
+ * Single source of truth for "what counts as an open modal."
+ * Used by the snapshot dialog-scope walker AND by the click handler's
+ * post-click observation (did the modal actually dismiss?).
+ *
+ * Covers `[role=dialog]`, `[role=alertdialog]`, the native `<dialog open>`,
+ * and ad-hoc `[aria-modal="true"]` scrims (Radix, Headless UI, Material,
+ * HubSpot's Dialog__StyledDialog). The `:visible` pseudo filters detached
+ * / display:none dialogs that some frameworks leave in the DOM between
+ * openings.
+ */
+export const MODAL_SEL =
+  '[role=dialog]:visible, [role=alertdialog]:visible, dialog[open]:visible, [aria-modal="true"]:visible';
+
 interface ParsedNode {
   indent: number;
   role: string;
@@ -77,21 +91,23 @@ export async function snapshot(
   opts: SnapshotOptions = {},
 ): Promise<SnapshotResult> {
   let rootLocator = opts.selector ? target.locator(opts.selector) : target.locator('body');
+  // Tracks whether the auto-detected modal scope is active. When true, the
+  // per-node locators below also need to be modal-rooted — otherwise
+  // `target.getByRole(...)` queries the entire page and a same-named button
+  // outside the modal can win the strict-mode race or, worse, silently match
+  // a hidden zombie element. (HubSpot stacks an alertdialog on top of an
+  // already-open dialog with overlapping button names — exactly this case.)
+  let modalScopeActive = false;
   if (opts.selector) {
     const count = await rootLocator.count();
     if (count === 0) throw new Error(`Selector not found: ${opts.selector}`);
   } else if (opts.dialogScope !== false) {
     // Dialog-aware walker — if a modal is open, walk from it instead of
-    // from `body`. Covers `[role=dialog]`, `[role=alertdialog]`, the
-    // native `<dialog open>`, and ad-hoc `[aria-modal=true]` scrims
-    // (Radix, Headless UI, Material). `.last()` picks the top-most
-    // modal if a stack is open. The `:visible` pseudo filters out
-    // detached / display:none dialogs that some frameworks leave in
-    // the DOM between openings.
-    const modalSel = '[role=dialog]:visible, [role=alertdialog]:visible, dialog[open]:visible, [aria-modal="true"]:visible';
-    const modal = target.locator(modalSel).last();
+    // from `body`. `.last()` picks the top-most modal if a stack is open.
+    const modal = target.locator(MODAL_SEL).last();
     if ((await modal.count()) > 0) {
       rootLocator = modal;
+      modalScopeActive = true;
     }
   }
 
@@ -140,14 +156,20 @@ export async function snapshot(
     roleNameSeen.set(key, seenIndex + 1);
     const totalCount = roleNameCounts.get(key) || 1;
 
-    let locator: Locator = target.getByRole(node.role as any, {
+    // Scope locators to the same root we used for the ARIA tree:
+    //   - explicit user selector wins,
+    //   - else auto-detected modal (when active),
+    //   - else the page/frame root.
+    // Without this, the rendered tree shows modal-only nodes but locators
+    // resolve page-wide — strict-mode error or wrong-element pick.
+    const locatorScope: Page | Frame | Locator = opts.selector
+      ? target.locator(opts.selector)
+      : modalScopeActive
+        ? rootLocator
+        : target;
+    let locator: Locator = locatorScope.getByRole(node.role as any, {
       name: node.name || undefined,
     });
-    if (opts.selector) {
-      locator = target.locator(opts.selector).getByRole(node.role as any, {
-        name: node.name || undefined,
-      });
-    }
     if (totalCount > 1) locator = locator.nth(seenIndex);
 
     refs.set(ref, { locator, role: node.role, name: node.name || '' });
