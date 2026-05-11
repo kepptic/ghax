@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.4.3] - 2026-05-11
 ### Added
 - `ghax update` — install the latest published GitHub release in place.
   `--check` is a dry-run that reports the latest tag; `--to vX.Y.Z`
@@ -483,7 +486,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/kepptic/ghax/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kepptic/ghax/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/kepptic/ghax/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/kepptic/ghax/releases/tag/v0.3.0
