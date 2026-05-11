@@ -6,6 +6,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Docs
+- `llms.txt` now teaches installing agents how to register the ghax
+  skill/memory files in the user's agent of choice — Claude Code
+  (`~/.claude/skills/`) plus per-project memory files for Codex,
+  Cursor, Aider, Continue, Windsurf, and Gemini CLI. Previously the
+  skills were only listed as "Optional" references, so agents
+  following the one-paste install left the user without discoverable
+  skills.
+
 ### Fixed
 - `scripts/install-release.sh` resolved `SCRIPT_DIR` from `$0` *after*
   `cd`-ing into the temp download dir, so the bootstrap-daemon-runtime
