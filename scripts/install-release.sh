@@ -15,6 +15,12 @@
 
 set -euo pipefail
 
+# Resolve SCRIPT_DIR before any `cd` happens — `$0` is often relative
+# (e.g. when invoked via `bash scripts/install-release.sh` or
+# `bun run install-release`), so deferring this until after we chdir
+# into the temp dir breaks the bootstrap step below.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 REPO="kepptic/ghax"
 VERSION="${1:-}"
 SHARE_DIR="$HOME/.local/share/ghax"
@@ -67,7 +73,6 @@ cp "$INNER/ghax-daemon.mjs" "$SHARE_DIR/ghax-daemon.mjs"
 # detection too — so users who upgrade across a playwright bump get a
 # refreshed install_modules without us hardcoding versions here.
 echo "install-release: bootstrapping daemon runtime in $SHARE_DIR (no-op if already current)..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 bash "$SCRIPT_DIR/bootstrap-daemon-runtime.sh" "$SHARE_DIR" > /dev/null
 
 # Sanity check.

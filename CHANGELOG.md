@@ -6,7 +6,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+- `scripts/install-release.sh` resolved `SCRIPT_DIR` from `$0` *after*
+  `cd`-ing into the temp download dir, so the bootstrap-daemon-runtime
+  step crashed with `cd: scripts: No such file or directory` whenever
+  the script was invoked via a relative path (e.g. the documented
+  `bun run install-release`). `SCRIPT_DIR` is now captured before any
+  `cd` runs. `release.sh`'s call into the script wasn't affected
+  because it already uses an absolute path.
 
 ## [0.4.3] - 2026-05-11
 ### Added
