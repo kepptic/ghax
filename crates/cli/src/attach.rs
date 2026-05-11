@@ -463,14 +463,29 @@ fn launch_browser(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Daemon bundle resolution — mirrors `resolveDaemonBundle` in cli.ts
+// Daemon bundle resolution
 //
-// Precedence (per the Phase 2A spec):
+// Precedence:
 //   1. GHAX_DAEMON_BUNDLE env var
-//   2. Sibling of the CLI binary: <argv[0] dir>/ghax-daemon.mjs
-//   3. Dev fallback: walk up from cwd looking for package.json with
+//   2. Sibling of the CLI binary: <exe dir>/ghax-daemon.mjs
+//   3. XDG stable location: $XDG_DATA_HOME/ghax/ghax-daemon.mjs
+//      (falls back to $HOME/.local/share/ghax/ghax-daemon.mjs).
+//      This is where both install-link.sh (dev) and install-release.sh
+//      (production) place the bundle, so installed users hit this tier.
+//   4. Dev fallback: walk up from cwd looking for package.json with
 //      "name": "@ghax/cli", then use <root>/dist/ghax-daemon.mjs
 // ─────────────────────────────────────────────────────────────────────────────
+
+pub(crate) fn stable_share_dir() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("XDG_DATA_HOME") {
+        if !val.is_empty() {
+            return Some(PathBuf::from(val).join("ghax"));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".local").join("share").join("ghax"))
+}
 
 fn resolve_daemon_bundle() -> Result<PathBuf> {
     // 1. Explicit env override.
@@ -494,7 +509,15 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
         }
     }
 
-    // 3. Dev fallback — walk up from cwd looking for package.json with
+    // 3. XDG stable location — what the installers populate.
+    if let Some(share) = stable_share_dir() {
+        let bundle = share.join("ghax-daemon.mjs");
+        if bundle.exists() {
+            return Ok(bundle);
+        }
+    }
+
+    // 4. Dev fallback — walk up from cwd looking for package.json with
     //    "name": "@ghax/cli", then expect dist/ghax-daemon.mjs there.
     if let Ok(cwd) = std::env::current_dir() {
         let mut dir = cwd.as_path();
@@ -522,8 +545,13 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
         }
     }
 
+    let hint = stable_share_dir()
+        .map(|p| p.join("ghax-daemon.mjs").display().to_string())
+        .unwrap_or_else(|| "~/.local/share/ghax/ghax-daemon.mjs".to_string());
     Err(anyhow::anyhow!(
-        "Cannot locate ghax-daemon.mjs. Set GHAX_DAEMON_BUNDLE, place it alongside the ghax binary, or run `bun run build` in the project root."
+        "Cannot locate ghax-daemon.mjs. Tried $GHAX_DAEMON_BUNDLE, the binary's directory, \
+         and the install location ({hint}). Run `bash scripts/install-link.sh` from a checkout, \
+         or `bun run install-release` to install a published build."
     ))
 }
 
@@ -849,6 +877,8 @@ unsafe fn libc_isatty(_fd: i32) -> i32 {
 
 /// `ghax attach` — mirror of `cmdAttach` in cli.ts.
 pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
+    crate::update::maybe_show_banner();
+
     let explicit_port: Option<u16> = parsed
         .flags
         .get("port")

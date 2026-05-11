@@ -58,6 +58,8 @@ Uninstall: `npm run uninstall-link`.
 
 Pre-built release archives for macOS, Linux, and Windows are published on [GitHub Releases](https://github.com/kepptic/ghax/releases).
 
+Stay current: `ghax update` installs the latest release in place; `ghax update --check` is a dry-run. `ghax attach` also prints a one-line banner when a newer version is published, cached for 24h and refreshed in the background (set `GHAX_NO_UPDATE_CHECK=1` to silence).
+
 ---
 
 ## Quickstart

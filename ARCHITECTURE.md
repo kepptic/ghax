@@ -97,7 +97,13 @@ path in this order:
 1. `$GHAX_DAEMON_BUNDLE` env var — explicit override.
 2. Sibling of the CLI binary (`argv[0]/../ghax-daemon.mjs`) — covers
    Homebrew and direct-download installs where both files land together.
-3. Dev fallback: `<repo root>/dist/ghax-daemon.mjs` — works from any
+3. XDG install location:
+   `$XDG_DATA_HOME/ghax/ghax-daemon.mjs` (default
+   `~/.local/share/ghax/ghax-daemon.mjs`) — the convention used by
+   both `scripts/install-link.sh` (dev) and `scripts/install-release.sh`
+   (production). Lets `ghax attach` run from any cwd after a normal
+   install.
+4. Dev fallback: `<repo root>/dist/ghax-daemon.mjs` — works from any
    directory inside the git tree during local development.
 
 ## Serde type mirroring

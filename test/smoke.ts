@@ -88,6 +88,30 @@ const c = (name: string, fn: () => Promise<void>) => checks.push({ name, fn });
 
 // ─── Checks ─────────────────────────────────────────────────────
 
+c('attach resolves daemon bundle from outside the project', async () => {
+  // Regression guard: before the XDG resolver tier was added, running
+  // `ghax attach` from a cwd outside the project root failed with
+  // "Cannot locate ghax-daemon.mjs" even though install-link.sh had
+  // populated ~/.local/share/ghax/ghax-daemon.mjs. Verify that the
+  // installed location is now picked up regardless of cwd or env hints.
+  spawnSync(ghax, ['detach'], { stdio: 'ignore' });
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.GHAX_DAEMON_BUNDLE;
+  const proc = spawn(ghax, ['attach'], { cwd: '/tmp', env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '';
+  proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+  proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+  const exitCode = await new Promise<number>((resolve) => proc.on('exit', (code) => resolve(code ?? 0)));
+  assert(
+    exitCode === 0,
+    `attach from /tmp without GHAX_DAEMON_BUNDLE exited ${exitCode}\nSTDOUT: ${stdout}\nSTDERR: ${stderr}`,
+  );
+  assert(
+    !/Cannot locate ghax-daemon\.mjs/.test(stderr),
+    `bundle resolver reported missing daemon despite installer convention:\n${stderr}`,
+  );
+});
+
 c('attach is idempotent (first call attaches)', async () => {
   const r = await run(['attach']);
   // POSIX convention: fresh attach is silent on success (since TOK-07).

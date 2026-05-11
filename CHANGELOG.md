@@ -6,7 +6,28 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ghax update` — install the latest published GitHub release in place.
+  `--check` is a dry-run that reports the latest tag; `--to vX.Y.Z`
+  pins a specific version. Reuses `scripts/install-release.sh` (local
+  if running from a checkout, otherwise fetched from `main`) so the
+  archive download, SHA-256 verification, and daemon-runtime bootstrap
+  remain a single source of truth.
+- `ghax attach` now prints a one-line stderr banner when a newer
+  release is available. The check is cached at
+  `<XDG_DATA_HOME>/ghax/version-check.json` for 24h and refreshed in
+  a fork-and-detach child, so foreground attach gains zero latency.
+  Suppressed when stderr isn't a TTY or `GHAX_NO_UPDATE_CHECK=1`.
+
 ### Fixed
+- `ghax attach` failed with "Cannot locate ghax-daemon.mjs" whenever
+  it was launched from a working directory outside the project — the
+  resolver only checked next to the (symlink-resolved) binary and a
+  cwd walk-up, neither of which matches what `install-link.sh` and
+  `install-release.sh` actually do. The resolver now also checks the
+  XDG install location at `$XDG_DATA_HOME/ghax/ghax-daemon.mjs`
+  (default `~/.local/share/ghax/ghax-daemon.mjs`). Smoke check added
+  to lock the behavior in.
 - `click` no longer reports `{ ok: true }` for clicks that landed but
   produced no observable effect. The handler now takes a cheap
   before/after observation and returns `dialogDismissed`, `urlChanged`,

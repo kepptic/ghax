@@ -98,6 +98,7 @@ Dev workflow:
   pair [status]
   gif <recording> [out.gif] [--delay ms] [--scale px] [--keep-frames]
   shell                             # interactive REPL — skip per-command spawn cost
+  update [--check] [--to vX.Y.Z]    # install latest GitHub release (or check only)
 
 Add --json for machine-readable output on any command.
 "#;

@@ -4,7 +4,7 @@ use crate::args::{self, Parsed};
 use crate::output;
 use crate::rpc::{self, RpcError};
 use crate::state::{self, Config};
-use crate::{attach, canary, qa, review, ship, small};
+use crate::{attach, canary, qa, review, ship, small, update};
 use anyhow::Result;
 use serde_json::{json, Value};
 
@@ -53,6 +53,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "canary" => return canary::cmd_canary(&args::parse(rest)),
         "review" => return review::cmd_review(&args::parse(rest)),
         "ship" => return ship::cmd_ship(&args::parse(rest)),
+        "update" => return update::cmd_update(&args::parse(rest)),
         "shell" => return crate::shell::cmd_shell(),
         _ => {}
     }

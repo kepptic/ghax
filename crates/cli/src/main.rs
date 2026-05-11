@@ -18,6 +18,7 @@ mod small;
 mod sse;
 mod state;
 mod time_util;
+mod update;
 
 use std::process::ExitCode;
 
