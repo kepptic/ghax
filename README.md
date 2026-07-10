@@ -51,7 +51,7 @@ Ensure `~/.local/bin` is on `PATH`. Then:
 
 ```bash
 ghax --version     # → ghax 0.4.2
-ghax --help        # full command surface (71 verbs)
+ghax --help        # full command surface (72 verbs)
 ```
 
 Uninstall: `npm run uninstall-link`.
@@ -111,7 +111,8 @@ Three modes, one flag each.
 - Accessibility-tree snapshots with `@e<n>` refs. Click by role and name, not brittle CSS selectors.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
 - Shadow-DOM traversal. Chain selectors (`host >> inner`) descend into open shadow roots for custom-element apps (Lit, Shoelace, web components).
-- Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors.
+- Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors, and Monaco-aware — routes into `monaco.editor.getEditors()`/`setValue()` when the target lives inside a `.monaco-editor` (Datto RMM, Splunk, Grafana, Postman, GitLab Web IDE).
+- `ghax select <@ref|selector> <value>` for dropdowns/comboboxes. Cascades native `<select>` → AntD `<Select>` (React fiber traversal to the controlled `onChange`, bypassing AntD's pointer-event quirks) → a real click-and-pick for everything else (react-select, MUI, Headless UI, `role=combobox`), including options rendered into a portal under `<body>`. Also takes `--index <n>` and `--by-value <val>`.
 - Real user gestures via CDP `Input.dispatch*`. Needed for APIs like `chrome.sidePanel.open()` that refuse synthetic clicks.
 
 ### MV3 extensions
@@ -167,7 +168,7 @@ Same browser process, separate windows and separate daemon state. Neither agent 
 
 ## Command reference
 
-71 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
+72 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
 
 ```bash
 ghax --help           # full surface — authoritative

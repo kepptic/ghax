@@ -109,6 +109,17 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, "upload", parsed)
         }
 
+        "select" => {
+            let parsed = args::parse(rest);
+            if parsed.positional.is_empty() {
+                eprintln!(
+                    "Usage: ghax select <@ref|selector> <value>\n   or: ghax select <@ref|selector> --index <n>\n   or: ghax select <@ref|selector> --by-value <val>"
+                );
+                return Ok(EXIT_USAGE);
+            }
+            simple(cfg, "select", parsed)
+        }
+
         "is" => {
             let parsed = args::parse(rest);
             let port = state::require_daemon(cfg)?;
