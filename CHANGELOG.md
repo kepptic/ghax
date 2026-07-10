@@ -5,34 +5,8 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-### Fixed
-- **Install defect**: the cargo-dist one-liner installers
-  (`ghax-installer.sh` / `ghax-installer.ps1`, published as release
-  assets) only ever installed the `ghax` binary — cargo-dist's installer
-  generator has no concept of the daemon bundle riding along in the
-  release archive via `dist-workspace.toml`'s `include`. A user running
-  the advertised `curl … | sh` one-liner got a binary that failed
-  `ghax attach` with `Cannot locate ghax-daemon.mjs`, because nothing
-  ever copied it out of the download's temp dir. `ghax attach` now
-  self-heals: if the bundle can't be found through the existing tiers
-  (env var, adjacent to the binary, XDG stable dir, dev checkout), it
-  downloads the matching platform archive straight from GitHub Releases,
-  verifies its SHA-256 against the published checksum, and lifts
-  `ghax-daemon.mjs` into `~/.local/share/ghax/`. The existing
-  bootstrap-on-missing-module retry then installs `node_modules`
-  (playwright/source-map) as before. Opt out with `GHAX_NO_SELF_HEAL=1`.
-  Verified live: a scratch install of the real published v0.4.3 archive
-  (binary only, no daemon) failed `ghax attach` exactly as described;
-  the same scratch layout with the self-heal fix compiled in
-  successfully downloaded, verified, and installed the bundle, then
-  attached to a live Edge session end to end.
-- `scripts/install-release.sh` (used directly and as `ghax update`'s
-  fallback path) required the `gh` CLI + auth for every download despite
-  its header claiming a curl fallback — `gh release download` was called
-  unconditionally. Since the repo is public, plain `curl` against
-  GitHub's release-download URLs needs no auth at all; the script now
-  tries curl first for both version resolution and asset download, and
-  only falls back to `gh` if curl fails and `gh` happens to be installed.
+
+_No changes yet._
 
 ## [0.4.4] - 2026-07-10
 ### Added
@@ -116,6 +90,33 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   skills.
 
 ### Fixed
+- **Install defect**: the cargo-dist one-liner installers
+  (`ghax-installer.sh` / `ghax-installer.ps1`, published as release
+  assets) only ever installed the `ghax` binary — cargo-dist's installer
+  generator has no concept of the daemon bundle riding along in the
+  release archive via `dist-workspace.toml`'s `include`. A user running
+  the advertised `curl … | sh` one-liner got a binary that failed
+  `ghax attach` with `Cannot locate ghax-daemon.mjs`, because nothing
+  ever copied it out of the download's temp dir. `ghax attach` now
+  self-heals: if the bundle can't be found through the existing tiers
+  (env var, adjacent to the binary, XDG stable dir, dev checkout), it
+  downloads the matching platform archive straight from GitHub Releases,
+  verifies its SHA-256 against the published checksum, and lifts
+  `ghax-daemon.mjs` into `~/.local/share/ghax/`. The existing
+  bootstrap-on-missing-module retry then installs `node_modules`
+  (playwright/source-map) as before. Opt out with `GHAX_NO_SELF_HEAL=1`.
+  Verified live: a scratch install of the real published v0.4.3 archive
+  (binary only, no daemon) failed `ghax attach` exactly as described;
+  the same scratch layout with the self-heal fix compiled in
+  successfully downloaded, verified, and installed the bundle, then
+  attached to a live Edge session end to end.
+- `scripts/install-release.sh` (used directly and as `ghax update`'s
+  fallback path) required the `gh` CLI + auth for every download despite
+  its header claiming a curl fallback — `gh release download` was called
+  unconditionally. Since the repo is public, plain `curl` against
+  GitHub's release-download URLs needs no auth at all; the script now
+  tries curl first for both version resolution and asset download, and
+  only falls back to `gh` if curl fails and `gh` happens to be installed.
 - **Downloads in an attached browser now behave normally** — correct
   folder, correct site-suggested filename with extension. Playwright's
   `connectOverCDP` issues `Browser.setDownloadBehavior` with behavior
