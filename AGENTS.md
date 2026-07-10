@@ -68,6 +68,7 @@ ghax/
 │       ├── sse.rs            Server-Sent Events client (live tail)
 │       ├── output.rs         JSON pretty-print
 │       ├── qa_common.rs      Shared filters between qa.rs and canary.rs
+│       ├── cookies.rs        Cookie scope/redaction flags, --has exit-code mapping
 │       └── time_util.rs      ISO-8601 / days-to-ymd (shared by qa/canary/ship)
 ├── src/                      Node daemon source
 │   ├── daemon.ts             Main HTTP server + all RPC handlers (~2,500 lines, 72 verbs)

@@ -1192,9 +1192,58 @@ function buildHar(entries: NetworkEntry[]): unknown {
   };
 }
 
-register('cookies', async (ctx) => {
+/**
+ * Redact a cookie's value unless the caller opted into raw values.
+ * Everything else (name, domain, path, expires, httpOnly, secure,
+ * sameSite) is safe to print — it's the raw session/auth value that's
+ * the privacy hazard (see docs/reports/open/2026-06-23-setsail-localhost-dev-session.md).
+ */
+function redactCookie(cookie: import('playwright').Cookie, showValues: boolean): Record<string, unknown> {
+  if (showValues) return { ...cookie };
+  const { value, ...rest } = cookie;
+  const len = typeof value === 'string' ? value.length : 0;
+  return { ...rest, value: `<redacted, ${len} chars>` };
+}
+
+register('cookies', async (ctx, _args, opts) => {
   const page = await activePage(ctx);
-  return await page.context().cookies();
+  const context = page.context();
+
+  const showValues = opts.values === true;
+  const wantAll = opts.all === true;
+  const domainFilter = typeof opts.domain === 'string' ? opts.domain.toLowerCase() : undefined;
+  const urlFilter = typeof opts.url === 'string' ? opts.url : undefined;
+  const hasName = typeof opts.has === 'string' ? opts.has : undefined;
+
+  // Scope resolution:
+  //   --url <u>          → cookies applicable to that URL (Playwright's own
+  //                        domain/path/secure applicability match — handles
+  //                        subdomains, localhost, IP literals, and ports
+  //                        correctly; don't hand-roll this).
+  //   --all / --domain    → whole-profile dump, filtered by --domain if given.
+  //   (default)           → cookies applicable to the active tab's URL only.
+  let cookies: import('playwright').Cookie[];
+  if (urlFilter) {
+    cookies = await context.cookies([urlFilter]);
+  } else if (wantAll || domainFilter) {
+    cookies = await context.cookies();
+  } else {
+    cookies = await context.cookies([page.url()]);
+  }
+
+  if (domainFilter) {
+    cookies = cookies.filter((c) => {
+      const d = String(c.domain ?? '').replace(/^\./, '').toLowerCase();
+      return d.includes(domainFilter);
+    });
+  }
+
+  if (hasName !== undefined) {
+    const exists = cookies.some((c) => c.name === hasName);
+    return { name: hasName, exists };
+  }
+
+  return cookies.map((c) => redactCookie(c, showValues));
 });
 
 register('storage', async (ctx, args) => {

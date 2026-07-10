@@ -5,6 +5,7 @@
 mod args;
 mod attach;
 mod canary;
+mod cookies;
 mod dispatch;
 mod help;
 mod output;

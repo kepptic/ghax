@@ -24,6 +24,7 @@ Tab:
   goto <url>
   back | forward | reload
   eval <js>                       # auto-retries once past a nav-in-flight
+                                  #   awaits Promises/async IIFEs automatically
   try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
@@ -53,7 +54,16 @@ Logs:
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
   network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
-  cookies
+  cookies [--domain <d>] [--url <u>] [--all] [--values] [--has <name>]
+         # Default: cookies applicable to the active tab's URL only
+         #   (Playwright's own domain/path/secure applicability match).
+         # Values are redacted by default — pass --values for raw values.
+         # --all = whole-profile dump (old default was `--all --values`).
+         # --domain <d> filters the whole profile by domain substring/suffix.
+         # --url <u> scopes applicability to an explicit URL instead of
+         #   the active tab.
+         # --has <name> exits 0 if a cookie with that name is in scope,
+         #   1 otherwise — scripting primitive for "did login land?".
 
 Extensions (MV3):
   ext list

@@ -507,6 +507,84 @@ c('cookies --json returns an array', async () => {
   assert(Array.isArray(cookies), 'cookies should be array');
 });
 
+c('cookies scopes to the active tab by default and redacts values', async () => {
+  await run(['goto', 'https://example.com']);
+  const rawValue = `ghax-smoke-${Date.now()}`;
+  await run(['eval', `document.cookie = 'ghax_smoke_cookie=${rawValue}; path=/'`]);
+
+  // Default scope: applicable to the active tab (example.com), value redacted.
+  const scoped = await run(['cookies', '--json']);
+  const cookies = parseJson<Array<{ name: string; domain: string; value: string }>>(scoped.stdout);
+  const mine = cookies.find((cc) => cc.name === 'ghax_smoke_cookie');
+  assert(mine, `expected ghax_smoke_cookie in default-scoped cookies, got: ${JSON.stringify(cookies).slice(0, 300)}`);
+  assert(
+    mine!.domain.replace(/^\./, '').includes('example.com'),
+    `cookie domain should be example.com-scoped, got ${mine!.domain}`,
+  );
+  assert(
+    mine!.value === `<redacted, ${rawValue.length} chars>`,
+    `value should be redacted by default, got ${JSON.stringify(mine!.value)}`,
+  );
+
+  // --values opts into the raw value.
+  const withValues = await run(['cookies', '--values', '--json']);
+  const withValuesCookies = parseJson<Array<{ name: string; value: string }>>(withValues.stdout);
+  const mineRaw = withValuesCookies.find((cc) => cc.name === 'ghax_smoke_cookie');
+  assert(mineRaw && mineRaw.value === rawValue, `--values should show the raw value, got ${JSON.stringify(mineRaw)}`);
+
+  // A different domain must not see example.com's cookie in the default scope,
+  // but --domain reaches across the whole profile regardless of the active tab.
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><html><body>ghax-smoke-cookies</body></html>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  try {
+    const port = (server.address() as AddressInfo).port;
+    await run(['goto', `http://127.0.0.1:${port}/`]);
+
+    const otherScope = await run(['cookies', '--json']);
+    const otherCookies = parseJson<Array<{ name: string }>>(otherScope.stdout);
+    assert(
+      !otherCookies.some((cc) => cc.name === 'ghax_smoke_cookie'),
+      `example.com cookie leaked into 127.0.0.1's default scope: ${JSON.stringify(otherCookies)}`,
+    );
+
+    const domainFiltered = await run(['cookies', '--domain', 'example.com', '--json']);
+    const domainCookies = parseJson<Array<{ name: string }>>(domainFiltered.stdout);
+    assert(
+      domainCookies.some((cc) => cc.name === 'ghax_smoke_cookie'),
+      `--domain example.com should find the cookie despite active tab being 127.0.0.1: ${JSON.stringify(domainCookies)}`,
+    );
+
+    const all = await run(['cookies', '--all', '--json']);
+    const allCookies = parseJson<Array<{ name: string }>>(all.stdout);
+    assert(
+      allCookies.some((cc) => cc.name === 'ghax_smoke_cookie'),
+      `--all should dump the whole profile regardless of active tab: ${JSON.stringify(allCookies)}`,
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  await run(['goto', 'https://example.com']);
+});
+
+c('cookies --has exits 0 when in scope and 1 when not', async () => {
+  await run(['goto', 'https://example.com']);
+  await run(['eval', "document.cookie = 'ghax_smoke_has=present; path=/'"]);
+
+  const hit = await run(['cookies', '--has', 'ghax_smoke_has'], { allowFailure: true });
+  assert(hit.exitCode === 0, `expected exit 0 for a present cookie, got ${hit.exitCode}: ${hit.stdout}${hit.stderr}`);
+  const hitJson = parseJson<{ name: string; exists: boolean }>(hit.stdout);
+  assert(hitJson.exists === true, `expected exists:true, got ${hit.stdout}`);
+
+  const miss = await run(['cookies', '--has', 'ghax_smoke_has_missing_xyz'], { allowFailure: true });
+  assert(miss.exitCode === 1, `expected exit 1 for a missing cookie, got ${miss.exitCode}: ${miss.stdout}${miss.stderr}`);
+  const missJson = parseJson<{ name: string; exists: boolean }>(miss.stdout);
+  assert(missJson.exists === false, `expected exists:false, got ${miss.stdout}`);
+});
+
 c('ext list returns {id, targets} objects', async () => {
   const r = await run(['ext', 'list', '--json']);
   const exts = parseJson<Array<{ id: string; targets: unknown[] }>>(r.stdout);
