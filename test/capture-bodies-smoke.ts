@@ -6,6 +6,11 @@
  * capture there. This file spins up a dedicated headless Chrome with the
  * flag set, runs a focused set of checks, then tears down.
  *
+ * Covers both response bodies (`responseBody`) and, since FEAT-1 in the
+ * 2026-04-30 Datto RMM field report, request bodies (`requestBody`) for
+ * POST/PUT/PATCH calls — same glob, content-type, and 32KB-cap rules on
+ * both sides, plus HAR `postData` export.
+ *
  * Requirements:
  *   - A Chrome install on this machine (not Edge — Edge is left alone so
  *     the user's daily-driver isn't touched).
@@ -78,7 +83,12 @@ function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) fail(msg);
 }
 
-// Fixture server: serves an HTML shell at / and two JSON endpoints.
+// Fixture server: serves an HTML shell at / plus JSON GET endpoints and a
+// couple of POST echo endpoints for exercising request-body capture
+// (FEAT-1 — see docs/reports/open/FIELD-REPORT-2026-04-30-DATTO-RMM.md).
+// The echo endpoints just drain + discard the body; ghax captures the
+// *request* side from the browser's fetch() call, not from what the
+// server does with it, so the response content here is irrelevant.
 async function startFixture(bodyFor40kb: string): Promise<{ port: number; stop: () => void }> {
   const server = createServer((req, res) => {
     const url = new URL(req.url!, `http://127.0.0.1`);
@@ -88,9 +98,13 @@ async function startFixture(bodyFor40kb: string): Promise<{ port: number; stop: 
     } else if (url.pathname === '/api/big') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(bodyFor40kb);
-    } else if (url.pathname === '/skip-me') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ shouldNotBeCapturedByPattern: true }));
+    } else if (url.pathname === '/api/echo' || url.pathname === '/skip-me') {
+      // Drain the request body (unused) and reply with a small JSON ack.
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
     } else if (url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end(`<!doctype html><html><body><script>
@@ -148,13 +162,62 @@ async function startFixture(bodyFor40kb: string): Promise<{ port: number; stop: 
     const skip = arr3.find((e) => e.url.endsWith('/skip-me'));
     assert(skip, 'did not capture /skip-me request entry');
     assert(skip.responseBody === undefined, `/skip-me should not have body captured (glob *api* excludes it), got: ${skip.responseBody?.slice(0, 60)}`);
+
+    // ── Check 4: requestBody captured on a same-origin POST (FEAT-1) ──
+    // Fires the POST from inside the page via `ghax eval` — mirrors how a
+    // real GraphQL mutation call would look on the wire — then reads the
+    // resulting network entry back for the captured requestBody.
+    console.log('• capture-bodies captures POST request bodies (requestBody)');
+    const marker = 'ghax-smoke-marker-' + Date.now();
+    await run(['eval', `(async () => { await fetch('/api/echo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ marker: ${JSON.stringify(marker)} }) }); return true; })()`]);
+    const r4 = await run(['network', '--pattern', 'api/echo', '--last', '20', '--json']);
+    const arr4 = JSON.parse(r4.stdout) as Array<{ url: string; method: string; requestBody?: string; requestBodyTruncated?: boolean }>;
+    const echo = arr4.find((e) => e.url.endsWith('/api/echo') && e.requestBody?.includes(marker));
+    assert(echo, `did not capture /api/echo POST with marker; entries: ${JSON.stringify(arr4).slice(0, 300)}`);
+    assert(echo.method === 'POST', `expected POST method, got ${echo.method}`);
+    assert(echo.requestBody!.includes(marker), 'requestBody did not contain the marker');
+    assert(!echo.requestBodyTruncated, 'small request body should not be truncated');
+
+    // ── Check 5: request body truncates at 32KB with the same marker ──
+    console.log('• capture-bodies truncates large request bodies at 32KB with marker');
+    const bigReqBody = JSON.stringify({ data: 'y'.repeat(40_000) });
+    await run(['eval', `(async () => { await fetch('/api/echo?big=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: ${JSON.stringify(bigReqBody)} }); return true; })()`]);
+    const r5 = await run(['network', '--pattern', 'api/echo.*big=1', '--last', '20', '--json']);
+    const arr5 = JSON.parse(r5.stdout) as Array<{ url: string; requestBody?: string; requestBodyTruncated?: boolean }>;
+    const bigEcho = arr5.find((e) => e.url.includes('big=1'));
+    assert(bigEcho, 'did not capture big /api/echo?big=1 entry');
+    assert(bigEcho.requestBody !== undefined, 'big requestBody missing');
+    assert(bigEcho.requestBodyTruncated === true, 'requestBodyTruncated should be true');
+    assert(bigEcho.requestBody.length <= 32 * 1024 + 100, `request body too long: ${bigEcho.requestBody.length}`);
+    assert(/truncated \d+ bytes/.test(bigEcho.requestBody), 'request truncation marker missing');
+
+    // ── Check 6: POST to a URL outside the glob gets no requestBody ──
+    console.log('• capture-bodies skips request bodies for URLs not matching the glob');
+    await run(['eval', `(async () => { await fetch('/skip-me', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ marker: ${JSON.stringify(marker)} }) }); return true; })()`]);
+    const r6 = await run(['network', '--pattern', 'skip-me', '--last', '20', '--json']);
+    const arr6 = JSON.parse(r6.stdout) as Array<{ url: string; method: string; requestBody?: string }>;
+    const skipPost = arr6.find((e) => e.url.endsWith('/skip-me') && e.method === 'POST');
+    assert(skipPost, 'did not capture the /skip-me POST entry');
+    assert(skipPost.requestBody === undefined, `/skip-me POST should not have requestBody captured (glob *api* excludes it), got: ${skipPost.requestBody?.slice(0, 60)}`);
+
+    // ── Check 7: HAR export surfaces the captured request body as postData ──
+    console.log('• network --har includes captured request bodies as postData');
+    const harPath = `/tmp/ghax-cb-har-${Date.now()}.json`;
+    await run(['network', '--pattern', 'api/echo$', '--last', '20', '--har', harPath]);
+    const har = JSON.parse(fs.readFileSync(harPath, 'utf8'));
+    const harEntry = (har.log.entries as Array<{ request: { url: string; postData?: { text: string; mimeType: string } } }>)
+      .find((e) => e.request.url.endsWith('/api/echo'));
+    assert(harEntry, 'HAR missing /api/echo entry');
+    assert(harEntry.request.postData?.text.includes(marker), 'HAR postData.text missing the marker');
+    assert(harEntry.request.postData?.mimeType.includes('json'), 'HAR postData.mimeType should be json');
+    fs.rmSync(harPath, { force: true });
   } finally {
     await run(['detach'], { allowFailure: true });
     try { spawnSync('pkill', ['-f', profileDir], { stdio: 'ignore' }); } catch {}
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  // ── Check 4: zero capture when flag absent ──
+  // ── Check 8: zero capture when flag absent ──
   console.log('• no capture when --capture-bodies flag absent');
   await run(['attach', '--launch', '--headless', '--browser', 'chrome', '--port', attachPort, '--data-dir', `${profileDir}-2`]);
   try {
@@ -172,7 +235,7 @@ async function startFixture(bodyFor40kb: string): Promise<{ port: number; stop: 
 
   fixture.stop();
   cleanup();
-  console.log('\n✓ 4/4 capture-bodies checks passed');
+  console.log('\n✓ 8/8 capture-bodies checks passed');
 })().catch((err) => {
   console.error('capture-bodies smoke failed:', err);
   cleanup();

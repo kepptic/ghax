@@ -197,12 +197,9 @@ function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Respon
     resp
       .text()
       .then((body) => {
-        if (body.length > BODY_CAP_BYTES) {
-          entry.responseBody = body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`;
-          entry.responseBodyTruncated = true;
-        } else {
-          entry.responseBody = body;
-        }
+        const { text, truncated } = capBody(body);
+        entry.responseBody = text;
+        if (truncated) entry.responseBodyTruncated = true;
       })
       .catch(() => {
         // Response body may be unavailable (opaque CORS, navigation frame
@@ -210,6 +207,26 @@ function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Respon
       })
       .finally(release);
   });
+}
+
+// Content-type gate shared by request- and response-body capture: only
+// capture bodies that are plausibly JSON/text (GraphQL mutations included
+// — most send `application/json`, but some servers reply/accept
+// `application/graphql`). Binary payloads (images, video, octet-stream)
+// are skipped even when the URL matches the glob.
+const CAPTURABLE_CONTENT_TYPE_RE = /json|text|javascript|xml|html|css|graphql/;
+
+// Apply the shared 32KB cap + truncation marker to a body string. Used by
+// both response and request capture so the two stay byte-for-byte
+// consistent.
+function capBody(body: string): { text: string; truncated: boolean } {
+  if (body.length > BODY_CAP_BYTES) {
+    return {
+      text: body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`,
+      truncated: true,
+    };
+  }
+  return { text: body, truncated: false };
 }
 
 /**
@@ -277,6 +294,35 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
       resourceType: req.resourceType(),
       requestHeaders: req.headers(),
     };
+
+    // Request-body capture rides the same --capture-bodies gate as
+    // response bodies (no separate flag — see FEAT-1 in the 2026-04-30
+    // Datto RMM field report). Playwright buffers postData() synchronously
+    // as part of request interception, so this is a cheap read, not a
+    // network round-trip. Only bodies of mutating methods with a
+    // JSON/text-ish content-type are captured; GET/HEAD never carry a
+    // body worth recording.
+    if (
+      ctx.captureBodiesRe &&
+      ctx.captureBodiesRe.test(entry.url) &&
+      /^(POST|PUT|PATCH)$/i.test(entry.method)
+    ) {
+      const ct = (req.headers()['content-type'] ?? '').toLowerCase();
+      if (CAPTURABLE_CONTENT_TYPE_RE.test(ct)) {
+        try {
+          const body = req.postData();
+          if (body !== null && body !== undefined) {
+            const { text, truncated } = capBody(body);
+            entry.requestBody = text;
+            if (truncated) entry.requestBodyTruncated = true;
+          }
+        } catch {
+          // postData() can throw for a handful of request shapes (e.g.
+          // some data: URI navigations); not fatal, just skip capture.
+        }
+      }
+    }
+
     ctx.networkBuf.push(entry);
     for (const l of ctx.networkListeners) l(entry);
   });
@@ -294,7 +340,7 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
 
     if (ctx.captureBodiesRe && ctx.captureBodiesRe.test(respUrl)) {
       const ct = (resp.headers()['content-type'] ?? '').toLowerCase();
-      if (/json|text|javascript|xml|html|css|graphql/.test(ct)) {
+      if (CAPTURABLE_CONTENT_TYPE_RE.test(ct)) {
         captureBodyAsync(e, resp);
       }
     }
@@ -1135,9 +1181,12 @@ register('network', async (ctx, _args, opts) => {
   return entries;
 });
 
-// Minimal HAR 1.2 generator. We don't capture bodies, so content.size comes
-// from Content-Length when available and body text is omitted. Good enough
-// for waterfall + diagnostics tools (Charles, har-analyzer, WebPageTest).
+// Minimal HAR 1.2 generator. Response bodies are never included (content.size
+// comes from Content-Length when available; body text is omitted) — good
+// enough for waterfall + diagnostics tools (Charles, har-analyzer,
+// WebPageTest). Request bodies *are* included as `postData` when the
+// daemon was run with --capture-bodies and the entry captured a
+// requestBody (see FEAT-1 in the 2026-04-30 Datto RMM field report).
 function buildHar(entries: NetworkEntry[]): unknown {
   const asHeaders = (h: Record<string, string> | undefined) =>
     h ? Object.entries(h).map(([name, value]) => ({ name, value })) : [];
@@ -1165,7 +1214,15 @@ function buildHar(entries: NetworkEntry[]): unknown {
           queryString: queryString(e.url),
           cookies: [],
           headersSize: -1,
-          bodySize: -1,
+          bodySize: e.requestBody !== undefined ? Buffer.byteLength(e.requestBody, 'utf8') : -1,
+          ...(e.requestBody !== undefined
+            ? {
+                postData: {
+                  mimeType: e.requestHeaders?.['content-type'] ?? '',
+                  text: e.requestBody,
+                },
+              }
+            : {}),
         },
         response: {
           status: e.status ?? 0,

@@ -11,6 +11,9 @@ Connection:
          # With --launch and no --port, auto-picks first free port in range.
          # --capture-bodies records JSON/text response bodies (opt-in,
          #   32KB cap per body). Glob filters by URL (e.g. '*/api/*').
+         #   Also captures POST/PUT/PATCH request bodies (requestBody)
+         #   on network entries under the same glob + content-type +
+         #   32KB-cap rules.
          # --verbose prints pid/port/browser on success (default: silent).
   status [--json]
   detach

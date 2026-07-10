@@ -125,6 +125,7 @@ Three modes, one flag each.
 ### Observability
 
 - Console and network capture from attach onward. Rolling 5k-entry buffers, `--errors` and `--pattern` filters, request and response headers, HAR 1.2 export, stack-frame parsing, dedup grouping.
+- `ghax attach --capture-bodies[=<url-glob>]` records response bodies (`responseBody`) *and* POST/PUT/PATCH request bodies (`requestBody`) — e.g. a captured GraphQL mutation's variables, not just its reply. Same 32KB cap + `[truncated N bytes]` marker, same glob + JSON/text content-type filter on both sides. `ghax network --har <path>` includes captured request bodies as HAR `postData`.
 - Source-map resolution: `console --source-maps` maps `main.abc123.js:1:48291` back to `src/AuthForm.tsx:42:12`.
 - Core Web Vitals (`ghax perf`): LCP with the element that triggered it, FCP, CLS, TTFB, full nav timing. Buffered observers catch entries that fired before the call.
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
