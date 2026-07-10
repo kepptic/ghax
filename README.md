@@ -1,6 +1,17 @@
 # ghax
 
-A fast CLI for Chromium-family browser automation. Alternative to playwright-cli, Puppeteer, and Claude-in-Chrome for interactive and agent-driven workflows.
+ghax is a command-line tool that drives your **real, already-running** Chrome or Edge (or other Chromium-family browser) from the terminal. It connects over the browser's built-in remote-debugging protocol — no separate sandboxed browser window, no logging in again. Your tabs, your cookies, your extensions, your session: ghax just drives it.
+
+It's an alternative to playwright-cli, Puppeteer, and Claude-in-Chrome for interactive and agent-driven browser workflows.
+
+## What it does
+
+- Navigate pages, go back/forward, open and switch tabs
+- Click and fill form fields by accessibility role and name — not brittle CSS selectors
+- Take an accessibility-tree snapshot of the page and act on it with `@e<n>` refs
+- Screenshot the page, or read its text and DOM state
+- Read console messages and network requests as they happen
+- Drive Chrome extensions — service workers, `chrome.storage`, hot-reload after a rebuild
 
 ```bash
 ghax attach
@@ -10,7 +21,104 @@ ghax click @e3
 ghax fill @e5 "hello"
 ```
 
-[Benchmarks](#benchmarks) · [Install](#install) · [Quickstart](#quickstart) · [Features](#features) · [AI agent integration](#ai-agent-integration) · [Commands](#command-reference)
+[Install](#install) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [Features](#features) · [AI agent integration](#ai-agent-integration) · [Commands](#command-reference)
+
+---
+
+## Install
+
+Requires **Node 20+** (the daemon that drives the browser runs on Node). The first `ghax attach` finishes the rest of the setup automatically — it fetches its small browser-driver bundle if it's missing and installs the one runtime dependency (Playwright) it needs — so there's nothing else to run by hand.
+
+### macOS (Apple Silicon or Intel)
+
+```bash
+curl -fsSL https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.sh | sh
+```
+
+### Linux (x86_64 or arm64)
+
+```bash
+curl -fsSL https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.sh | sh
+```
+
+### Windows (x86_64, PowerShell)
+
+```powershell
+irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 | iex
+```
+
+Then, on any OS:
+
+```bash
+ghax --version     # → ghax 0.4.4
+ghax --help        # full command surface (73 verbs)
+```
+
+Pre-built release archives for macOS, Linux, and Windows are published on [GitHub Releases](https://github.com/kepptic/ghax/releases).
+
+Stay current: `ghax update` installs the latest release in place; `ghax update --check` is a dry-run. `ghax attach` also prints a one-line banner when a newer version is published, cached for 24h and refreshed in the background (set `GHAX_NO_UPDATE_CHECK=1` to silence).
+
+### From source (for contributors)
+
+Needs Rust 1.80+ and Node 20+.
+
+```bash
+git clone https://github.com/kepptic/ghax.git
+cd ghax
+npm install
+npm run build:all
+npm run install-link
+```
+
+Ensure `~/.local/bin` is on `PATH`. Uninstall: `npm run uninstall-link`.
+
+---
+
+## Quickstart
+
+Launch Chrome or Edge with CDP enabled:
+
+```bash
+# macOS — Edge
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --remote-debugging-port=9222 &
+
+# macOS — Chrome (needs an explicit profile dir — see Browser compatibility below)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/chrome-ghax" &
+```
+
+```powershell
+# Windows — Edge
+Start-Process "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" -ArgumentList "--remote-debugging-port=9222"
+
+# Windows — Chrome (needs an explicit profile dir — see Browser compatibility below)
+Start-Process "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe" `
+  -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$env:LOCALAPPDATA\chrome-ghax"
+```
+
+```bash
+# Linux — Edge or Chromium
+microsoft-edge --remote-debugging-port=9222 &
+chromium --remote-debugging-port=9222 &
+
+# Linux — Chrome (needs an explicit profile dir — see Browser compatibility below)
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.config/chrome-ghax" &
+```
+
+Attach and drive:
+
+```bash
+ghax attach
+ghax tabs
+ghax goto https://example.com
+ghax snapshot -i
+ghax click @e3
+ghax fill @e5 "hello"
+ghax screenshot --path /tmp/shot.png
+ghax perf
+ghax detach
+```
 
 ---
 
@@ -32,63 +140,6 @@ Warm-loop on a real Wikipedia article (~250 KB): ghax 117 ms/cmd vs playwright-c
 Binary: ~3 MB stripped on Apple Silicon. Cold single-command invocation: ~20 ms. Daemon bundle: ~80 KB of JavaScript.
 
 Full methodology, per-operation breakdowns, and reproduction steps: [docs/BENCHMARK.md](./docs/BENCHMARK.md).
-
----
-
-## Install
-
-Prerequisites: Node 20+, Rust 1.80+.
-
-```bash
-git clone https://github.com/kepptic/ghax.git
-cd ghax
-npm install
-npm run build:all
-npm run install-link
-```
-
-Ensure `~/.local/bin` is on `PATH`. Then:
-
-```bash
-ghax --version     # → ghax 0.4.2
-ghax --help        # full command surface (72 verbs)
-```
-
-Uninstall: `npm run uninstall-link`.
-
-Pre-built release archives for macOS, Linux, and Windows are published on [GitHub Releases](https://github.com/kepptic/ghax/releases).
-
-Stay current: `ghax update` installs the latest release in place; `ghax update --check` is a dry-run. `ghax attach` also prints a one-line banner when a newer version is published, cached for 24h and refreshed in the background (set `GHAX_NO_UPDATE_CHECK=1` to silence).
-
----
-
-## Quickstart
-
-Launch Chrome or Edge with CDP enabled:
-
-```bash
-# macOS Edge
-"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --remote-debugging-port=9222 &
-
-# macOS Chrome
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.config/chrome-ghax" &
-```
-
-Attach and drive:
-
-```bash
-ghax attach
-ghax tabs
-ghax goto https://example.com
-ghax snapshot -i
-ghax click @e3
-ghax fill @e5 "hello"
-ghax screenshot --path /tmp/shot.png
-ghax perf
-ghax detach
-```
 
 ---
 
