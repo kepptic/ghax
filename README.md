@@ -129,6 +129,17 @@ Three modes, one flag each.
 - Core Web Vitals (`ghax perf`): LCP with the element that triggered it, FCP, CLS, TTFB, full nav timing. Buffered observers catch entries that fired before the call.
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
 
+### Downloads
+
+- Attached-browser downloads behave like normal browsing: they land in the
+  real `~/Downloads` under the site-suggested filename with its extension —
+  not as extension-less GUIDs in a Playwright temp dir. (ghax re-asserts
+  sane CDP `Browser.setDownloadBehavior` after attach, undoing Playwright's
+  `connectOverCDP` hijack.)
+- `ghax attach --downloads-dir <path>` redirects downloads to a chosen dir.
+- `ghax downloads [--last N]` lists captured downloads: url, filename, final
+  path, state, byte counts, and timestamps.
+
 ### Execution patterns
 
 - `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots between ref-using steps, so a mid-plan combobox reshuffle doesn't break later refs.
@@ -164,7 +175,7 @@ Same browser process, separate windows and separate daemon state. Neither agent 
 
 ## Command reference
 
-71 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
+72 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, downloads, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
 
 ```bash
 ghax --help           # full surface — authoritative

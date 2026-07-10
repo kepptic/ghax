@@ -6,6 +6,30 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ghax downloads [--last N]` — list file downloads captured while
+  attached: url, site-suggested filename, resolved final path, state
+  (inProgress/completed/canceled), byte counts, and timestamps. Backed
+  by browser-level CDP `Browser.downloadWillBegin` / `downloadProgress`
+  events in a 200-entry ring buffer.
+- `ghax attach --downloads-dir <path>` — override where attached-browser
+  downloads land (default: the user's real `~/Downloads`).
+
+### Fixed
+- **Downloads in an attached browser now behave normally** — correct
+  folder, correct site-suggested filename with extension. Playwright's
+  `connectOverCDP` issues `Browser.setDownloadBehavior` with behavior
+  `allowAndName` and a downloadPath pointed at its own temp
+  `playwright-artifacts-*` dir, which hijacked the *entire real
+  browser's* download settings: files landed as extension-less GUIDs
+  (e.g. `75af83ea-…-d9851e02d57b`) in `/var/folders/**` instead of
+  `~/Downloads/report.csv`. The daemon now opens its own browser-level
+  CDP session after attach and re-asserts `behavior: 'allow'` with
+  `downloadPath` = the real Downloads dir (or `--downloads-dir`), and
+  re-asserts again on each `new-window`. `'allow'` (not `'allowAndName'`)
+  is what restores the site-suggested name + extension; Chromium then
+  owns collision de-duping.
+
 ### Docs
 - `llms.txt` now teaches installing agents how to register the ghax
   skill/memory files in the user's agent of choice — Claude Code

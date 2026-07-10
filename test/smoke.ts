@@ -22,6 +22,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { spawn, spawnSync } from 'child_process';
 import { createServer } from 'http';
@@ -1430,6 +1431,57 @@ c('gif renders a GIF from a recording (if ffmpeg available)', async () => {
   assert(fs.statSync(outPath).size > 500, `gif suspiciously small: ${fs.statSync(outPath).size}B`);
   fs.unlinkSync(recPath);
   fs.unlinkSync(outPath);
+});
+
+c('downloads land in --downloads-dir with the site-suggested name', async () => {
+  // Regression guard for the connectOverCDP download hijack: Playwright
+  // sets `Browser.setDownloadBehavior` to allowAndName + its temp artifacts
+  // dir, so downloads used to land as extension-less GUIDs in /var/folders.
+  // The daemon re-asserts `behavior: 'allow'` with our downloadPath, so
+  // files land under their real name in the configured dir.
+  //
+  // Runs on an ISOLATED daemon (own state file + own window) so it never
+  // disturbs the shared suite daemon or the user's real ~/Downloads.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-smoke-dl-'));
+  const stateFile = path.join(scratch, 'state.json');
+  const env: NodeJS.ProcessEnv = { ...process.env, GHAX_STATE_FILE: stateFile };
+  const runIso = (args: string[]) =>
+    new Promise<RunResult>((resolve) => {
+      const proc = spawn(ghax, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '', stderr = '';
+      proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
+      proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
+      proc.on('exit', (code) => resolve({ stdout, stderr, exitCode: code ?? 0 }));
+    });
+  try {
+    await runIso(['attach', '--downloads-dir', scratch]);
+    await runIso(['new-window', 'about:blank']);
+    // Hermetic: a blob download, no network.
+    await runIso(['eval',
+      'const b=new Blob(["a,b\\n1,2\\n"],{type:"text/csv"});' +
+      'const u=URL.createObjectURL(b);const a=document.createElement("a");' +
+      'a.href=u;a.download="smoke-report.csv";document.body.appendChild(a);a.click();"ok"']);
+    // Poll for the file + a completed record.
+    const want = path.join(scratch, 'smoke-report.csv');
+    let record: any = null;
+    for (let i = 0; i < 40; i++) {
+      const r = await runIso(['downloads', '--last', '5', '--json']);
+      const data = parseJson<{ downloadsDir: string; downloads: any[] }>(r.stdout);
+      record = data.downloads.find((d) => d.filename === 'smoke-report.csv') ?? null;
+      if (fs.existsSync(want) && record?.state === 'completed') break;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    assert(fs.existsSync(want), `download did not land at ${want} (contents: ${fs.readdirSync(scratch).join(', ')})`);
+    assert(record, 'downloads verb returned no record for smoke-report.csv');
+    assert(record.state === 'completed', `download state should be completed, got ${record.state}`);
+    assert(record.finalPath === want, `finalPath mismatch: ${record.finalPath} !== ${want}`);
+    assert(record.filename === 'smoke-report.csv', `filename should keep extension, got ${record.filename}`);
+    // Close the isolated window so we don't leave a stray tab behind.
+    await runIso(['eval', 'window.close()']);
+  } finally {
+    await runIso(['detach']);
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 });
 
 c('detach shuts the daemon', async () => {

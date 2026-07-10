@@ -677,6 +677,7 @@ fn build_daemon_cmd(
     endpoint: &CdpEndpoint,
     kind: &BrowserKind,
     capture_bodies: Option<&str>,
+    downloads_dir: Option<&str>,
     bundle: &std::path::Path,
     stderr_file: std::fs::File,
 ) -> std::process::Command {
@@ -692,6 +693,9 @@ fn build_daemon_cmd(
         .env("GHAX_BROWSER_KIND",    kind.as_str());
     if let Some(pattern) = capture_bodies {
         cmd.env("GHAX_CAPTURE_BODIES", pattern);
+    }
+    if let Some(dir) = downloads_dir {
+        cmd.env("GHAX_DOWNLOADS_DIR", dir);
     }
     cmd
 }
@@ -710,6 +714,7 @@ fn spawn_daemon(
     endpoint: &CdpEndpoint,
     kind: &BrowserKind,
     capture_bodies: Option<&str>,
+    downloads_dir: Option<&str>,
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
@@ -720,7 +725,7 @@ fn spawn_daemon(
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..2 {
         let (stderr_path, stderr_file) = open_stderr_capture(cfg)?;
-        let mut cmd = build_daemon_cmd(cfg, endpoint, kind, capture_bodies, &bundle, stderr_file);
+        let mut cmd = build_daemon_cmd(cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file);
         let child = cmd.spawn().map_err(|e| {
             anyhow::anyhow!("Failed to spawn daemon (node {bundle:?}): {e}")
         })?;
@@ -906,6 +911,15 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     };
     let capture_bodies_ref: Option<&str> = capture_bodies.as_deref();
 
+    // --downloads-dir <path>: override where attached-browser downloads land.
+    // Absent → daemon defaults to the user's real ~/Downloads.
+    let downloads_dir: Option<String> = parsed
+        .flags
+        .get("downloads-dir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let downloads_dir_ref: Option<&str> = downloads_dir.as_deref();
+
     // ── Already attached? Short-circuit. ────────────────────────────────────
     if let Some(existing) = state::read_state(cfg) {
         if state::is_process_alive(existing.pid) {
@@ -1026,7 +1040,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 let inuse_kind = browser_opt
                     .clone()
                     .unwrap_or_else(|| infer_kind_from_ua(&inuse.version.user_agent));
-                let state = spawn_daemon(cfg, &inuse, &inuse_kind, capture_bodies_ref)?;
+                let state = spawn_daemon(cfg, &inuse, &inuse_kind, capture_bodies_ref, downloads_dir_ref)?;
                 println!(
                     "attached (port race resolved) — pid {}, port {}, browser {}",
                     state.pid, state.port, state.browser_kind
@@ -1082,7 +1096,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     let ep = endpoint.unwrap(); // always Some at this point
-    let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref)?;
+    let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref, downloads_dir_ref)?;
     // POSIX convention — stay quiet on fresh success. `--verbose` restores
     // the pid/port/browser one-liner for humans; the `already attached`
     // branch above still prints because that's informational, not success.
