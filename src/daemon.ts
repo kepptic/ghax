@@ -23,7 +23,7 @@
  * Single-user localhost daemon, bound to 127.0.0.1. No auth in v0.1.
  */
 
-import { chromium, type Browser, type BrowserContext, type Page, type Locator } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
 import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
@@ -32,6 +32,8 @@ import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as path from 'path';
+import * as os from 'os';
 import type { AddressInfo } from 'net';
 
 const IDLE_MS = 30 * 60 * 1000;
@@ -57,6 +59,23 @@ interface SwLogSubscription {
 
 type StreamListener = (entry: unknown) => void;
 
+// A tracked file download. Populated from browser-level CDP
+// `Browser.downloadWillBegin` / `Browser.downloadProgress` events.
+interface DownloadEntry {
+  guid: string;
+  url: string;
+  suggestedFilename: string;
+  // Where the file is expected to land — downloadsDir + the final on-disk
+  // name (which may differ from suggestedFilename if Chromium de-duped it
+  // to `name (1).ext`). Resolved best-effort when the download completes.
+  finalPath: string | null;
+  state: 'inProgress' | 'completed' | 'canceled';
+  totalBytes: number | null;
+  receivedBytes: number | null;
+  startedAt: number;
+  updatedAt: number;
+}
+
 interface Ctx {
   browser: Browser;
   context: BrowserContext;
@@ -78,6 +97,15 @@ interface Ctx {
   consoleListeners: Set<StreamListener>;
   networkListeners: Set<StreamListener>;
   swLogListeners: Map<string, Set<StreamListener>>;
+  // ── Download tracking ──────────────────────────────────────────
+  // Directory downloads land in (the user's real ~/Downloads by default,
+  // overridable via `ghax attach --downloads-dir`).
+  downloadsDir: string;
+  downloads: CircularBuffer<DownloadEntry>;
+  // Long-lived browser-level CDP session we own. Playwright's connectOverCDP
+  // hijacks download behaviour (allowAndName → GUID files in a temp dir);
+  // we keep this session to re-assert sane behaviour and receive events.
+  browserSession: CDPSession | null;
 }
 
 type Handler = (ctx: Ctx, args: unknown[], opts: Record<string, unknown>) => Promise<unknown>;
@@ -583,9 +611,50 @@ register('newWindow', async (ctx, args) => {
       url: newPage.url(),
       title: await newPage.title().catch(() => ''),
     };
+    // Re-assert sane download behaviour. Playwright re-runs
+    // `Browser.setDownloadBehavior` (allowAndName → temp dir) whenever it
+    // initialises a browser context; a new OS-level window created via the
+    // same default context does *not* trigger that, but re-asserting here is
+    // cheap insurance against any Playwright/Chromium path that resets it.
+    await assertDownloadBehavior(ctx).catch(() => undefined);
+    return {
+      id,
+      url: newPage.url(),
+      title: await newPage.title().catch(() => ''),
+    };
   } finally {
     await cdpSession.detach().catch(() => undefined);
   }
+});
+
+// ─── Downloads ─────────────────────────────────────────────────
+//
+// Playwright's `connectOverCDP` hijacks the profile's download settings:
+// on every browser-context init it issues `Browser.setDownloadBehavior`
+// with behavior `allowAndName` and downloadPath pointed at its own temp
+// `playwright-artifacts-*` dir. Result: files land as extension-less GUIDs
+// in /var/folders/**, not `~/Downloads/report.csv`.
+//
+// We undo this by owning a long-lived browser-level CDP session and
+// re-asserting `behavior: 'allow'` (honours the site-suggested filename +
+// extension) with downloadPath = the user's real Downloads dir. 'allow'
+// (not 'allowAndName') is the key: Chromium then writes the file under its
+// real name and handles collision de-duping (`name (1).ext`) itself.
+register('downloads', async (ctx, _args, opts) => {
+  const n = typeof opts.last === 'number' ? opts.last : Number(opts.last ?? 20);
+  const limit = Number.isFinite(n) && n > 0 ? n : 20;
+  const items = ctx.downloads.last(limit).map((d) => ({
+    guid: d.guid,
+    url: d.url,
+    filename: d.suggestedFilename,
+    finalPath: d.finalPath,
+    state: d.state,
+    totalBytes: d.totalBytes,
+    receivedBytes: d.receivedBytes,
+    startedAt: new Date(d.startedAt).toISOString(),
+    updatedAt: new Date(d.updatedAt).toISOString(),
+  }));
+  return { downloadsDir: ctx.downloadsDir, count: items.length, downloads: items };
 });
 
 register('goto', async (ctx, args) => {
@@ -2655,6 +2724,115 @@ register('gesture.scroll', async (ctx, args) => {
 
 // ─── HTTP server ───────────────────────────────────────────────
 
+// Re-assert normal download behaviour on our owned browser-level CDP
+// session. Called after attach and after each new window. Uses `behavior:
+// 'allow'` so Chromium honours the site-suggested filename (with extension)
+// and writes into `ctx.downloadsDir`. No browserContextId → sets the
+// browser-level default, overriding Playwright's last per-default-context
+// write (the default context has no id, so both target the same scope and
+// last-write-wins in our favour since attach runs this after connectOverCDP).
+async function assertDownloadBehavior(ctx: Ctx): Promise<void> {
+  if (!ctx.browserSession) return;
+  await ctx.browserSession.send('Browser.setDownloadBehavior', {
+    behavior: 'allow',
+    downloadPath: ctx.downloadsDir,
+    eventsEnabled: true,
+  });
+}
+
+// Wire the browser-level download events into ctx.downloads. Kept on the
+// long-lived ctx.browserSession so events keep flowing for the daemon's life.
+function wireDownloadEvents(ctx: Ctx): void {
+  const session = ctx.browserSession;
+  if (!session) return;
+  session.on('Browser.downloadWillBegin', (e: any) => {
+    const entry: DownloadEntry = {
+      guid: String(e.guid ?? ''),
+      url: String(e.url ?? ''),
+      suggestedFilename: String(e.suggestedFilename ?? ''),
+      finalPath: null,
+      state: 'inProgress',
+      totalBytes: null,
+      receivedBytes: null,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    ctx.downloads.push(entry);
+  });
+  session.on('Browser.downloadProgress', (e: any) => {
+    const guid = String(e.guid ?? '');
+    const entry = ctx.downloads.findMostRecent((d) => d.guid === guid);
+    if (!entry) return;
+    if (e.state === 'inProgress' || e.state === 'completed' || e.state === 'canceled') {
+      entry.state = e.state;
+    }
+    if (typeof e.totalBytes === 'number') entry.totalBytes = e.totalBytes;
+    if (typeof e.receivedBytes === 'number') entry.receivedBytes = e.receivedBytes;
+    entry.updatedAt = Date.now();
+    if (entry.state === 'completed') {
+      // With behavior 'allow', Chromium writes the file under its
+      // suggested name and de-dupes collisions itself. Resolve the real
+      // on-disk path best-effort: prefer the suggested name, otherwise
+      // find the freshest `base (n).ext` sibling Chromium may have chosen.
+      entry.finalPath = resolveDownloadedPath(ctx.downloadsDir, entry.suggestedFilename);
+    }
+  });
+}
+
+// Best-effort resolution of where a completed download actually landed.
+// 'allow' behaviour means Chromium owns the final name; on a collision it
+// appends ` (1)`, ` (2)`, … before the extension. We return the suggested
+// path if present, else the newest matching de-duped sibling, else the
+// suggested path anyway (so callers always get a stable, sensible value).
+function resolveDownloadedPath(dir: string, suggestedRaw: string): string {
+  // suggestedFilename comes from the page/server (Browser.downloadWillBegin)
+  // and must never be trusted as a path: a hostile site can suggest
+  // "../../.zshrc". Chromium sanitizes the name it actually writes, but the
+  // finalPath we report must stay inside the downloads dir too — automation
+  // downstream moves/deletes finalPath and must not be steerable outside it.
+  const suggested = path.basename(suggestedRaw.replace(/\0/g, '')) || 'download';
+  const exact = path.join(dir, suggested);
+  try {
+    if (fs.existsSync(exact)) return exact;
+    const ext = path.extname(suggested);
+    const base = suggested.slice(0, suggested.length - ext.length);
+    const re = new RegExp(`^${escapeRegExp(base)} \\(\\d+\\)${escapeRegExp(ext)}$`);
+    const candidates = fs
+      .readdirSync(dir)
+      .filter((f) => re.test(f))
+      .map((f) => {
+        const full = path.join(dir, f);
+        let mtime = 0;
+        try {
+          mtime = fs.statSync(full).mtimeMs;
+        } catch {
+          /* ignore */
+        }
+        return { full, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    if (candidates.length > 0) return candidates[0].full;
+  } catch {
+    /* ignore — return the suggested path below */
+  }
+  return exact;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function resolveDownloadsDir(): string {
+  const raw = process.env.GHAX_DOWNLOADS_DIR;
+  const dir = raw && raw.trim() ? raw.trim() : path.join(os.homedir(), 'Downloads');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* best-effort — Chromium will error visibly if the dir is unwritable */
+  }
+  return dir;
+}
+
 async function main() {
   const cfg = resolveConfig();
   const cdpHttpUrl = process.env.GHAX_CDP_HTTP_URL;
@@ -2721,7 +2899,24 @@ async function main() {
     consoleListeners: new Set(),
     networkListeners: new Set(),
     swLogListeners: new Map(),
+    downloadsDir: resolveDownloadsDir(),
+    downloads: new CircularBuffer<DownloadEntry>(200),
+    browserSession: null,
   };
+
+  // Undo Playwright's download hijack. connectOverCDP has, by now, issued
+  // `Browser.setDownloadBehavior` (allowAndName → its temp artifacts dir).
+  // Open our own browser-level CDP session, re-assert `behavior: 'allow'`
+  // with downloadPath = the real Downloads dir, and keep it alive to receive
+  // downloadWillBegin / downloadProgress events.
+  try {
+    ctx.browserSession = await browser.newBrowserCDPSession();
+    wireDownloadEvents(ctx);
+    await assertDownloadBehavior(ctx);
+    log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
+  } catch (err) {
+    log(`WARN: failed to set download behavior: ${String(err)}`);
+  }
 
   // Instrument the first page now so console/network start capturing immediately.
   const pages = await allPages(ctx);

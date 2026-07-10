@@ -59,7 +59,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     }
 
     match verb {
-        "tabs" | "back" | "forward" | "reload" | "text" => {
+        "tabs" | "back" | "forward" | "reload" | "text" | "downloads" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }

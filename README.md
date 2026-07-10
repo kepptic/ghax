@@ -132,6 +132,17 @@ Three modes, one flag each.
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
 - `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect.
 
+### Downloads
+
+- Attached-browser downloads behave like normal browsing: they land in the
+  real `~/Downloads` under the site-suggested filename with its extension —
+  not as extension-less GUIDs in a Playwright temp dir. (ghax re-asserts
+  sane CDP `Browser.setDownloadBehavior` after attach, undoing Playwright's
+  `connectOverCDP` hijack.)
+- `ghax attach --downloads-dir <path>` redirects downloads to a chosen dir.
+- `ghax downloads [--last N]` lists captured downloads: url, filename, final
+  path, state, byte counts, and timestamps.
+
 ### Execution patterns
 
 - `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots between ref-using steps, so a mid-plan combobox reshuffle doesn't break later refs.
@@ -168,7 +179,7 @@ Same browser process, separate windows and separate daemon state. Neither agent 
 
 ## Command reference
 
-72 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
+73 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, downloads, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
 
 ```bash
 ghax --help           # full surface — authoritative
