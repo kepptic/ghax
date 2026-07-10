@@ -603,7 +603,7 @@ c('cookies scopes to the active tab by default and redacts values', async () => 
 
   // A different domain must not see example.com's cookie in the default scope,
   // but --domain reaches across the whole profile regardless of the active tab.
-  const server = createServer((req, res) => {
+  const server = createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end('<!doctype html><html><body>ghax-smoke-cookies</body></html>');
   });

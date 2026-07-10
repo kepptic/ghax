@@ -140,6 +140,23 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `bun run install-release`). `SCRIPT_DIR` is now captured before any
   `cd` runs. `release.sh`'s call into the script wasn't affected
   because it already uses an absolute path.
+- **`ghax gif` no longer crashes on ffmpeg 8.x** — `ffmpeg render failed
+  (exit 190)` on every recording. A GIF recording screenshots the
+  *active* viewport of the user's real, shared browser window after
+  each step; that window can change size mid-recording (a resize, a
+  devtools panel, another agent sharing the same profile). ffmpeg 6/7
+  tolerated a frame-size change partway through the `image2` sequence
+  (just a "Reconfiguring filter graph" warning), but ffmpeg 8's
+  threaded filter scheduler hits an internal crash
+  (`Error while filtering: Internal bug, should not have happened`,
+  exit 190) the moment `paletteuse`'s framesync sees a reconfigured
+  input. Frames are now probed with `ffprobe` and any frame whose
+  dimensions differ from the first is letterboxed to match *before*
+  ffmpeg ever decodes the sequence, so the mismatch can't reach the
+  filter graph — correct on every ffmpeg version, not a version-gated
+  workaround. Best-effort: skipped silently if `ffprobe` isn't on
+  PATH. Both ffmpeg passes now also capture and print ffmpeg's own
+  stderr tail on failure instead of just an exit code.
 
 ## [0.4.3] - 2026-05-11
 ### Added

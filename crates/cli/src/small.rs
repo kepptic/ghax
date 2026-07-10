@@ -730,6 +730,19 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
         frame += 1;
     }
 
+    // ghax attaches to the user's real, live browser window — its viewport
+    // can change size mid-recording (window resize, a devtools panel, a
+    // second agent sharing the same profile). ffmpeg 6/7 tolerated a frame
+    // size change partway through an image2 sequence (just a warning); on
+    // ffmpeg 8 the threaded filter scheduler crashes with "Internal bug,
+    // should not have happened" the moment paletteuse's framesync hits a
+    // reconfigured input. Normalize every frame to the first frame's canvas
+    // before ffmpeg ever sees them so the mismatch can't reach the filter
+    // graph at all — this is correct on every ffmpeg version, not just a
+    // workaround for the 8.x regression.
+    let frame_paths: Vec<String> = (0..frame).map(frame_path).collect();
+    normalize_frame_dims(&frame_paths);
+
     // ffmpeg 2-pass palette GIF.
     let palette = format!("{tmp_dir}/palette.png");
     let frame_pattern = format!("{tmp_dir}/frame-%04d.png");
@@ -737,7 +750,7 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
     let scale_str = format!("scale={scale}:-1:flags=lanczos");
 
     // Pass 1: generate palette.
-    let palette_status = std::process::Command::new("ffmpeg")
+    let palette_output = std::process::Command::new("ffmpeg")
         .args([
             "-y",
             "-framerate", &framerate,
@@ -747,12 +760,16 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .status();
+        .output();
 
-    match palette_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("ffmpeg palettegen failed (exit {})", s.code().unwrap_or(-1));
+    match palette_output {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!(
+                "ffmpeg palettegen failed (exit {}):\n{}",
+                o.status.code().unwrap_or(-1),
+                stderr_tail(&o.stderr),
+            );
             if !keep_frames {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
             }
@@ -769,7 +786,7 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
 
     // Pass 2: render GIF using palette.
     let lavfi = format!("{scale_str} [x]; [x][1:v] paletteuse");
-    let render_status = std::process::Command::new("ffmpeg")
+    let render_output = std::process::Command::new("ffmpeg")
         .args([
             "-y",
             "-framerate", &framerate,
@@ -781,12 +798,16 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .status();
+        .output();
 
-    match render_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("ffmpeg render failed (exit {})", s.code().unwrap_or(-1));
+    match render_output {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!(
+                "ffmpeg render failed (exit {}):\n{}",
+                o.status.code().unwrap_or(-1),
+                stderr_tail(&o.stderr),
+            );
             if !keep_frames {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
             }
@@ -832,4 +853,98 @@ fn ffmpeg_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Last few lines of an ffmpeg stderr capture, for surfacing in our own
+/// error output. ffmpeg's real failure reason (filter errors, codec issues,
+/// "Internal bug" scheduler crashes) is always on stderr, several dozen
+/// lines in — the exit code alone tells the user nothing actionable.
+fn stderr_tail(bytes: &[u8]) -> String {
+    const MAX_LINES: usize = 12;
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].join("\n")
+}
+
+/// Probe for ffprobe on PATH. Bundled with ffmpeg on Homebrew and the Debian/
+/// Ubuntu `ffmpeg` package, but not guaranteed everywhere — frame-size
+/// normalization is best-effort and silently skipped without it.
+fn ffprobe_available() -> bool {
+    std::process::Command::new("ffprobe")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Reads a PNG's pixel dimensions via `ffprobe`. Returns `None` on any
+/// failure (missing binary, unreadable file, unexpected output) — callers
+/// treat that as "skip normalization for this frame" rather than a hard error.
+fn probe_png_dims(path: &str) -> Option<(u32, u32)> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (w, h) = text.trim().split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+/// Pads/letterboxes every frame after the first to match the first frame's
+/// canvas size, in place. A GIF recording captures the *active* browser
+/// viewport after each step — on the user's real, shared browser session
+/// that viewport can change size mid-recording. ffmpeg's image2 demuxer
+/// tolerates a size change between frames but ffmpeg 8's filter scheduler
+/// does not (see the call site for the crash it triggers), so we remove the
+/// mismatch before ffmpeg ever decodes the sequence.
+///
+/// Best-effort: if `ffprobe` isn't on PATH, or a probe/resize fails for any
+/// individual frame, that frame is left untouched and ffmpeg is left to
+/// sort it out (same behavior as before this fix existed).
+fn normalize_frame_dims(frame_paths: &[String]) {
+    if !ffprobe_available() {
+        return;
+    }
+    let Some((target_w, target_h)) = frame_paths.first().and_then(|p| probe_png_dims(p)) else {
+        return;
+    };
+    for path in &frame_paths[1..] {
+        let Some(dims) = probe_png_dims(path) else { continue };
+        if dims == (target_w, target_h) {
+            continue;
+        }
+        let tmp = format!("{path}.norm.png");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i", path,
+                "-update", "1",
+                "-vf",
+                &format!(
+                    "scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,\
+                     pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+                ),
+                &tmp,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(s) if s.success()) {
+            let _ = std::fs::rename(&tmp, path);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
