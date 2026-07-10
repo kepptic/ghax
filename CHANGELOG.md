@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.4.4] - 2026-07-10
 ### Added
 - `ghax attach --capture-bodies` now also captures **request** bodies, not
   just responses. Network entries for POST/PUT/PATCH requests with a
@@ -636,7 +639,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/kepptic/ghax/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/kepptic/ghax/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kepptic/ghax/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/kepptic/ghax/compare/v0.3.0...v0.4.1
