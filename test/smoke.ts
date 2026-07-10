@@ -633,7 +633,14 @@ c('cookies scopes to the active tab by default and redacts values', async () => 
       `--all should dump the whole profile regardless of active tab: ${JSON.stringify(allCookies)}`,
     );
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 
   await run(['goto', 'https://example.com']);
@@ -982,7 +989,14 @@ c('console --source-maps resolves bundled frames to original sources', async () 
     assert(mapped.bundledUrl !== undefined, 'bundledUrl should be preserved');
     assert(mapped.fn === 'authenticate', `expected fn=authenticate, got ${mapped.fn}`);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 });
 
@@ -1019,7 +1033,14 @@ c('source-maps: falls back silently when script has no map comment', async () =>
       );
     }
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 });
 
@@ -1057,7 +1078,14 @@ c('source-maps: falls back silently on invalid map JSON', async () => {
       );
     }
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 });
 
@@ -1123,7 +1151,14 @@ c('network --status 404 exact match filters correctly', async () => {
     assert(entries.length >= 1, `expected at least one 404, got ${entries.length}`);
     assert(entries.every((e) => e.status === 404), 'all entries should be 404');
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 });
 
@@ -1149,7 +1184,14 @@ c('network --status 400-499 range matches 4xx', async () => {
     assert(entries.some((e) => e.status === 410), 'expected the 410 entry');
     assert(!entries.some((e) => e.status === 500), 'range 400-499 should NOT include 500');
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      // Edge holds the page's HTTP/1.1 connection alive after navigation, and
+      // `server.close()` waits for every open socket to drain — so without
+      // forcibly dropping the keep-alive socket first, teardown blocks until
+      // Edge's idle timeout (seconds to minutes), wedging the whole suite.
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
   }
 });
 
