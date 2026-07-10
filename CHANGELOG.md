@@ -68,7 +68,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   current tab), `--values` (show raw values in any mode), and `--has
   <name>` (exit `0`/`1` — a scripting primitive for "did login land?").
   Prompted by
-  [docs/reports/open/2026-06-23-setsail-localhost-dev-session.md](./docs/reports/open/2026-06-23-setsail-localhost-dev-session.md),
+  [docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md](./docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md),
   which found the unscoped dump (every domain the profile had ever set
   a cookie for, raw session tokens included) was both a privacy hazard
   and unusable for the actual task of confirming a dev-login landed.
@@ -127,7 +127,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   though attach printed success. The daemon is now spawned via `setsid()` into
   its own session (new session + process group, no controlling terminal),
   insulating it from group signals and terminal-close SIGHUP alike.
-  (Field report: `docs/reports/2026-06-06-edge-attach-daemon-not-persisting.md`.)
+  (Field report: `docs/reports/resolved/2026-06-06-edge-attach-daemon-not-persisting.md`.)
 - `ghax status` now surfaces the daemon log path (`<state_dir>/ghax-daemon.log`,
   as a `daemonLog` field in `--json` and a `log` line in the human view). When
   no live daemon is found it also echoes the daemon's last logged event, so a

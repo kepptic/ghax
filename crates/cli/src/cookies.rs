@@ -4,7 +4,7 @@
 //! Needs CLI-side logic (not a `simple()` verb) because `--has <name>`
 //! turns the RPC's `{name, exists}` reply into a process exit code —
 //! the scripting primitive for "did login land?" (see
-//! docs/reports/open/2026-06-23-setsail-localhost-dev-session.md, Rec 1).
+//! docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md, Rec 1).
 //! Mirrors the `is` verb's boolean→exit-code pattern in `dispatch.rs`.
 
 use crate::args::Parsed;

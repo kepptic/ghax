@@ -710,7 +710,7 @@ fn build_daemon_cmd(
     // daemon runs its clean `shutdown()` (which unlinks its own state file)
     // and exits, so the *very next* `ghax` command sees "not attached" or
     // "daemon (pid N) is not running" even though attach printed success.
-    // (Field report: docs/reports/2026-06-06-edge-attach-daemon-not-persisting.md)
+    // (Field report: docs/reports/resolved/2026-06-06-edge-attach-daemon-not-persisting.md)
     //
     // `setsid()` starts a new session + process group with no controlling
     // terminal, insulating the daemon from `kill(-pgid)` group signals and

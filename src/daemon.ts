@@ -1621,7 +1621,7 @@ function buildHar(entries: NetworkEntry[]): unknown {
  * Redact a cookie's value unless the caller opted into raw values.
  * Everything else (name, domain, path, expires, httpOnly, secure,
  * sameSite) is safe to print — it's the raw session/auth value that's
- * the privacy hazard (see docs/reports/open/2026-06-23-setsail-localhost-dev-session.md).
+ * the privacy hazard (see docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md).
  */
 function redactCookie(cookie: import('playwright').Cookie, showValues: boolean): Record<string, unknown> {
   if (showValues) return { ...cookie };
