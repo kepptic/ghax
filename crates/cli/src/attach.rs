@@ -693,6 +693,42 @@ fn build_daemon_cmd(
     if let Some(pattern) = capture_bodies {
         cmd.env("GHAX_CAPTURE_BODIES", pattern);
     }
+
+    // Detach the daemon into its own session (setsid) so it survives the
+    // parent CLI's process-group teardown.
+    //
+    // The daemon must outlive `ghax attach`, which returns as soon as the
+    // daemon is healthy. But `Command::spawn` puts the child in the CLI's
+    // *process group* and *session*. When `ghax attach` runs under a harness
+    // that reaps the command's process group on exit — Claude Code's Bash
+    // tool, CI runners, and terminal job-control that SIGHUPs the group on
+    // shell close all do this — the signal reaches the daemon too. The
+    // daemon runs its clean `shutdown()` (which unlinks its own state file)
+    // and exits, so the *very next* `ghax` command sees "not attached" or
+    // "daemon (pid N) is not running" even though attach printed success.
+    // (Field report: docs/reports/2026-06-06-edge-attach-daemon-not-persisting.md)
+    //
+    // `setsid()` starts a new session + process group with no controlling
+    // terminal, insulating the daemon from `kill(-pgid)` group signals and
+    // terminal-close SIGHUP alike. Async-signal-safe, so it's fine in the
+    // post-fork/pre-exec window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" {
+                    fn setsid() -> i32;
+                }
+                // -1 only when the caller is already a process-group leader,
+                // which a freshly-forked child never is. Ignore the return
+                // rather than abort the spawn.
+                setsid();
+                Ok(())
+            });
+        }
+    }
+
     cmd
 }
 
