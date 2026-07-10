@@ -606,11 +606,6 @@ register('newWindow', async (ctx, args) => {
     if (ctx.activePageId !== id) ctx.refs.clear();
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
-    return {
-      id,
-      url: newPage.url(),
-      title: await newPage.title().catch(() => ''),
-    };
     // Re-assert sane download behaviour. Playwright re-runs
     // `Browser.setDownloadBehavior` (allowAndName → temp dir) whenever it
     // initialises a browser context; a new OS-level window created via the
@@ -665,15 +660,23 @@ register('goto', async (ctx, args) => {
   return { url: page.url(), title: await page.title().catch(() => '') };
 });
 
+// History navigation waits on `commit`, not `domcontentloaded`: when
+// Chromium restores the target entry from the back/forward cache it fires
+// `pageshow`, never a fresh `DOMContentLoaded`, so a `domcontentloaded` wait
+// would block until goBack's 30s default timeout every time bfcache kicks in
+// — stalling the RPC (and, under the suite's no-timeout client, the whole
+// run). `commit` resolves as soon as the history navigation commits, which
+// happens for both fresh loads and bfcache restores. The explicit timeout is
+// a backstop so no pathological navigation can ever wedge the daemon.
 register('back', async (ctx) => {
   const page = await activePage(ctx);
-  await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+  await page.goBack({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
 });
 
 register('forward', async (ctx) => {
   const page = await activePage(ctx);
-  await page.goForward({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+  await page.goForward({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
 });
 
@@ -2858,6 +2861,19 @@ async function main() {
     }
   };
   log(`daemon starting, cdpHttp=${cdpHttpUrl}`);
+
+  // Defense-in-depth: a stray async throw (e.g. inside a CDP event handler,
+  // where there's no promise for the caller to await) must not silently kill
+  // the daemon and leave the RPC socket dangling. Log it and survive — a
+  // browser-automation daemon that stays up is far more useful than one that
+  // dies mid-session. The stderr capture file is unlinked once the daemon is
+  // healthy, so without this the stack would vanish into a deleted fd.
+  process.on('unhandledRejection', (reason) => {
+    log(`UNHANDLED REJECTION: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+  });
+  process.on('uncaughtException', (err) => {
+    log(`UNCAUGHT EXCEPTION: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+  });
 
   const browser = await chromium.connectOverCDP(cdpHttpUrl);
   const contexts = browser.contexts();

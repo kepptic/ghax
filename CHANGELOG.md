@@ -100,6 +100,23 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-asserts again on each `new-window`. `'allow'` (not `'allowAndName'`)
   is what restores the site-suggested name + extension; Chromium then
   owns collision de-duping.
+- **`ghax back` / `ghax forward` no longer hang ~30s on back/forward-cache
+  restores.** Both waited on `domcontentloaded`, but when Chromium serves the
+  target history entry from the bfcache it fires `pageshow`, never a fresh
+  `DOMContentLoaded` — so the navigation promise blocked until `goBack`/`goForward`'s
+  30s default timeout every time bfcache kicked in. Under the smoke suite's
+  no-timeout RPC client this stalled the whole run (and could leave the page
+  mid-navigation, so a follow-up read saw the wrong URL). They now wait on
+  `commit` (which fires for both fresh loads and bfcache restores) with an
+  explicit 15s backstop timeout, so history navigation returns promptly and
+  lands on the correct entry.
+- **The daemon now logs and survives an otherwise-unhandled async error**
+  instead of dying silently. A stray rejection or throw inside a CDP event
+  handler (where no caller is awaiting a promise) used to take the whole Node
+  process down, leaving the RPC socket dangling so the next `ghax` command
+  failed with a bare connection error. `unhandledRejection` / `uncaughtException`
+  are now caught and written to the daemon log (`<state_dir>/ghax-daemon.log`),
+  and the daemon keeps serving.
 - **Daemon now survives `ghax attach` under a harness / job-control shell.**
   `attach` spawned the Node daemon inside the CLI's own process group, so any
   caller that reaps the `ghax attach` command's process group on exit — Claude
