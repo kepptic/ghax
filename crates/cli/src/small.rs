@@ -34,6 +34,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
     let cfg = state::resolve_config();
     let Some(daemon_state) = read_state(&cfg) else {
         println!("not attached");
+        print_daemon_log_hint(&cfg);
         return Ok(EXIT_NOT_ATTACHED);
     };
     // Health-check the daemon; treat failure as "not attached".
@@ -41,6 +42,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
         Ok(p) => p,
         Err(_) => {
             println!("not attached");
+            print_daemon_log_hint(&cfg);
             return Ok(EXIT_NOT_ATTACHED);
         }
     };
@@ -56,6 +58,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
             "browserKind": daemon_state.browser_kind,
             "attachedAt":  daemon_state.attached_at,
             "cwd":         daemon_state.cwd,
+            "daemonLog":   daemon_log_path(&cfg).display().to_string(),
         });
         if let (Some(m), Some(data_obj)) = (merged.as_object_mut(), data.as_object()) {
             for (k, v) in data_obj {
@@ -90,8 +93,36 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
         println!("targets     {}", data.get("targetCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("extensions  {}", data.get("extensionCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("cwd         {}", daemon_state.cwd);
+        println!("log         {}", daemon_log_path(&cfg).display());
     }
     Ok(EXIT_OK)
+}
+
+/// Path to the daemon's stderr/lifecycle log — `<state_dir>/ghax-daemon.log`.
+/// Mirrors `daemonLog` in `src/config.ts`. The daemon appends its own
+/// lifecycle events here (`daemon starting`, `listening on …`, and crucially
+/// `shutdown: <reason>`), so when an attach silently doesn't persist, this
+/// log names the killer (e.g. `shutdown: SIGTERM`).
+fn daemon_log_path(cfg: &state::Config) -> std::path::PathBuf {
+    cfg.state_dir.join("ghax-daemon.log")
+}
+
+/// When `ghax status` finds no live daemon, point the operator at the daemon
+/// log and echo its last line if it recorded a shutdown reason — turning the
+/// otherwise-mute "not attached" into a self-diagnosing message.
+fn print_daemon_log_hint(cfg: &state::Config) {
+    let log = daemon_log_path(cfg);
+    let Ok(contents) = std::fs::read_to_string(&log) else {
+        return;
+    };
+    let last = contents.lines().rev().find(|l| !l.trim().is_empty());
+    if let Some(line) = last {
+        // The last logged line is almost always why the daemon is gone —
+        // `shutdown: SIGTERM` (harness/group signal), `shutdown: idle`,
+        // or `browser disconnected — shutting down daemon`.
+        println!("  last daemon event: {}", line.trim());
+        println!("  daemon log: {}", log.display());
+    }
 }
 
 // ─── pair status ─────────────────────────────────────────────────────────────

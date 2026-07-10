@@ -16,6 +16,22 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   skills.
 
 ### Fixed
+- **Daemon now survives `ghax attach` under a harness / job-control shell.**
+  `attach` spawned the Node daemon inside the CLI's own process group, so any
+  caller that reaps the `ghax attach` command's process group on exit — Claude
+  Code's Bash tool, CI runners, and terminal job-control that SIGHUPs the group
+  on shell close — swept the daemon up in the same signal. The daemon ran its
+  clean `shutdown()` (which unlinks its own state file) and exited, so the very
+  next command reported `not attached` / `daemon (pid N) is not running` even
+  though attach printed success. The daemon is now spawned via `setsid()` into
+  its own session (new session + process group, no controlling terminal),
+  insulating it from group signals and terminal-close SIGHUP alike.
+  (Field report: `docs/reports/2026-06-06-edge-attach-daemon-not-persisting.md`.)
+- `ghax status` now surfaces the daemon log path (`<state_dir>/ghax-daemon.log`,
+  as a `daemonLog` field in `--json` and a `log` line in the human view). When
+  no live daemon is found it also echoes the daemon's last logged event, so a
+  silently-departed daemon self-reports its shutdown reason (`shutdown: SIGTERM`,
+  `shutdown: idle`, `browser disconnected …`) instead of a mute `not attached`.
 - `scripts/install-release.sh` resolved `SCRIPT_DIR` from `$0` *after*
   `cd`-ing into the temp download dir, so the bootstrap-daemon-runtime
   step crashed with `cd: scripts: No such file or directory` whenever

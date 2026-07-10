@@ -128,6 +128,67 @@ c('attach is idempotent (second call reuses)', async () => {
   assert(/already attached/.test(r.stdout), `second attach should reuse: ${r.stdout}`);
 });
 
+c('daemon persists after a successful-looking attach (BUG 2026-06-06)', async () => {
+  // Field regression: `ghax attach` printed "attached — pid X" then the very
+  // next command reported "daemon (pid X) is not running". The daemon died
+  // right after the health check passed. Lock in that a fresh attach is still
+  // healthy a beat later — a genuine detach → attach → wait → status cycle.
+  await run(['detach']);
+  await run(['attach']);
+  await new Promise((r) => setTimeout(r, 1500));
+  const r = await run(['status', '--json']);
+  const s = parseJson<Record<string, unknown>>(r.stdout);
+  assert(
+    typeof s.pid === 'number' && typeof s.port === 'number',
+    `daemon not attached 1.5s after a successful attach: ${r.stdout || r.stderr}`,
+  );
+});
+
+c('daemon survives parent process-group teardown (setsid detach)', async () => {
+  // Root cause of the 2026-06-06 bug: the daemon shared the CLI's process
+  // group, so a harness (Claude Code Bash tool, CI, job-control shell) that
+  // reaps the `ghax attach` command's group on exit swept the daemon up in
+  // the SIGTERM/SIGHUP and it ran its clean shutdown() — clearing its own
+  // state file. The fix spawns the daemon via setsid() into its own session.
+  //
+  // Prove it end-to-end: launch attach as its OWN process-group leader
+  // (detached:true — the exact shape a harness gives a command it will reap),
+  // kill that whole group hard, and assert the daemon is still alive. Without
+  // setsid the daemon inherits the launcher's group and this kill takes it
+  // down; with setsid it's in its own session and survives.
+  const stateFile = `/tmp/ghax-smoke-setsid-${process.pid}.json`;
+  const env: NodeJS.ProcessEnv = { ...process.env, GHAX_STATE_FILE: stateFile };
+  try {
+    const proc = spawn(ghax, ['attach', '--port', '9222'], {
+      env,
+      detached: true, // child becomes a new session/group leader: pgid === pid
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const launcherPgid = proc.pid!;
+    await new Promise<number>((resolve) => proc.on('exit', (code) => resolve(code ?? 0)));
+    const st = parseJson<{ pid: number }>(fs.readFileSync(stateFile, 'utf-8'));
+    assert(typeof st.pid === 'number', 'attach did not record a daemon pid');
+    // Tear the launcher's process group down, hard.
+    try { process.kill(-launcherPgid, 'SIGTERM'); } catch { /* group may be empty */ }
+    try { process.kill(-launcherPgid, 'SIGKILL'); } catch { /* group may be empty */ }
+    await new Promise((r) => setTimeout(r, 800));
+    let alive = true;
+    try { process.kill(st.pid, 0); } catch { alive = false; }
+    assert(
+      alive,
+      `daemon (pid ${st.pid}) died with the launcher's process group — setsid detach missing`,
+    );
+    const status = spawnSync(ghax, ['status', '--json'], { env, encoding: 'utf-8' });
+    assert(
+      status.status === 0,
+      `isolated daemon not answering after group kill: ${status.stdout}${status.stderr}`,
+    );
+  } finally {
+    spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
+    try { fs.unlinkSync(stateFile); } catch { /* best effort */ }
+  }
+});
+
 c('status --json has expected shape', async () => {
   const r = await run(['status', '--json']);
   const s = parseJson<Record<string, unknown>>(r.stdout);
@@ -141,9 +202,16 @@ c('status --json has expected shape', async () => {
     'activeTabId',
     'activeTabTitle',
     'activeTabUrl',
+    'daemonLog',
   ]) {
     assert(key in s, `status missing ${key}`);
   }
+  // daemonLog must point at a real, discoverable file so field failures can
+  // be self-diagnosed from `shutdown: <reason>` lines.
+  assert(
+    typeof s.daemonLog === 'string' && (s.daemonLog as string).endsWith('ghax-daemon.log'),
+    `status daemonLog not a daemon log path: ${JSON.stringify(s.daemonLog)}`,
+  );
 });
 
 c('tabs returns a non-empty list', async () => {
