@@ -160,4 +160,10 @@ export interface NetworkEntry {
   // at 32KB; longer bodies carry a "[truncated …]" marker at the end.
   responseBody?: string;
   responseBodyTruncated?: boolean;
+  // Same GHAX_CAPTURE_BODIES gate, applied to the request side: only
+  // present for POST/PUT/PATCH requests that carried a body whose
+  // content-type matched (json / text / xml / etc.) and whose URL matched
+  // the glob. Same 32KB cap + truncation-marker convention as responseBody.
+  requestBody?: string;
+  requestBodyTruncated?: boolean;
 }

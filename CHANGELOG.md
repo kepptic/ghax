@@ -6,6 +6,19 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ghax attach --capture-bodies` now also captures **request** bodies, not
+  just responses. Network entries for POST/PUT/PATCH requests with a
+  JSON/text-ish content-type carry a `requestBody` field (same 32KB cap
+  and `[truncated N bytes]` marker as `responseBody`, same URL glob
+  filter — no new flag). `ghax network --har <path>` includes captured
+  request bodies as HAR `postData`. Closes FEAT-1 from the 2026-04-30
+  Datto RMM field report: reverse-engineering an internal GraphQL
+  mutation (e.g. Datto's `saveComponent`) previously meant reading
+  `__APOLLO_CLIENT__.queryManager.mutationStore` via `ghax eval` to
+  recover the variables; now `ghax network --pattern 'graphql'` shows
+  the mutation name + variables directly.
+
 ### Docs
 - `llms.txt` now teaches installing agents how to register the ghax
   skill/memory files in the user's agent of choice — Claude Code
