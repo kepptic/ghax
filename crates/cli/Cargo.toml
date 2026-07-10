@@ -44,3 +44,7 @@ url = "2"
 # urlencoding: tiny percent-encoding crate for the one place dispatch.rs
 # needs it (ext inspect). Replaces a hand-rolled byte table.
 urlencoding = "2"
+# sha2: pure-Rust SHA-256 for verifying self-healed daemon-bundle downloads
+# in attach.rs (see resolve_daemon_bundle). No C toolchain/OpenSSL dependency,
+# so it doesn't disturb the cargo-dist cross-compile targets.
+sha2 = "0.10"

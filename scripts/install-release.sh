@@ -10,8 +10,10 @@
 #   ~/.cargo/bin/ghax            (the standard installer location)
 #   ~/.local/share/ghax/ghax-daemon.mjs + node_modules/ (bootstrap)
 #
-# Repo private? Uses `gh release download` (which carries your auth) —
-# falls back to a plain curl if gh isn't installed.
+# Public repo, so plain `curl` against GitHub's release-download URLs needs
+# no auth and is the default. Falls back to `gh release download` (which
+# carries your auth) only if curl fails — e.g. rate-limiting, or a future
+# private fork — and `gh` happens to be installed.
 
 set -euo pipefail
 
@@ -28,10 +30,16 @@ BIN_DIR="$HOME/.cargo/bin"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Resolve version → tag (default to latest if blank).
+# Resolve version → tag (default to latest if blank). Plain curl against the
+# public GitHub API first — no `gh` CLI or auth required. Only falls back to
+# `gh` if curl can't get an answer and `gh` happens to be installed.
 if [ -z "$VERSION" ]; then
-  VERSION="$(gh release list --repo "$REPO" --limit 5 --json tagName,isPrerelease \
-              --jq '[.[] | select(.isPrerelease == false)][0].tagName' 2>/dev/null || true)"
+  VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+              | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' || true)"
+  if [ -z "$VERSION" ] && command -v gh >/dev/null 2>&1; then
+    VERSION="$(gh release list --repo "$REPO" --limit 5 --json tagName,isPrerelease \
+                --jq '[.[] | select(.isPrerelease == false)][0].tagName' 2>/dev/null || true)"
+  fi
   [ -z "$VERSION" ] && { echo "install-release: no published (non-prerelease) release found in $REPO" >&2; exit 1; }
 fi
 echo "install-release: version $VERSION"
@@ -47,9 +55,20 @@ esac
 ARCHIVE="ghax-$TRIPLE.tar.xz"
 echo "install-release: target $ARCHIVE"
 
-# Download archive + checksum.
+# Download archive + checksum. curl first (public releases, no auth needed);
+# fall back to `gh release download` if curl fails and gh is available.
 cd "$TMP_DIR"
-gh release download "$VERSION" --repo "$REPO" -p "$ARCHIVE" -p "$ARCHIVE.sha256"
+if ! curl -fsSL -o "$ARCHIVE" "https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE" \
+   || ! curl -fsSL -o "$ARCHIVE.sha256" "https://github.com/$REPO/releases/download/$VERSION/$ARCHIVE.sha256"; then
+  rm -f "$ARCHIVE" "$ARCHIVE.sha256"
+  if command -v gh >/dev/null 2>&1; then
+    echo "install-release: curl download failed, retrying via gh..." >&2
+    gh release download "$VERSION" --repo "$REPO" -p "$ARCHIVE" -p "$ARCHIVE.sha256"
+  else
+    echo "install-release: failed to download $ARCHIVE from $REPO releases $VERSION (no gh CLI to fall back on)" >&2
+    exit 1
+  fi
+fi
 
 # Verify checksum.
 if command -v shasum >/dev/null 2>&1; then

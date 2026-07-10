@@ -474,6 +474,11 @@ fn launch_browser(
 //      (production) place the bundle, so installed users hit this tier.
 //   4. Dev fallback: walk up from cwd looking for package.json with
 //      "name": "@ghax/cli", then use <root>/dist/ghax-daemon.mjs
+//   5. Self-heal: download the bundle from GitHub Releases into the XDG
+//      stable location, then re-resolve. See `self_heal_daemon_bundle`
+//      below for why this tier exists — short version: the cargo-dist
+//      one-liner installer only knows about the declared binary, so a
+//      `curl … | sh` install has nowhere else to get ghax-daemon.mjs from.
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn stable_share_dir() -> Option<PathBuf> {
@@ -545,14 +550,162 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
         }
     }
 
+    // 5. Self-heal — fetch it from GitHub Releases. Opt out with
+    //    GHAX_NO_SELF_HEAL=1 (CI, offline boxes, or anyone who'd rather see
+    //    the error below and install manually).
+    if std::env::var("GHAX_NO_SELF_HEAL").ok().as_deref() != Some("1") {
+        if let Some(share) = stable_share_dir() {
+            match self_heal_daemon_bundle(&share) {
+                Ok(bundle) => return Ok(bundle),
+                Err(e) => eprintln!("ghax: automatic daemon-bundle download failed: {e}"),
+            }
+        }
+    }
+
     let hint = stable_share_dir()
         .map(|p| p.join("ghax-daemon.mjs").display().to_string())
         .unwrap_or_else(|| "~/.local/share/ghax/ghax-daemon.mjs".to_string());
     Err(anyhow::anyhow!(
         "Cannot locate ghax-daemon.mjs. Tried $GHAX_DAEMON_BUNDLE, the binary's directory, \
-         and the install location ({hint}). Run `bash scripts/install-link.sh` from a checkout, \
-         or `bun run install-release` to install a published build."
+         the install location ({hint}), and an automatic download. Run \
+         `bash scripts/install-link.sh` from a checkout, or `bun run install-release` to \
+         install a published build, or set GHAX_DAEMON_BUNDLE to point at one directly."
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Self-heal: fetch ghax-daemon.mjs from GitHub Releases when it's missing.
+//
+// The cargo-dist shell/powershell installers (`ghax-installer.sh` /
+// `ghax-installer.ps1`, published as release assets and advertised as the
+// one-line install) only install the binaries declared to cargo-dist —
+// they have no notion of the release archive's other files. The daemon
+// bundle rides along in the archive via dist-workspace.toml's `include`,
+// but cargo-dist's generated installer discards everything except the
+// named binary once it's copied into place. Net effect: the advertised
+// `curl … | sh` one-liner produces a `ghax` with no daemon anywhere the
+// tiers above can find it.
+//
+// Rather than teaching cargo-dist about a second artifact (its installer
+// generator doesn't support that in 0.31), the CLI heals itself here: pull
+// the platform archive matching this binary's own version straight from
+// GitHub Releases, verify its SHA-256 against the published checksum file,
+// and lift just ghax-daemon.mjs out of it into the XDG stable dir. If the
+// daemon also needs its node_modules (playwright/source-map), that's
+// already handled by the existing bootstrap-on-missing-module retry in
+// `spawn_daemon` — this function's only job is getting the .mjs itself
+// onto disk.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REPO_SLUG: &str = "kepptic/ghax";
+
+/// Map this binary's own OS/arch to the cargo-dist target triple its release
+/// archives are published under. `None` means there's no matching archive
+/// (e.g. aarch64 Windows, dropped in dist-workspace.toml) — self-heal can't
+/// help and the caller falls through to the manual-install error.
+fn target_triple() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+        _ => None,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn self_heal_daemon_bundle(share_dir: &Path) -> Result<PathBuf> {
+    let triple = target_triple().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no published release archive for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let ext = if std::env::consts::OS == "windows" {
+        "zip"
+    } else {
+        "tar.xz"
+    };
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let archive_name = format!("ghax-{triple}.{ext}");
+    let base = format!("https://github.com/{REPO_SLUG}/releases/download/{tag}");
+
+    eprintln!("ghax: ghax-daemon.mjs not found — fetching {archive_name} from release {tag}...");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .user_agent(concat!("ghax/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let archive_bytes = client
+        .get(format!("{base}/{archive_name}"))
+        .send()?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("downloading {archive_name}: {e}"))?
+        .bytes()?;
+    let sha_text = client
+        .get(format!("{base}/{archive_name}.sha256"))
+        .send()?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("downloading {archive_name}.sha256: {e}"))?
+        .text()?;
+    let expected = sha_text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let actual = sha256_hex(&archive_bytes);
+    if expected.is_empty() || expected != actual {
+        return Err(anyhow::anyhow!(
+            "SHA-256 mismatch for {archive_name}: expected {expected}, got {actual}"
+        ));
+    }
+
+    let tmp = std::env::temp_dir().join(format!("ghax-selfheal-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp)
+        .map_err(|e| anyhow::anyhow!("creating temp dir {}: {e}", tmp.display()))?;
+    let archive_path = tmp.join(&archive_name);
+    std::fs::write(&archive_path, &archive_bytes)?;
+
+    // Extract just the one member we need. `tar` handles both .tar.xz
+    // (macOS/Linux, GNU or bsdtar) and .zip (Windows ships bsdtar as
+    // tar.exe since 10.1803, which auto-detects zip) with the same flags.
+    let member = format!("ghax-{triple}/ghax-daemon.mjs");
+    let status = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&tmp)
+        .arg(&member)
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run `tar` to extract {member}: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(anyhow::anyhow!("`tar` exited with {status} extracting {member}"));
+    }
+
+    let extracted = tmp.join(&member);
+    std::fs::create_dir_all(share_dir)
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", share_dir.display()))?;
+    let dest = share_dir.join("ghax-daemon.mjs");
+    std::fs::copy(&extracted, &dest)
+        .map_err(|e| anyhow::anyhow!("installing ghax-daemon.mjs to {}: {e}", dest.display()))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    eprintln!("ghax: installed ghax-daemon.mjs → {}", dest.display());
+    Ok(dest)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
