@@ -6,6 +6,36 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ghax select <@ref|selector> <value>` — first-class verb for setting
+  dropdown/combobox values, companion to `fill`. Also accepts
+  `--index <n>` (0-based position) and `--by-value <val>` (explicit
+  value semantics). Strategy cascade, cheapest/most-reliable first:
+  native `<select>` via Playwright's `selectOption` (matches by visible
+  text/label, falling back to the option's `value` attribute); AntD
+  `<Select>` via React fiber traversal straight to the controlled
+  component's `onChange` (matches option text against the fiber's
+  `options`/children where available, otherwise passes the raw value
+  through); and, for everything else (react-select, MUI, Headless UI,
+  `role=combobox`), a real click on the trigger followed by a click on
+  the matching option — including options rendered into a portal under
+  `<body>` rather than as a DOM descendant of the trigger (discovered
+  via `aria-controls`/`aria-owns` or well-known dropdown container
+  shapes). Returns `{ ok, strategy: 'native'|'fiber'|'open-click',
+  value }`; on total failure the error lists every strategy tried and
+  why. Fixes BUG-1 / implements FEAT-2 from the 2026-04-30 Datto RMM
+  field report — AntD's `<Select>` didn't reliably open for `ghax
+  click`'s synthetic pointer events.
+- `ghax fill` is now Monaco-aware: when the resolved target sits inside
+  a `.monaco-editor` / `[data-mode-id]` container, `fill` routes
+  through `monaco.editor.getEditors()` (matching the editor whose DOM
+  node contains the target) and calls `setValue()` instead of the
+  native-setter path, which never reached Monaco's virtualized text
+  layer. All other `fill` behavior (React/Angular/Material paths) is
+  unchanged. Fixes BUG-4 / implements FEAT-5 from the same field
+  report — Datto RMM, Splunk, Grafana, Postman, and GitLab's Web IDE
+  all embed Monaco for script/query editors.
+
 ### Docs
 - `llms.txt` now teaches installing agents how to register the ghax
   skill/memory files in the user's agent of choice — Claude Code

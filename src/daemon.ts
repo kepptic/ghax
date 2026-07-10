@@ -963,6 +963,39 @@ register('fill', async (ctx, args) => {
   if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
+
+  // Monaco path — Datto RMM, Splunk, Grafana, Postman, and GitLab's Web IDE
+  // all embed Monaco for script/query editors. Monaco renders its own
+  // virtualized text layer; the hidden `textarea.inputarea` only mirrors
+  // composition state, it isn't the source of truth, so the native-setter
+  // trick below doesn't reach it. The editor's own model API is the
+  // reliable way in — `editor.setValue()` updates the model and fires
+  // Monaco's own change events, exactly what typing into the editor would
+  // trigger downstream.
+  const monacoHandled = await loc.evaluate((el, v) => {
+    const start = el as HTMLElement;
+    const container = start.closest('.monaco-editor') ?? start.closest('[data-mode-id]');
+    if (!container) return false;
+    const root = container.classList.contains('monaco-editor')
+      ? container
+      : (container.closest('.monaco-editor') ?? container);
+    const monacoGlobal = (window as unknown as {
+      monaco?: { editor?: { getEditors?: () => Array<{ getDomNode: () => HTMLElement | null; setValue: (v: string) => void }> } };
+    }).monaco;
+    const getEditors = monacoGlobal?.editor?.getEditors;
+    if (!getEditors || !monacoGlobal?.editor) return false;
+    const editors = getEditors.call(monacoGlobal.editor);
+    const match = editors.find((ed) => {
+      const node = ed.getDomNode();
+      return node !== null && (node === root || node.contains(root) || root.contains(node));
+    });
+    if (!match) return false;
+    match.setValue(v);
+    return true;
+  }, value).catch(() => false);
+
+  if (monacoHandled) return { ok: true, editor: 'monaco' };
+
   // Framework-safe path. React, Angular, and Material each intercept
   // `value` assignment in a way plain `locator.fill()` doesn't reach:
   //   - React:    tracks the value on a hidden internal property; the
@@ -999,6 +1032,269 @@ register('fill', async (ctx, args) => {
   }, value);
   return { ok: true };
 });
+
+// ─── select — companion to fill for dropdowns/comboboxes ───────
+//
+// "Set a value" means something different depending on what rendered the
+// widget, and BUG-1 in the 2026-04-30 Datto RMM field report showed that
+// `ghax click` alone can't cover all of them — AntD's `<Select>` in
+// particular doesn't open for synthetic pointer events the way a native
+// element does. Strategy cascade, cheapest/most-reliable first:
+//
+//   a. Native <select>            → Playwright's own selectOption().
+//   b. AntD <Select>               → React fiber traversal straight to the
+//                                    controlled component's onChange. AntD's
+//                                    controlled-Select contract is stable
+//                                    across versions, so this is more
+//                                    robust than fighting its pointer-event
+//                                    handling.
+//   c. Everything else (react-select, MUI, Headless UI, role=combobox)
+//                                  → open via a real click on the trigger,
+//                                    then click the matching option —
+//                                    including options rendered into a
+//                                    portal under <body> rather than as a
+//                                    DOM descendant of the trigger.
+//
+// Each strategy that doesn't apply/succeed records why, so a total failure
+// reports what was tried instead of a bare "not found".
+register('select', async (ctx, args, opts) => {
+  const target = String(args[0] ?? '');
+  if (!target) {
+    throw new Error(
+      'Usage: select <@ref|selector> <value>\n' +
+      '   or: select <@ref|selector> --index <n>\n' +
+      '   or: select <@ref|selector> --by-value <val>',
+    );
+  }
+
+  const indexRaw = opts.index;
+  const hasIndex = indexRaw !== undefined && indexRaw !== null && String(indexRaw) !== '';
+  const indexNum = hasIndex ? Number(indexRaw) : undefined;
+  if (hasIndex && (!Number.isInteger(indexNum) || (indexNum as number) < 0)) {
+    throw new Error(`Bad --index "${String(indexRaw)}". Expected a 0-based integer.`);
+  }
+  const byValueRaw = opts['by-value'] ?? opts.byValue;
+  const byValue = byValueRaw !== undefined ? String(byValueRaw) : undefined;
+  const text = args[1] !== undefined ? String(args[1]) : undefined;
+
+  if (text === undefined && !hasIndex && byValue === undefined) {
+    throw new Error(
+      'select needs a value: pass <value> as the 2nd arg, or --index <n>, or --by-value <val>.',
+    );
+  }
+
+  const page = await activePage(ctx);
+  const loc = resolveRef(ctx, target, page);
+  const attempts: string[] = [];
+
+  // ── (a) native <select> ──────────────────────────────────────
+  const tag = await loc.evaluate((el) => (el as Element).tagName).catch(() => null);
+  if (tag === 'SELECT') {
+    try {
+      let selected: string[];
+      if (byValue !== undefined) {
+        selected = await loc.selectOption({ value: byValue });
+      } else if (hasIndex) {
+        selected = await loc.selectOption({ index: indexNum as number });
+      } else {
+        // Plain <value> means "by visible text" first (label), falling
+        // back to the option's `value` attribute — matches the semantics
+        // documented for `ghax select <ref> <value>`.
+        try {
+          selected = await loc.selectOption({ label: text as string });
+        } catch {
+          selected = await loc.selectOption(text as string);
+        }
+      }
+      return { ok: true, strategy: 'native', value: selected };
+    } catch (err) {
+      attempts.push(`native <select>: ${(err as Error)?.message ?? err}`);
+    }
+  } else {
+    attempts.push('native <select>: target is not a <select> element');
+  }
+
+  // ── (b) AntD <Select> — React fiber traversal ────────────────
+  interface FiberSelectResult {
+    ok: boolean;
+    value?: unknown;
+    matchedBy?: string;
+    reason?: string;
+  }
+  const fiberParams = { text, indexNum, hasIndex, byValue };
+  const fiberResult = await loc.evaluate((el, params) => {
+    const { text: t, indexNum: idx, hasIndex: hasIdx, byValue: bv } = params as {
+      text?: string; indexNum?: number; hasIndex: boolean; byValue?: string;
+    };
+    const antRoot = (el as HTMLElement).closest('.ant-select');
+    if (!antRoot) return { ok: false, reason: 'no .ant-select ancestor' };
+    const fiberKey = Object.keys(antRoot).find((k) => k.startsWith('__reactFiber'));
+    if (!fiberKey) return { ok: false, reason: '.ant-select found but no React fiber property on it' };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let f: any = (antRoot as unknown as Record<string, unknown>)[fiberKey];
+    let owner: any = null;
+    while (f) {
+      if (f.memoizedProps && typeof f.memoizedProps.onChange === 'function') {
+        owner = f;
+        break;
+      }
+      f = f.return;
+    }
+    if (!owner) return { ok: false, reason: 'walked fiber .return chain, no onChange prop found' };
+
+    const props = owner.memoizedProps as Record<string, unknown>;
+    // AntD's <Select options={[...]}> shape, or the <Select><Option/></Select>
+    // children shape — try both so text/index matching works either way.
+    let options: Array<{ value: unknown; label: unknown }> | null = null;
+    if (Array.isArray(props.options)) {
+      options = (props.options as Array<Record<string, unknown>>).map((o) => ({ value: o.value, label: o.label ?? o.children }));
+    } else if (Array.isArray(props.children)) {
+      options = (props.children as Array<{ props?: Record<string, unknown> }>)
+        .filter((c) => c && c.props)
+        .map((c) => ({ value: c.props!.value, label: c.props!.children }));
+    }
+
+    let value: unknown;
+    let matchedBy: string;
+    if (bv !== undefined) {
+      value = bv;
+      matchedBy = 'by-value';
+    } else if (hasIdx) {
+      if (options && options[idx as number] !== undefined) {
+        value = options[idx as number].value;
+        matchedBy = 'index (matched against fiber options)';
+      } else {
+        value = idx;
+        matchedBy = 'index (raw — no options list on fiber)';
+      }
+    } else {
+      const norm = (s: unknown) => String(s ?? '').trim().toLowerCase();
+      const found = options?.find((o) => norm(o.label) === norm(t))
+        ?? options?.find((o) => norm(o.label).includes(norm(t)));
+      if (found) {
+        value = found.value;
+        matchedBy = 'text (matched against fiber options)';
+      } else {
+        value = t;
+        matchedBy = 'text (raw — no matching option on fiber, passed through)';
+      }
+    }
+
+    (owner.memoizedProps.onChange as (v: unknown) => void)(value);
+    return { ok: true, value, matchedBy };
+  }, fiberParams).catch((err) => ({ ok: false, reason: String((err as Error)?.message ?? err) } as FiberSelectResult)) as FiberSelectResult;
+
+  if (fiberResult.ok) {
+    return { ok: true, strategy: 'fiber', value: fiberResult.value, matchedBy: fiberResult.matchedBy };
+  }
+  attempts.push(`AntD fiber: ${fiberResult.reason ?? 'unknown failure'}`);
+
+  // ── (c) other custom comboboxes — open + click the option ────
+  try {
+    await loc.click();
+  } catch (err) {
+    attempts.push(`open-click: could not click trigger — ${(err as Error)?.message ?? err}`);
+    throw new Error(buildSelectError(target, attempts));
+  }
+  // Let the dropdown/portal render. Most React comboboxes mount within a
+  // frame or two; a short fixed wait is cheaper and less flaky here than
+  // polling for a specific selector we don't know the shape of yet.
+  await page.waitForTimeout(150);
+
+  interface OpenClickResult {
+    ok: boolean;
+    containerFound: boolean;
+  }
+  const openParams = { text, indexNum, hasIndex, byValue };
+  const openResult = await page.evaluate((params) => {
+    const { text: t, indexNum: idx, hasIndex: hasIdx, byValue: bv } = params as {
+      text?: string; indexNum?: number; hasIndex: boolean; byValue?: string;
+    };
+
+    const isVisible = (el: Element): boolean => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      if (el.classList.contains('ant-select-dropdown-hidden')) return false;
+      return true;
+    };
+
+    // Portal-anchored dropdowns aren't DOM descendants of the trigger, so
+    // gather candidates two ways: (1) explicit aria-controls/aria-owns from
+    // whatever's currently expanded, and (2) well-known dropdown container
+    // shapes rendered under <body> (AntD, ARIA listbox/menu, react-select /
+    // MUI / Headless UI class-name conventions).
+    const containers = new Set<Element>();
+    document.querySelectorAll('[aria-expanded="true"][aria-controls], [aria-expanded="true"][aria-owns]').forEach((trigger) => {
+      const ids = (trigger.getAttribute('aria-controls') ?? trigger.getAttribute('aria-owns') ?? '').split(/\s+/).filter(Boolean);
+      for (const id of ids) {
+        const c = document.getElementById(id);
+        if (c) containers.add(c);
+      }
+    });
+    document.querySelectorAll('.ant-select-dropdown, [role="listbox"], [role="menu"], [role="grid"], [class*="menu-list" i], [class*="dropdown-content" i]')
+      .forEach((c) => containers.add(c));
+
+    const visible = Array.from(containers).filter(isVisible);
+    // Prefer highest computed z-index; tie-break on later DOM position
+    // (portals typically append their most-recently-opened node last).
+    visible.sort((a, b) => {
+      const za = parseInt(getComputedStyle(a).zIndex, 10) || 0;
+      const zb = parseInt(getComputedStyle(b).zIndex, 10) || 0;
+      if (za !== zb) return zb - za;
+      const pos = a.compareDocumentPosition(b);
+      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return 1;
+      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return -1;
+      return 0;
+    });
+
+    for (const container of visible) {
+      let options = Array.from(container.querySelectorAll('[role="option"], [role="menuitem"], .ant-select-item-option'))
+        .filter(isVisible);
+      if (options.length === 0) {
+        options = Array.from(container.querySelectorAll('li, [data-value], [class*="option" i]')).filter(isVisible);
+      }
+      if (options.length === 0) continue;
+
+      let match: Element | null = null;
+      if (bv !== undefined) {
+        match = options.find((o) => (o.getAttribute('data-value') ?? o.getAttribute('value')) === bv) ?? null;
+      } else if (hasIdx) {
+        match = options[idx as number] ?? null;
+      } else {
+        const norm = (s: string | null) => (s ?? '').trim().toLowerCase();
+        match = options.find((o) => norm(o.textContent) === norm(t ?? null))
+          ?? options.find((o) => norm(o.textContent).includes(norm(t ?? null)))
+          ?? null;
+      }
+
+      if (match) {
+        match.setAttribute('data-ghax-select-target', '1');
+        return { ok: true, containerFound: true };
+      }
+    }
+    return { ok: false, containerFound: visible.length > 0 };
+  }, openParams) as OpenClickResult;
+
+  if (openResult.ok) {
+    const optionLoc = page.locator('[data-ghax-select-target="1"]');
+    await optionLoc.first().click();
+    await optionLoc.first().evaluate((el) => el.removeAttribute('data-ghax-select-target')).catch(() => {});
+    return { ok: true, strategy: 'open-click', value: byValue ?? text ?? indexNum };
+  }
+  attempts.push(
+    `open-click: ${openResult.containerFound
+      ? 'a dropdown/listbox opened but no option matched the given value/index'
+      : 'clicked the trigger but no dropdown/listbox/menu appeared'}`,
+  );
+
+  throw new Error(buildSelectError(target, attempts));
+});
+
+function buildSelectError(target: string, attempts: string[]): string {
+  return `ghax select: no strategy worked for ${target}.\nTried:\n${attempts.map((a) => `  - ${a}`).join('\n')}`;
+}
 
 register('press', async (ctx, args) => {
   const key = String(args[0] ?? '');

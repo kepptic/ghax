@@ -32,7 +32,14 @@ Tab:
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
   click <@ref|selector>
-  fill <@ref|selector> <value>
+  fill <@ref|selector> <value>              # Monaco-aware: routes into
+                                             #   monaco.editor.getEditors() when
+                                             #   the target is inside a Monaco editor
+  select <@ref|selector> <value>            # by visible text, falling back to value attr
+  select <@ref|selector> --index <n>        # by 0-based position
+  select <@ref|selector> --by-value <val>   # explicit value semantics
+         # cascade: native <select> → AntD <Select> (React fiber) → open+click
+         #   (react-select/MUI/Headless UI/role=combobox, portal-aware)
   upload <@ref|selector> <path>[,<path>…]   # wraps setInputFiles
   press <key>
   type <text>

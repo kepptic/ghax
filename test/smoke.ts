@@ -1143,6 +1143,157 @@ c('upload rejects missing args', async () => {
   assert(/Usage: ghax upload/.test(r.stderr + r.stdout), `expected usage hint, got: ${r.stderr || r.stdout}`);
 });
 
+c('fill routes into a Monaco editor via monaco.editor.getEditors()', async () => {
+  // Minimal, hermetic stand-in for Monaco: no CDN, just a DOM shape
+  // (.monaco-editor container) plus a fake `window.monaco.editor` API
+  // shaped exactly like the real one's `getEditors()/getDomNode()/setValue()`
+  // surface. This exercises the daemon's detection + editor-matching logic
+  // without pulling in the real (multi-MB) Monaco bundle.
+  const html = `<div class="monaco-editor" id="editor-root"><div class="view-lines" id="inner">stub</div></div>
+<script>
+  const root = document.getElementById('editor-root');
+  let lastValue = '';
+  window.monaco = {
+    editor: {
+      getEditors: () => [{
+        getDomNode: () => root,
+        setValue: (v) => { lastValue = v; root.setAttribute('data-monaco-value', v); },
+      }],
+    },
+  };
+</script>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const r = await run(['fill', '#inner', 'ghax-monaco-value', '--json']);
+  const data = parseJson<{ ok: boolean; editor?: string }>(r.stdout);
+  assert(data.ok === true && data.editor === 'monaco', `fill should report monaco editor, got ${JSON.stringify(data)}`);
+  const val = (await run(['eval', 'document.getElementById("editor-root").getAttribute("data-monaco-value")']))
+    .stdout.trim().replace(/^"|"$/g, '');
+  assert(val === 'ghax-monaco-value', `monaco setValue should have fired, got ${JSON.stringify(val)}`);
+});
+
+c('select sets a native <select> by visible text (label), falling back to value', async () => {
+  await run(['goto', 'data:text/html,<select id=s1><option value="a">Alpha</option><option value="b">Bravo</option></select>']);
+  await run(['wait', '300']);
+  const r = await run(['select', '#s1', 'Bravo', '--json']);
+  const data = parseJson<{ ok: boolean; strategy: string; value: string[] }>(r.stdout);
+  assert(data.ok === true, `select should succeed: ${JSON.stringify(data)}`);
+  assert(data.strategy === 'native', `expected native strategy, got ${JSON.stringify(data)}`);
+  const val = (await run(['eval', 'document.getElementById("s1").value'])).stdout.trim().replace(/^"|"$/g, '');
+  assert(val === 'b', `expected value "b" (Bravo selected), got ${JSON.stringify(val)}`);
+});
+
+c('select --index picks a native <select> option by 0-based position', async () => {
+  await run(['goto', 'data:text/html,<select id=s2><option value="x">X</option><option value="y">Y</option><option value="z">Z</option></select>']);
+  await run(['wait', '300']);
+  const r = await run(['select', '#s2', '--index', '2', '--json']);
+  const data = parseJson<{ ok: boolean; strategy: string }>(r.stdout);
+  assert(data.ok === true && data.strategy === 'native', `select --index result: ${JSON.stringify(data)}`);
+  const val = (await run(['eval', 'document.getElementById("s2").value'])).stdout.trim().replace(/^"|"$/g, '');
+  assert(val === 'z', `expected value "z" (index 2), got ${JSON.stringify(val)}`);
+});
+
+c('select --by-value sets a native <select> by option value attribute', async () => {
+  await run(['goto', 'data:text/html,<select id=s3><option value="foo">Foo Label</option><option value="bar">Bar Label</option></select>']);
+  await run(['wait', '300']);
+  const r = await run(['select', '#s3', '--by-value', 'bar', '--json']);
+  const data = parseJson<{ ok: boolean; strategy: string }>(r.stdout);
+  assert(data.ok === true && data.strategy === 'native', `select --by-value result: ${JSON.stringify(data)}`);
+  const val = (await run(['eval', 'document.getElementById("s3").value'])).stdout.trim().replace(/^"|"$/g, '');
+  assert(val === 'bar', `expected value "bar", got ${JSON.stringify(val)}`);
+});
+
+c('select falls through the fiber traversal on a synthetic AntD-shaped fiber', async () => {
+  // Not real React/AntD (no CDN, no multi-MB bundle) — a hand-built object
+  // shaped exactly like what the daemon's traversal code walks: a DOM node
+  // with a `.ant-select` class, an own property whose key starts with
+  // `__reactFiber`, and a `.return` chain leading to a fiber whose
+  // `memoizedProps.onChange` is a real function. This proves the traversal
+  // + options-matching algorithm from BUG-1's field report, independent of
+  // whether a real AntD bundle is present.
+  const html = `<div class="ant-select" id="ant1"><span>Please select</span></div>
+<script>
+  const root = document.getElementById('ant1');
+  window.__ghaxFiberCalls = [];
+  const ownerFiber = {
+    memoizedProps: {
+      onChange: (v) => { window.__ghaxFiberCalls.push(v); },
+      options: [{ value: 'v1', label: 'Label One' }, { value: 'v2', label: 'Label Two' }],
+    },
+    return: null,
+  };
+  root['__reactFiber$synthetic'] = { memoizedProps: {}, return: ownerFiber };
+</script>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const r = await run(['select', '#ant1', 'Label Two', '--json']);
+  const data = parseJson<{ ok: boolean; strategy: string; value: string }>(r.stdout);
+  assert(data.ok === true && data.strategy === 'fiber', `select fiber result: ${JSON.stringify(data)}`);
+  assert(data.value === 'v2', `expected matched option value "v2", got ${JSON.stringify(data)}`);
+  const calls = parseJson<string[]>((await run(['eval', 'JSON.stringify(window.__ghaxFiberCalls)'])).stdout.trim());
+  assert(calls.length === 1 && calls[0] === 'v2', `expected onChange called once with v2, got ${JSON.stringify(calls)}`);
+});
+
+c('select open-click strategy finds and clicks a portal-style custom dropdown option', async () => {
+  // Minimal role=combobox + role=listbox custom dropdown. No framework —
+  // exercises the generic open-click cascade step: click the trigger, wait
+  // for the dropdown, find the option by visible text, click it.
+  const html = `<button id="trigger" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="listbox1">Choose</button>
+<ul id="listbox1" role="listbox" style="display:none">
+  <li role="option" data-value="one">One</li>
+  <li role="option" data-value="two">Two</li>
+  <li role="option" data-value="three">Three</li>
+</ul>
+<span id="result"></span>
+<script>
+  const trigger = document.getElementById('trigger');
+  const listbox = document.getElementById('listbox1');
+  trigger.addEventListener('click', () => {
+    const open = trigger.getAttribute('aria-expanded') === 'true';
+    trigger.setAttribute('aria-expanded', open ? 'false' : 'true');
+    listbox.style.display = open ? 'none' : 'block';
+  });
+  listbox.addEventListener('click', (e) => {
+    const opt = e.target.closest('[role=option]');
+    if (!opt) return;
+    document.getElementById('result').textContent = opt.getAttribute('data-value');
+    trigger.setAttribute('aria-expanded', 'false');
+    listbox.style.display = 'none';
+  });
+</script>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  await run(['wait', '300']);
+  const r = await run(['select', '#trigger', 'Two', '--json']);
+  const data = parseJson<{ ok: boolean; strategy: string }>(r.stdout);
+  assert(data.ok === true && data.strategy === 'open-click', `select open-click result: ${JSON.stringify(data)}`);
+  const resultText = (await run(['eval', 'document.getElementById("result").textContent'])).stdout.trim().replace(/^"|"$/g, '');
+  assert(resultText === 'two', `expected option "Two" clicked (data-value=two), got ${JSON.stringify(resultText)}`);
+});
+
+c('select rejects missing value/index/by-value', async () => {
+  await run(['goto', 'data:text/html,<select id=s4><option value="a">A</option></select>']);
+  await run(['wait', '300']);
+  const r = await run(['select', '#s4'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'select should fail when no value/index/by-value given');
+  assert(
+    /needs a value|Usage: ghax select/i.test(r.stderr + r.stdout),
+    `expected a usage/value hint, got: ${r.stderr || r.stdout}`,
+  );
+});
+
+c('select reports every strategy tried when none succeed', async () => {
+  await run(['goto', 'data:text/html,<div id="plain">nothing interactive here</div>']);
+  await run(['wait', '300']);
+  const r = await run(['select', '#plain', 'whatever'], { allowFailure: true });
+  assert(r.exitCode !== 0, 'select should fail on a plain, non-interactive element');
+  const out = r.stderr + r.stdout;
+  assert(/no strategy worked/i.test(out), `expected "no strategy worked" summary: ${out}`);
+  assert(
+    /native <select>/.test(out) && /AntD fiber/.test(out) && /open-click/.test(out),
+    `expected all three strategies listed in the error: ${out}`,
+  );
+});
+
 c('pair status prints tunnel instructions while attached', async () => {
   const r = await run(['pair']);
   assert(/pair/i.test(r.stdout), `pair output missing header: ${r.stdout.slice(0, 120)}`);
