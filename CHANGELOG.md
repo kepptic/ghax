@@ -19,7 +19,29 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   recover the variables; now `ghax network --pattern 'graphql'` shows
   the mutation name + variables directly.
 
+### Changed
+- **BREAKING:** `ghax cookies` no longer dumps every cookie in the whole
+  browser profile with raw values by default. It now scopes to cookies
+  applicable to the **active tab's URL** (via Playwright's own
+  domain/path/secure applicability match — correctly handles
+  subdomains, localhost, and IP+port) and **redacts cookie values**
+  (`value: "<redacted, N chars>"`). To reproduce the old behavior, run
+  `ghax cookies --all --values`. New flags: `--all` (whole-profile
+  dump), `--domain <d>` (filter by domain substring/suffix), `--url
+  <u>` (applicability filter against an explicit URL instead of the
+  current tab), `--values` (show raw values in any mode), and `--has
+  <name>` (exit `0`/`1` — a scripting primitive for "did login land?").
+  Prompted by
+  [docs/reports/open/2026-06-23-setsail-localhost-dev-session.md](./docs/reports/open/2026-06-23-setsail-localhost-dev-session.md),
+  which found the unscoped dump (every domain the profile had ever set
+  a cookie for, raw session tokens included) was both a privacy hazard
+  and unusable for the actual task of confirming a dev-login landed.
+
 ### Docs
+- README now documents that `ghax eval` awaits Promises and async
+  IIFEs automatically (Rec 3 of the same report) — earlier confusion
+  about "empty" eval output turned out to be shell-side `grep`/`sed`
+  filtering, not ghax swallowing async results.
 - `llms.txt` now teaches installing agents how to register the ghax
   skill/memory files in the user's agent of choice — Claude Code
   (`~/.claude/skills/`) plus per-project memory files for Codex,

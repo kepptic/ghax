@@ -59,9 +59,14 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     }
 
     match verb {
-        "tabs" | "back" | "forward" | "reload" | "text" | "cookies" => {
+        "tabs" | "back" | "forward" | "reload" | "text" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
+        }
+
+        "cookies" => {
+            let parsed = args::parse(rest);
+            crate::cookies::cmd_cookies(cfg, &parsed)
         }
 
         "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"

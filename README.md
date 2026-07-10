@@ -129,12 +129,14 @@ Three modes, one flag each.
 - Source-map resolution: `console --source-maps` maps `main.abc123.js:1:48291` back to `src/AuthForm.tsx:42:12`.
 - Core Web Vitals (`ghax perf`): LCP with the element that triggered it, FCP, CLS, TTFB, full nav timing. Buffered observers catch entries that fired before the call.
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
+- `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect.
 
 ### Execution patterns
 
 - `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots between ref-using steps, so a mid-plan combobox reshuffle doesn't break later refs.
 - `ghax chain` reads the same shape from stdin for ad-hoc flows.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]` mutates the running page, measures a result, and screenshots in one call. Revert = reload.
+- `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.
 - `ghax shell` is a REPL that keeps the CLI process alive between commands, ~1.8× faster for multi-turn agent sessions.
 - `ghax record start / stop` captures commands into a replayable JSON file; `ghax replay <file>` runs them back; `ghax gif <recording>` stitches frames via ffmpeg.
 

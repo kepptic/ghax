@@ -22,6 +22,7 @@ ghax/
     src/qa.rs               QA orchestrator (parallel URL crawl, screenshots, report)
     src/canary.rs           Post-deploy canary monitor
     src/ship.rs             Ship workflow (bump, changelog, commit, push, PR)
+    src/cookies.rs          Cookie scope/redaction flags, --has exit-code mapping
     src/rpc.rs              HTTP+JSON client with transient-error retry
     src/state.rs            State file resolution + daemon liveness
     src/shell.rs            Interactive REPL (ghax shell)
