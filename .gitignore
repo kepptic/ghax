@@ -9,3 +9,4 @@ dist/
 .playwright-cli/
 target/
 .claude/
+planning/
