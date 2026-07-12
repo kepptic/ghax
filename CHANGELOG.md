@@ -13,14 +13,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and triggers. `ghax-browse.md` is removed.
 
 ### Docs
-- `ghax` skill: new "Relaunching Edge with CDP — the right way"
-  section. Documents the full relaunch procedure (quit first, relaunch
-  the real profile with `--remote-debugging-port` only) and hard-rules
-  against passing `--user-data-dir` on the daily-driver browser — a
-  scratch dir hijacks the Dock icon and makes the user's extensions and
-  sign-ins appear to vanish (2026-07-12 `/tmp/edge-dag` incident).
-  Includes detection (`ps aux | grep user-data-dir`) and recovery steps,
-  plus the Chrome-113+-vs-Edge default-profile CDP caveat.
+- `ghax` skill: new "Getting CDP on Edge — the reality since Edge 150"
+  section. Edge 150 / Chrome 136+ silently ignore
+  `--remote-debugging-port` on the default profile (Chromium
+  remote-debugging hardening) — no policy or feature-flag bypass
+  exists, and cloning the real profile into a custom data dir loses
+  all cookies/passwords to per-data-dir encryption (both verified
+  empirically 2026-07-12). Documents the blessed setup — a persistent
+  automation data dir signed into browser sync — plus the Dock-icon
+  hijack failure mode (`/tmp/edge-dag` incident: scratch-profile Edge
+  makes the user's extensions/sign-ins appear to vanish), detection
+  via `ps aux | grep user-data-dir`, and never-`/tmp` placement rules.
 
 ## [0.4.4] - 2026-07-10
 ### Added

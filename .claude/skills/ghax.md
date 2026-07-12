@@ -61,54 +61,65 @@ curl -s http://127.0.0.1:9222/json/version | head -3
 
 If nothing responds, follow the relaunch procedure below.
 
-## Relaunching Edge with CDP — the right way
+## Getting CDP on Edge — the reality since Edge 150
 
-The whole point of ghax is the user's **real** session. When :9222 is
-down and you need it back, relaunch Edge on the **real profile**:
+**CDP on the default (real) profile is no longer possible.** Edge 150
+(and Chrome 136+) implement Chromium's remote-debugging hardening:
+`--remote-debugging-port` is silently ignored unless `--user-data-dir`
+points at a **non-default** directory. Verified 2026-07-12 on Edge
+150.0.4078.65: no `DevToolsActivePort` file, nothing listens, no error
+printed. There is no escape hatch — the `RemoteDebuggingAllowed` policy
+does not bypass it and the `DevToolsDebuggingRestrictions` feature flag
+has been removed. Don't waste a session rediscovering this.
+
+The blessed setup is a **persistent automation data dir**:
 
 ```bash
-# 1. Fully quit Edge first — the CDP flag only takes effect at process
-#    start. If Edge is already running, `open` / clicking the Dock icon
-#    just reuses the existing (non-CDP) process.
-osascript -e 'quit app "Microsoft Edge"'   # or ask the user to Cmd-Q
+# 1. Quit any prior CDP instance if you're restarting it:
+pkill -f "user-data-dir=$HOME/Library/Application Support/Microsoft Edge CDP"
 
-# 2. Relaunch with the debugging port and NOTHING else:
+# 2. Launch the automation browser:
 /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge \
-  --remote-debugging-port=9222 &
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/Library/Application Support/Microsoft Edge CDP" &
 
 # 3. Verify, then attach:
 curl -s http://127.0.0.1:9222/json/version | head -3
 ghax attach
 ```
 
-**HARD RULE: never pass `--user-data-dir` when relaunching the user's
-daily-driver Edge.** No `--user-data-dir` flag means Edge uses the real
-profile — extensions, sign-ins, SSO cookies all intact. Passing a
-scratch dir (e.g. `--user-data-dir=/tmp/whatever`) starts a blank
-profile, and worse: as long as that instance runs, the Dock icon and
-`open -a "Microsoft Edge"` open windows in the **scratch** profile, so
-the user's extensions and sign-ins appear to have vanished. This
-happened on 2026-07-12 (`/tmp/edge-dag`) and looked like data loss —
-it wasn't, but it cost a debugging session.
+Rules and caveats:
 
-Quitting the user's Edge closes their open tabs, so **ask before
-step 1** unless the user already told you to relaunch. Edge restores
-the previous session on next launch, but don't surprise them.
-
-If you find Edge already running with a `--user-data-dir` nobody
-intended (check `ps aux | grep -i "Microsoft Edge" | grep user-data-dir`),
-that IS the bug: quit it and relaunch per the steps above.
-
-Notes:
-- **Edge** honors `--remote-debugging-port` on its default profile.
-  **Chrome 113+ does not** — it silently ignores the flag on the default
-  user-data-dir, so real-profile CDP on Chrome isn't possible; use Edge
-  for real-session work, or give Chrome a dedicated
-  `--user-data-dir=$HOME/.config/chrome-ghax` profile you keep reusing.
-- Scratch profiles are for clean-room testing and extension dev only,
-  and are always opt-in: `ghax attach --launch --browser edge` (uses
-  `~/.ghax/edge-profile`) or `--data-dir <path>`. Never use them as a
-  shortcut to get CDP on the daily driver.
+- **The data dir must be persistent** — never `/tmp` (wiped on reboot;
+  the 2026-07-12 `/tmp/edge-dag` incident). The canonical location on
+  this machine is `~/Library/Application Support/Microsoft Edge CDP`.
+- **You cannot clone sessions in from the real profile.** The hardening
+  encrypts cookies/passwords with a per-data-dir key; a byte-for-byte
+  copy of the real profile keeps extensions, favorites, history, and
+  settings but every session and saved password is undecryptable
+  (verified 2026-07-12). Sign the automation profile into Edge sync
+  once — extensions/favorites/passwords sync down; site logins are
+  done manually once and persist in this dir thereafter.
+- **Dock-icon hijack:** while a custom-data-dir instance is the only
+  Edge running, the Dock icon and `open -a "Microsoft Edge"` open
+  windows in the *automation* profile — to the user it looks like
+  their extensions and sign-ins vanished. It isn't data loss. If the
+  user reports a "blank" Edge, check
+  `ps aux | grep -i "Microsoft Edge" | grep user-data-dir` and make
+  sure their normal (no-flags) Edge is running too.
+- **Never launch the user's daily-driver Edge with a `--user-data-dir`
+  it didn't have.** The real profile stays flag-free; CDP lives only in
+  the dedicated automation dir.
+- Quitting/killing any Edge instance closes its tabs — **ask first**
+  unless the user already told you to restart it.
+- Chrome behaves the same (since 136); if you must use Chrome, give it
+  its own persistent `--user-data-dir=$HOME/.config/chrome-ghax`.
+- Ephemeral scratch profiles for clean-room testing and extension dev
+  remain opt-in via `ghax attach --launch --browser edge` (uses
+  `~/.ghax/edge-profile`) or `--data-dir <path>`.
+- When the user asks for "my real session" on a site the automation
+  profile isn't logged into: log in there once (it persists), or fall
+  back to gstack browse with saved `.auth/` cookies.
 
 ## Command cheat sheet
 
