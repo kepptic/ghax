@@ -84,7 +84,7 @@ ghax/
 │   ├── perf-bench.ts         P50 budget enforcer
 │   ├── capture-bodies-smoke.ts  Body-capture end-to-end test
 │   └── hot-reload-smoke.ts   MV3 hot-reload test against fixtures/test-extension/
-├── .claude/skills/           Claude Code skills (ghax + ghax-browse)
+├── .claude/skills/           Claude Code skill (ghax — single skill)
 ├── docs/
 │   ├── BENCHMARK.md          Perf numbers
 │   ├── design/               Design history (why the current architecture exists)

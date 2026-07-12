@@ -1,52 +1,302 @@
 ---
 name: ghax
-description: Router for the ghax open-source developer toolkit — a collection of CLI tools that attach to the user's REAL environment (real browser, real auth, real extensions) instead of sandboxing. Dispatch to the relevant sub-skill when the user asks "can ghax do X" or mentions ghax by name without specifying a sub-command. The flagship is `ghax browse` (use skill ghax-browse). Future: `ghax ship`, `ghax qa`, `ghax review`, `ghax canary`, `ghax profile`, `ghax pair`.
+description: Drive the user's real running Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. ghax is the open-source developer toolkit that attaches to the user's REAL environment (real browser, real auth, real extensions) instead of sandboxing. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a SaaS dashboard that's already logged in. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
 ---
 
-# Skill: ghax (top-level router)
+# Skill: ghax
 
-`ghax` is G's open-source developer toolkit — a collection of CLI tools
-(and Claude Code skills) that attach to the user's real working
-environment rather than sandboxing. Think gstack's ethos, but
-real-browser-first.
+`ghax` is G's open-source developer toolkit — CLI tools (and this Claude
+Code skill) that attach to the user's real working environment rather
+than sandboxing. The flagship is browser driving: attach to the user's
+real Chrome or Edge via CDP. Unlike sandboxed browsers (gstack browse,
+playwright-cli), ghax reaches the user's actual session — real auth,
+real extensions, real SSO cookies — and exposes MV3 internals that no
+other tool surfaces cleanly.
 
-## Shipped tools
+## When to reach for ghax
 
-| Tool | Skill to invoke | What it does |
-|------|----------------|--------------|
-| `ghax browse` | [`ghax-browse`](./ghax-browse.md) | Drive user's real Chrome/Edge via CDP. Tabs, a11y snapshots with @refs, MV3 extension internals (SW eval, sidepanels, `chrome.storage`, hot-reload), real user gestures, console/network capture. |
+- The user says **"attach"**, **"use my browser"**, **"real edge"**, or
+  points at a SaaS dashboard that's already logged in.
+- They just ran `pnpm build` / `npm run build` on a **Chrome extension**
+  target. ghax is the only tool that can hot-reload the extension AND
+  re-inject content scripts into every open matching tab without
+  disrupting the user's workspace.
+- They ask to read or write **`chrome.storage`** (local/session/sync) for
+  debugging or scripting.
+- They ask to eval something in an **extension service worker** — e.g.
+  "make the SW re-fetch the token" or "clear its in-memory cache".
+- They ask for an **accessibility-tree snapshot with refs** (`@e1`, `@e2`)
+  of a complex page so you can click "the save button" without guessing
+  at selectors.
+- They want to **annotate a screenshot** with @ref overlays to share a
+  debugging session.
 
-## Planned tools (no timeline)
+## When NOT to reach for ghax
 
-| Tool | What it will do |
-|------|-----------------|
-| `ghax ship` | Opinionated ship workflow (commit + push + PR + deploy hook). |
-| `ghax qa` | Orchestrated QA pass on a web app (attach + walk flows + gif). |
-| `ghax review` | PR review against the diff. |
-| `ghax canary` | Attach + watch prod for regressions after deploy. |
-| `ghax profile` | Perf / memory snapshot of a page or extension. |
-| `ghax pair` | Share browser access with another agent (like gstack-pair). |
+- Quick one-off headless testing → use **gstack browse** (`$B`).
+- Programmatic test suites, tracing, video → **playwright-cli**.
+- The user doesn't have Edge/Chrome running with CDP enabled and doesn't
+  want to relaunch → fall back to gstack browse with a saved-cookies
+  import.
 
-## How to route
+## Prerequisites
 
-If the user mentions `ghax` without a sub-command, ask what they want to
-do, or infer from context:
+### 1. `ghax` on PATH
 
-- Anything browser / extension / QA related → **ghax-browse**.
-- Anything else → not yet built; offer to file it as a future tool in
-  `design/plan/04-roadmap.md`.
+Verify with `which ghax`. On this machine it's symlinked as
+`~/.local/bin/ghax → <repo>/dist/ghax`. If missing:
+
+```bash
+cd /Users/gr/Documents/DevOps/kepptic/products/open-source/ghax
+bun run build && bun run install-link
+```
+
+### 2. Browser listening on CDP
+
+Verify with:
+
+```bash
+curl -s http://127.0.0.1:9222/json/version | head -3
+```
+
+If nothing responds, follow the relaunch procedure below.
+
+## Relaunching Edge with CDP — the right way
+
+The whole point of ghax is the user's **real** session. When :9222 is
+down and you need it back, relaunch Edge on the **real profile**:
+
+```bash
+# 1. Fully quit Edge first — the CDP flag only takes effect at process
+#    start. If Edge is already running, `open` / clicking the Dock icon
+#    just reuses the existing (non-CDP) process.
+osascript -e 'quit app "Microsoft Edge"'   # or ask the user to Cmd-Q
+
+# 2. Relaunch with the debugging port and NOTHING else:
+/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge \
+  --remote-debugging-port=9222 &
+
+# 3. Verify, then attach:
+curl -s http://127.0.0.1:9222/json/version | head -3
+ghax attach
+```
+
+**HARD RULE: never pass `--user-data-dir` when relaunching the user's
+daily-driver Edge.** No `--user-data-dir` flag means Edge uses the real
+profile — extensions, sign-ins, SSO cookies all intact. Passing a
+scratch dir (e.g. `--user-data-dir=/tmp/whatever`) starts a blank
+profile, and worse: as long as that instance runs, the Dock icon and
+`open -a "Microsoft Edge"` open windows in the **scratch** profile, so
+the user's extensions and sign-ins appear to have vanished. This
+happened on 2026-07-12 (`/tmp/edge-dag`) and looked like data loss —
+it wasn't, but it cost a debugging session.
+
+Quitting the user's Edge closes their open tabs, so **ask before
+step 1** unless the user already told you to relaunch. Edge restores
+the previous session on next launch, but don't surprise them.
+
+If you find Edge already running with a `--user-data-dir` nobody
+intended (check `ps aux | grep -i "Microsoft Edge" | grep user-data-dir`),
+that IS the bug: quit it and relaunch per the steps above.
+
+Notes:
+- **Edge** honors `--remote-debugging-port` on its default profile.
+  **Chrome 113+ does not** — it silently ignores the flag on the default
+  user-data-dir, so real-profile CDP on Chrome isn't possible; use Edge
+  for real-session work, or give Chrome a dedicated
+  `--user-data-dir=$HOME/.config/chrome-ghax` profile you keep reusing.
+- Scratch profiles are for clean-room testing and extension dev only,
+  and are always opt-in: `ghax attach --launch --browser edge` (uses
+  `~/.ghax/edge-profile`) or `--data-dir <path>`. Never use them as a
+  shortcut to get CDP on the daily driver.
+
+## Command cheat sheet
+
+```bash
+# Connect
+ghax attach                              # reuses running browser on :9222
+ghax attach --launch --browser edge      # launches a scratch-profile Edge
+ghax attach --launch --load-extension ./my-ext --data-dir /tmp/dev-profile
+                                         # launch with an unpacked extension
+                                         # pre-loaded into an isolated profile
+ghax status                              # tabs, targets, ext count
+ghax detach                              # clean daemon shutdown
+
+# Tab work
+ghax tabs                                # list {id, title, url, active}
+ghax tab <id>                            # switch active tab
+ghax goto https://example.com
+ghax text                                # clean page text
+ghax html [<selector>]                   # innerHTML
+
+# Snapshot + interact (the @ref workflow)
+ghax snapshot -i                         # interactive-only a11y tree with @e refs
+ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
+ghax click @e3                           # click by ref
+ghax fill @e5 "hello"                    # React-safe input fill
+ghax press Enter
+
+# Extension work (the unique-to-ghax bit)
+ghax ext list                            # all installed extensions
+ghax ext sw <ext-id> eval "chrome.runtime.getManifest().version"
+ghax ext storage <ext-id> local get      # dump chrome.storage.local
+ghax ext storage <ext-id> local set myKey '{"a":1}'
+ghax ext panel <ext-id> eval "document.title"
+
+# Extension hot-reload — THE flagship for extension devs
+ghax ext hot-reload <ext-id>             # reload SW + re-inject content scripts
+ghax ext hot-reload <ext-id> --verbose   # per-tab injection report
+
+# Real user gestures (for APIs that require them)
+ghax gesture click 100,200               # real Input.dispatchMouseEvent
+ghax gesture dblclick 100,200
+ghax gesture scroll down 400             # mouseWheel event at viewport center
+ghax gesture key Enter
+
+# Orchestrated QA pass
+ghax qa --crawl https://example.com --depth 1 --out /tmp/qa.json
+
+# Profiling (Performance.getMetrics + optional heap)
+ghax profile --duration 5 --heap
+ghax profile --extension <ext-id>
+
+# Live tail (Server-Sent Events — Ctrl-C to stop)
+ghax console --follow
+ghax network --follow
+ghax ext sw <ext-id> logs --follow
+
+# Extra extension surfaces
+ghax ext popup <ext-id> eval "document.title"
+ghax ext options <ext-id> eval "chrome.storage.local.get()"
+ghax ext message <ext-id> '{"type":"ping"}'
+
+# Dev workflow helpers
+ghax ship --message "fix foo"        # typecheck + build + commit + push + PR
+ghax review                           # Claude-ready review prompt on stdout
+ghax canary https://prod.example.com --interval 60 --fail-fast
+ghax diff-state /tmp/before.json /tmp/after.json
+ghax pair status                      # SSH-tunnel instructions
+
+# Logs
+ghax console --errors --last 50
+ghax network --pattern 'api/tickets'
+
+# Assertions + page storage
+ghax is visible @e3                       # exit 0 if visible, 1 if not
+ghax is enabled "button[type=submit]"
+ghax storage local keys
+ghax storage local get auth_token
+ghax storage session set flash "hi"
+
+# Responsive + diff
+ghax viewport 375x667
+ghax responsive /tmp/shot                # mobile + tablet + desktop
+ghax diff https://prod.example.com https://staging.example.com
+
+# Batch + record
+echo '[{"cmd":"goto","args":["https://example.com"]},{"cmd":"snapshot","opts":{"interactive":true}}]' | ghax chain
+ghax record start my-session
+# ... do stuff ...
+ghax record stop
+ghax replay .ghax/recordings/my-session.json
+ghax gif .ghax/recordings/my-session.json /tmp/run.gif
+```
+
+Add `--json` to any command for machine-parseable output.
+
+## Critical recipes
+
+### After `pnpm build` on an extension, push the new code without losing tabs
+
+```bash
+ghax ext hot-reload <ext-id>
+```
+
+This is the whole reason `ghax ext hot-reload` exists. Plain
+`ghax ext reload` fires `chrome.runtime.reload()` — correct, but orphans
+every content script already injected in open tabs (the DOM is still
+there but the SW messaging port is dead). Hot-reload reads the manifest,
+reloads, waits for the SW to restart, then re-injects each declared
+`content_scripts` entry (JS + CSS, respecting `all_frames`) into every
+matching tab. User's tabs + sidepanel + scroll position stay intact.
+
+### Click by intent, not by selector
+
+1. `ghax snapshot -i -a -o /tmp/shot.png` — get a11y tree with @refs and
+   a visual overlay to confirm you're looking at the right element.
+2. Decide which `@e<n>` you want.
+3. `ghax click @e<n>` — the daemon resolves the ref against the last
+   snapshot's locator map.
+
+Refs survive until the next snapshot call; if the DOM changes underneath
+you (route change, dialog opens), re-snapshot.
+
+### Debug a Chrome extension's service worker live
+
+```bash
+# Does the SW think the token is valid?
+ghax ext sw <ext-id> eval "await fetch('/me', {headers:{Authorization:'Bearer '+(await chrome.storage.local.get('token')).token}}).then(r=>r.status)"
+
+# Clear a specific storage key
+ghax ext storage <ext-id> local set someKey null
+```
+
+### Verify a deploy by diffing text against staging
+
+```bash
+ghax diff https://staging.example.com https://prod.example.com
+```
+
+## Shadow DOM
+
+`ghax snapshot -i` (or `-C`) walks open shadow roots and emits `@c<n>`
+refs with Playwright chain selectors (`host >> inner`). Click works
+transparently: `ghax click @c3` resolves through both DOM trees.
+
+Closed shadow roots are deliberately skipped — the DOM itself forbids
+walking them and no automation tool can force entry.
+
+## Gotchas
+
+- **`fill`** uses a native value setter + `input`/`change` dispatch,
+  because plain `page.fill()` trips controlled-input bugs in React. Prefer
+  `ghax fill` over `ghax type` for form inputs.
+- **Side-panel eval** requires the panel to be open. If closed,
+  `ghax gesture click <x,y>` on the extension icon first.
+- **`chrome.storage.local get`** returns JWT / OAuth tokens in plaintext.
+  Don't pipe to shared chat / docs — treat like `localStorage.getItem`.
+- **`hot-reload`** with `--wait` default 5s is fine for most extensions;
+  bump it to 10+ on heavy SWs (large WASM modules, big codebases).
+- Side panel URLs are usually `chrome-extension://<id>/sidepanel.html`
+  but not always — check `ghax ext targets <ext-id>` if `ghax ext panel`
+  can't find one.
+
+## Exit codes
+
+- `0` — success
+- `1` — usage error
+- `2` — not attached (run `ghax attach` first)
+- `3` — target not found (wrong ext-id, wrong tab id)
+- `4` — CDP error
+- `5` — service worker didn't return after hot-reload (bump `--wait`)
+- `6` — re-inject failed on some tabs (details in `--verbose` output)
+- `10` — daemon failed to start
 
 ## Design principles (inherited from gstack, adapted)
 
 1. **Real over sandbox.** Attach to what the dev already has.
 2. **Daemon over one-shot.** Persistent background server, ~60-200ms
    per-command overhead.
-3. **Compiled single binary.** Bun `build --compile`.
+3. **Compiled single binary.**
 4. **`@ref`-driven snapshots.** LLMs click `@e3`, not fragile CSS.
 5. **Zero-config happy path.** `ghax attach` figures it out.
 6. **MIT licensed, open source.**
 
-## Source + docs
+## Full reference
 
-[kepptic/ghax](https://github.com/kepptic/ghax) — see `README.md`,
-`design/plan/`, and `CHANGELOG.md`.
+`ghax --help` prints the command surface.
+[Source](https://github.com/kepptic/ghax) — see
+`design/plan/03-commands.md` for the full planned surface and
+`design/plan/04-roadmap.md` for what's shipped (`ghax ship`, `ghax qa`,
+`ghax review`, `ghax canary`, `ghax profile`, `ghax pair` are all live;
+roadmap tracks what's next).

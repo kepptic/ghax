@@ -255,11 +255,11 @@ The agent reads `llms.txt`, runs the three build commands, verifies the binary, 
 
 ### Claude Code
 
-Two skills ship under [.claude/skills/](./.claude/skills/): `ghax` (router) and `ghax-browse` (flagship with workflow examples). Copy them once:
+One skill ships under [.claude/skills/](./.claude/skills/): `ghax` (full command surface + workflow recipes). Copy it once:
 
 ```bash
 mkdir -p ~/.claude/skills
-cp .claude/skills/ghax.md .claude/skills/ghax-browse.md ~/.claude/skills/
+cp .claude/skills/ghax.md ~/.claude/skills/
 ```
 
 They're picked up automatically on phrases like *"snapshot the dashboard"* or *"hot-reload the extension"*.

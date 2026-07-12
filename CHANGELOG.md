@@ -6,7 +6,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Changed
+- Skill layer consolidated to a **single `ghax` skill** — the thin
+  `ghax` router and the `ghax-browse` flagship are merged into one
+  `.claude/skills/ghax.md` carrying the full command surface, recipes,
+  and triggers. `ghax-browse.md` is removed.
+
+### Docs
+- `ghax` skill: new "Relaunching Edge with CDP — the right way"
+  section. Documents the full relaunch procedure (quit first, relaunch
+  the real profile with `--remote-debugging-port` only) and hard-rules
+  against passing `--user-data-dir` on the daily-driver browser — a
+  scratch dir hijacks the Dock icon and makes the user's extensions and
+  sign-ins appear to vanish (2026-07-12 `/tmp/edge-dag` incident).
+  Includes detection (`ps aux | grep user-data-dir`) and recovery steps,
+  plus the Chrome-113+-vs-Edge default-profile CDP caveat.
 
 ## [0.4.4] - 2026-07-10
 ### Added

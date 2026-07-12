@@ -14,7 +14,7 @@ conduct, PR style, issue reporting).
 ghax is a CLI browser-automation tool that **attaches to the user's real
 running Chrome or Edge via CDP**. Not a sandboxed browser — the user's own
 session, with auth, extensions, and open tabs intact. Plus a Claude Code
-skill layer (`/kepptic-ghax` router + `/kepptic-ghax-browse` main skill).
+skill (`/kepptic-ghax` — single skill, full command surface + recipes).
 
 For the full architecture see [ARCHITECTURE.md](./ARCHITECTURE.md). For the
 "why" behind each design decision see
