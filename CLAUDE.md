@@ -206,9 +206,11 @@ npm run test:benchmark        # per-command latency hasn't regressed
 ```
 
 The smoke test requires a Chromium-family browser on
-`--remote-debugging-port=9222`. If you don't have one running, either
-launch Edge/Chrome with that flag or the smoke will abort at the first
-attach.
+`--remote-debugging-port=9222`. If you don't have one running, launch
+one with `ghax attach --launch` (or manually with BOTH
+`--remote-debugging-port=9222` and a non-default `--user-data-dir`) or
+the smoke will abort at the first attach. Just the port flag alone no
+longer works — Edge 150+/Chrome 136+ ignore it on the default profile.
 
 `GHAX_BIN=./target/release/ghax npm run test:smoke` runs the smoke
 suite against the Rust binary — useful for verifying parity.

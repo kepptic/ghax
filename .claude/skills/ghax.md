@@ -1,22 +1,25 @@
 ---
 name: ghax
-description: Drive the user's real running Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. ghax is the open-source developer toolkit that attaches to the user's REAL environment (real browser, real auth, real extensions) instead of sandboxing. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a SaaS dashboard that's already logged in. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
+description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP; the user's live session is driven via the Claude-in-Chrome extension, and ghax drives fresh user-approved instances. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
 ---
 
 # Skill: ghax
 
 `ghax` is G's open-source developer toolkit — CLI tools (and this Claude
 Code skill) that attach to the user's real working environment rather
-than sandboxing. The flagship is browser driving: attach to the user's
-real Chrome or Edge via CDP. Unlike sandboxed browsers (gstack browse,
-playwright-cli), ghax reaches the user's actual session — real auth,
-real extensions, real SSO cookies — and exposes MV3 internals that no
-other tool surfaces cleanly.
+than sandboxing. The flagship is browser driving over CDP: @ref
+snapshots, MV3 extension internals, real gestures, console/network
+capture — things sandboxed tools don't surface cleanly.
+
+**Since Edge 150 / Chrome 136 the user's real (default-profile) browser
+cannot expose CDP** — see "Browser control model" below before doing
+anything. Short version: the user's live session is driven via the
+Claude-in-Chrome extension; ghax drives fresh, user-approved instances.
 
 ## When to reach for ghax
 
-- The user says **"attach"**, **"use my browser"**, **"real edge"**, or
-  points at a SaaS dashboard that's already logged in.
+- The user says **"attach"** or approves launching a browser instance
+  for automation work.
 - They just ran `pnpm build` / `npm run build` on a **Chrome extension**
   target. ghax is the only tool that can hot-reload the extension AND
   re-inject content scripts into every open matching tab without
@@ -33,11 +36,15 @@ other tool surfaces cleanly.
 
 ## When NOT to reach for ghax
 
+- The task needs the **user's real logged-in session** (their open
+  tabs, real SSO cookies, a dashboard they're signed into) → drive the
+  existing browser via the **Claude-in-Chrome extension**
+  (`mcp__claude-in-chrome__*` tools). CDP can't reach the real profile
+  anymore — see "Browser control model" below.
 - Quick one-off headless testing → use **gstack browse** (`$B`).
 - Programmatic test suites, tracing, video → **playwright-cli**.
-- The user doesn't have Edge/Chrome running with CDP enabled and doesn't
-  want to relaunch → fall back to gstack browse with a saved-cookies
-  import.
+- No CDP instance is running and the user doesn't approve launching
+  one → fall back to gstack browse with a saved-cookies import.
 
 ## Prerequisites
 
@@ -61,65 +68,64 @@ curl -s http://127.0.0.1:9222/json/version | head -3
 
 If nothing responds, follow the relaunch procedure below.
 
-## Getting CDP on Edge — the reality since Edge 150
+## Browser control model since Edge 150 / Chrome 136
 
 **CDP on the default (real) profile is no longer possible.** Edge 150
-(and Chrome 136+) implement Chromium's remote-debugging hardening:
+and Chrome 136+ implement Chromium's remote-debugging hardening:
 `--remote-debugging-port` is silently ignored unless `--user-data-dir`
 points at a **non-default** directory. Verified 2026-07-12 on Edge
 150.0.4078.65: no `DevToolsActivePort` file, nothing listens, no error
 printed. There is no escape hatch — the `RemoteDebuggingAllowed` policy
-does not bypass it and the `DevToolsDebuggingRestrictions` feature flag
-has been removed. Don't waste a session rediscovering this.
+does not bypass it, the `DevToolsDebuggingRestrictions` feature flag
+has been removed, and cloning the real profile into a custom data dir
+loses every cookie and saved password to per-data-dir encryption
+(also verified 2026-07-12). Don't waste a session rediscovering any of
+this.
 
-The blessed setup is a **persistent automation data dir**:
+So there are two lanes; pick by what the task needs:
+
+**Lane 1 — the user's existing (real) Edge session** → drive it through
+the **Claude-in-Chrome extension** (`mcp__claude-in-chrome__*` tools).
+The extension runs inside the real profile and uses `chrome.debugger`,
+which the socket restriction doesn't touch — it is now the *only* way
+to reach real auth, real SSO cookies, and the user's open tabs. This
+supersedes older guidance that called those MCP tools a last resort.
+
+**Lane 2 — ghax / CDP work** (a11y snapshots with @refs, extension
+hot-reload dev loops, perf capture, network/console tailing, QA
+crawls) → **ask the user first**, then launch a fresh, empty instance:
 
 ```bash
-# 1. Quit any prior CDP instance if you're restarting it:
-pkill -f "user-data-dir=$HOME/Library/Application Support/Microsoft Edge CDP"
-
-# 2. Launch the automation browser:
-/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/Library/Application Support/Microsoft Edge CDP" &
-
-# 3. Verify, then attach:
-curl -s http://127.0.0.1:9222/json/version | head -3
-ghax attach
+ghax attach --launch --browser edge   # scratch profile ~/.ghax/edge-profile
+curl -s http://127.0.0.1:9222/json/version | head -3   # verify
 ```
+
+The scratch profile persists between runs but holds no personal data.
+Use `--data-dir <path>` for a task-specific dir, `--load-extension` to
+pre-load an unpacked extension for dev work.
 
 Rules and caveats:
 
-- **The data dir must be persistent** — never `/tmp` (wiped on reboot;
-  the 2026-07-12 `/tmp/edge-dag` incident). The canonical location on
-  this machine is `~/Library/Application Support/Microsoft Edge CDP`.
-- **You cannot clone sessions in from the real profile.** The hardening
-  encrypts cookies/passwords with a per-data-dir key; a byte-for-byte
-  copy of the real profile keeps extensions, favorites, history, and
-  settings but every session and saved password is undecryptable
-  (verified 2026-07-12). Sign the automation profile into Edge sync
-  once — extensions/favorites/passwords sync down; site logins are
-  done manually once and persist in this dir thereafter.
-- **Dock-icon hijack:** while a custom-data-dir instance is the only
-  Edge running, the Dock icon and `open -a "Microsoft Edge"` open
-  windows in the *automation* profile — to the user it looks like
-  their extensions and sign-ins vanished. It isn't data loss. If the
-  user reports a "blank" Edge, check
-  `ps aux | grep -i "Microsoft Edge" | grep user-data-dir` and make
-  sure their normal (no-flags) Edge is running too.
-- **Never launch the user's daily-driver Edge with a `--user-data-dir`
-  it didn't have.** The real profile stays flag-free; CDP lives only in
-  the dedicated automation dir.
+- **Never point CDP at the real profile and never give the daily-driver
+  Edge a `--user-data-dir` it didn't have.** The real Edge stays
+  flag-free; ghax instances are always separate.
+- **Launching a new instance requires user approval** — it spawns a
+  visible second browser on their machine. Ask, unless they already
+  told you to.
+- **Dock-icon hijack:** if a custom-data-dir instance is the only Edge
+  running, the Dock icon and `open -a "Microsoft Edge"` open windows
+  in the *automation* profile — to the user it looks like their
+  extensions and sign-ins vanished (2026-07-12 `/tmp/edge-dag`
+  incident). It isn't data loss. If the user reports a "blank" Edge,
+  check `ps aux | grep -i "Microsoft Edge" | grep user-data-dir` and
+  make sure their normal (no-flags) Edge is running too.
 - Quitting/killing any Edge instance closes its tabs — **ask first**
   unless the user already told you to restart it.
-- Chrome behaves the same (since 136); if you must use Chrome, give it
-  its own persistent `--user-data-dir=$HOME/.config/chrome-ghax`.
-- Ephemeral scratch profiles for clean-room testing and extension dev
-  remain opt-in via `ghax attach --launch --browser edge` (uses
-  `~/.ghax/edge-profile`) or `--data-dir <path>`.
-- When the user asks for "my real session" on a site the automation
-  profile isn't logged into: log in there once (it persists), or fall
-  back to gstack browse with saved `.auth/` cookies.
+- Custom data dirs must never live in `/tmp` (wiped on reboot).
+- If a ghax task needs a logged-in session (SaaS QA, authed dashboards),
+  prefer Lane 1, or fall back to gstack browse with saved `.auth/`
+  cookies — don't try to log the scratch instance into the user's
+  accounts without asking.
 
 ## Command cheat sheet
 

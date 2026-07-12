@@ -360,25 +360,30 @@ fn launch_instructions(port: u16, browsers: &[BrowserBinary]) -> String {
     {
         let mut lines = vec![
             "No running browser found on CDP port.".to_string(),
+            "NOTE: Edge 150+ and Chrome 136+ ignore --remote-debugging-port on the default profile, so relaunching your normal browser with only that flag will NOT work.".to_string(),
             String::new(),
+            "Recommended: `ghax attach --launch [--browser edge|chrome]` to launch a fresh instance in a scratch profile.".to_string(),
+            String::new(),
+            "Manual alternative — launch with a dedicated profile dir:".to_string(),
         ];
         for b in browsers {
+            let profile_dir = profile_dir_for(&b.kind);
             lines.push(format!("  # {}", b.label));
             lines.push(format!(
-                "  \"{}\" --remote-debugging-port={} &",
+                "  \"{}\" --remote-debugging-port={} --user-data-dir=\"{}\" &",
                 b.path.display(),
-                port
+                port,
+                profile_dir.display()
             ));
             lines.push(String::new());
         }
-        lines.push("Or run `ghax attach --launch [--browser edge|chrome]` to let ghax launch one in a scratch profile.".to_string());
         return lines.join("\n");
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = browsers; // silence unused warning on non-mac
         format!(
-            "No running browser on :{port}. Launch Chrome/Edge with --remote-debugging-port={port}, or use 'ghax attach --launch'."
+            "No running browser on :{port}. NOTE: Edge 150+/Chrome 136+ ignore --remote-debugging-port on the default profile, so relaunching your normal browser with only that flag will NOT work. Recommended: 'ghax attach --launch [--browser edge|chrome]'. Manual alternative: launch with both --remote-debugging-port={port} and --user-data-dir=\"$HOME/.ghax/<kind>-profile\"."
         )
     }
 }

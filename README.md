@@ -76,13 +76,25 @@ Ensure `~/.local/bin` is on `PATH`. Uninstall: `npm run uninstall-link`.
 
 ## Quickstart
 
-Launch Chrome or Edge with CDP enabled:
+Launch Chrome or Edge with CDP enabled. Since Edge 150 / Chrome 136,
+`--remote-debugging-port` is silently ignored on the default profile
+(Chromium's remote-debugging hardening), so a `--user-data-dir` pointing
+at a non-default directory is always required — see Browser
+compatibility below. The easiest path is to let ghax launch one:
 
 ```bash
-# macOS — Edge
-"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --remote-debugging-port=9222 &
+ghax attach --launch                 # picks Edge/Chrome, scratch profile
+ghax attach --launch --browser edge  # or pick explicitly
+```
 
-# macOS — Chrome (needs an explicit profile dir — see Browser compatibility below)
+Or launch manually:
+
+```bash
+# macOS — Edge or Chrome (both need the explicit profile dir)
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/edge-ghax" &
+
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --remote-debugging-port=9222 \
   --user-data-dir="$HOME/.config/chrome-ghax" &
@@ -90,19 +102,18 @@ Launch Chrome or Edge with CDP enabled:
 
 ```powershell
 # Windows — Edge
-Start-Process "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" -ArgumentList "--remote-debugging-port=9222"
+Start-Process "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" `
+  -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$env:LOCALAPPDATA\edge-ghax"
 
-# Windows — Chrome (needs an explicit profile dir — see Browser compatibility below)
+# Windows — Chrome
 Start-Process "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe" `
   -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=$env:LOCALAPPDATA\chrome-ghax"
 ```
 
 ```bash
-# Linux — Edge or Chromium
-microsoft-edge --remote-debugging-port=9222 &
-chromium --remote-debugging-port=9222 &
-
-# Linux — Chrome (needs an explicit profile dir — see Browser compatibility below)
+# Linux — Edge, Chromium, or Chrome
+microsoft-edge --remote-debugging-port=9222 --user-data-dir="$HOME/.config/edge-ghax" &
+chromium --remote-debugging-port=9222 --user-data-dir="$HOME/.config/chromium-ghax" &
 google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.config/chrome-ghax" &
 ```
 
@@ -149,9 +160,9 @@ Three modes, one flag each.
 
 | Mode | How | When |
 |------|-----|------|
-| **Existing browser session** | Launch your browser with `--remote-debugging-port=9222`, then `ghax attach` | Default. Attaches to the running Chromium process. |
-| **Dedicated profile** | Same as above, but add `--user-data-dir=<path>` to the launch command | Keep ghax traffic separate from other sessions. |
-| **Scratch profile** | `ghax attach --launch` (add `--headless` for no window) | CI-style runs, reproducible environments, ephemeral state. |
+| **Scratch profile** | `ghax attach --launch` (add `--headless` for no window) | Default. Fresh instance, reproducible environments, CI-style runs. |
+| **Dedicated profile** | Launch with `--remote-debugging-port=9222` **and** `--user-data-dir=<persistent path>`, then `ghax attach` | A reusable automation profile that accumulates logins/state across sessions. |
+| **Existing (default-profile) session** | Not possible on Edge 150+/Chrome 136+ — the CDP flag is ignored on the default data dir | Use an extension-based bridge (e.g. Claude-in-Chrome) for the real session. |
 
 ---
 
@@ -290,9 +301,9 @@ The agent reads the memory file at session start and knows when to reach for gha
 
 Chromium-family only: Edge, Chrome, Chromium, Brave, Arc. Firefox and Safari are out of scope (CDP-only).
 
-Edge honors `--remote-debugging-port` on its default profile without extra flags.
+Chrome 136+ and Edge 150+ silently ignore `--remote-debugging-port` on the default user-data-dir ([Chromium's remote-debugging hardening](https://developer.chrome.com/blog/remote-debugging-port)) — no error, no `DevToolsActivePort` file, nothing listens. There is no policy or flag bypass, and copying the default profile into another directory doesn't carry sessions over (cookies/passwords are encrypted per data dir). Always pass `--user-data-dir=<path>` explicitly (the quickstart above shows this), or use `ghax attach --launch`.
 
-Chrome 113+ silently ignores `--remote-debugging-port` on the default user-data-dir. Always pass `--user-data-dir=<path>` explicitly on Chrome launch (the quickstart above shows this).
+To drive a user's *real* logged-in session, use a browser-extension-based bridge (e.g. Claude-in-Chrome) — extensions use `chrome.debugger` inside the profile, which the socket restriction doesn't affect.
 
 Both browsers set `navigator.webdriver = true` when launched with `--remote-debugging-port`. Add `--disable-blink-features=AutomationControlled` to suppress that bit if a page you're automating treats it as a bot signal. Full notes: [CONTRIBUTING.md → Known browser quirks](./CONTRIBUTING.md#known-browser-quirks).
 

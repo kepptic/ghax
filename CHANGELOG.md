@@ -6,6 +6,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `ghax attach`'s no-CDP-found hint no longer tells you to relaunch your
+  normal browser with just `--remote-debugging-port`. Edge 150+/Chrome
+  136+ silently ignore that flag on the default profile, so the old
+  advice never worked. The hint now recommends `ghax attach --launch`
+  and, for the manual path, shows launching with both
+  `--remote-debugging-port` and `--user-data-dir` pointed at the same
+  scratch profile dir ghax itself uses (`crates/cli/src/attach.rs`).
+
 ### Changed
 - Skill layer consolidated to a **single `ghax` skill** — the thin
   `ghax` router and the `ghax-browse` flagship are merged into one
@@ -13,17 +22,21 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and triggers. `ghax-browse.md` is removed.
 
 ### Docs
-- `ghax` skill: new "Getting CDP on Edge — the reality since Edge 150"
-  section. Edge 150 / Chrome 136+ silently ignore
-  `--remote-debugging-port` on the default profile (Chromium
-  remote-debugging hardening) — no policy or feature-flag bypass
-  exists, and cloning the real profile into a custom data dir loses
-  all cookies/passwords to per-data-dir encryption (both verified
-  empirically 2026-07-12). Documents the blessed setup — a persistent
-  automation data dir signed into browser sync — plus the Dock-icon
-  hijack failure mode (`/tmp/edge-dag` incident: scratch-profile Edge
-  makes the user's extensions/sign-ins appear to vanish), detection
-  via `ps aux | grep user-data-dir`, and never-`/tmp` placement rules.
+- `ghax` skill: new "Browser control model since Edge 150 / Chrome 136"
+  section. Those versions silently ignore `--remote-debugging-port` on
+  the default profile (Chromium remote-debugging hardening) — no policy
+  or feature-flag bypass exists, and cloning the real profile into a
+  custom data dir loses all cookies/passwords to per-data-dir
+  encryption (both verified empirically 2026-07-12). Documents the
+  two-lane model: the user's real session is driven via a browser
+  extension (e.g. Claude-in-Chrome, whose `chrome.debugger` access the
+  socket restriction doesn't touch), while ghax drives fresh
+  user-approved instances via `ghax attach --launch`. Also covers the
+  Dock-icon hijack failure mode (`/tmp/edge-dag` incident:
+  scratch-profile Edge makes the user's extensions/sign-ins appear to
+  vanish), detection via `ps aux | grep user-data-dir`, and
+  never-`/tmp` placement rules. README quickstart and launch-mode docs
+  updated to match.
 
 ## [0.4.4] - 2026-07-10
 ### Added
