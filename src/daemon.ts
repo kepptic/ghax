@@ -2,7 +2,9 @@
  * ghax daemon — persistent Node http server.
  *
  * Owns:
- *   - Playwright Browser (connected via chromium.connectOverCDP)
+ *   - Playwright Browser (connected via chromium.connectOverCDP) — OR, in
+ *     bridge mode (see below), a Bridge relaying CDP commands through an
+ *     MV3 extension's chrome.debugger API instead.
  *   - Raw CDP pool for service workers / sidepanels / browser-level
  *   - Active tab pointer + last-snapshot ref map
  *   - Circular buffers for console + network
@@ -16,11 +18,27 @@
  *   - Exits on SIGINT/SIGTERM cleanly
  *
  * HTTP surface:
- *   GET  /health      → quick liveness probe
- *   POST /rpc         → { cmd, args?, opts? } → { ok, data } | { ok:false, error }
- *   POST /shutdown    → exits
+ *   GET  /health         → quick liveness probe
+ *   POST /rpc            → { cmd, args?, opts? } → { ok, data } | { ok:false, error }
+ *   GET  /bridge-status   → bridge mode only: { connected, extensionInfo? }
+ *   POST /shutdown        → exits
  *
  * Single-user localhost daemon, bound to 127.0.0.1. No auth in v0.1.
+ *
+ * ── Bridge mode (experimental, `ghax attach --extension`) ──────────────
+ *
+ * Since Edge 150 / Chrome 136, `--remote-debugging-port` is silently
+ * ignored on the browser's default profile, so `chromium.connectOverCDP`
+ * can no longer reach the user's real, already-logged-in session — only a
+ * scratch profile ghax launches itself. When `GHAX_BRIDGE=1` is set, this
+ * daemon skips `connectOverCDP` entirely and instead starts a `Bridge`
+ * (see bridge.ts) — a small WebSocket server an MV3 extension connects to,
+ * relaying CDP commands via `chrome.debugger` (which the socket
+ * restriction does not affect). Only `goto`/`eval`/`text` are wired to
+ * this path today (see the `ctx.bridgeMode` branches in those three
+ * handlers below) — every other verb still assumes a Playwright `Browser`
+ * and will error cleanly (not crash) if invoked in bridge mode, since
+ * `ctx.browser` is `null` there.
  */
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
@@ -30,6 +48,7 @@ import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from
 import { SourceMapCache, resolveStack } from './source-maps';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
+import { Bridge, bridgeEvaluate, bridgeGoto, bridgeText, type ControlTarget } from './bridge';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
@@ -77,11 +96,17 @@ interface DownloadEntry {
 }
 
 interface Ctx {
-  browser: Browser;
-  context: BrowserContext;
+  // `null` in bridge mode (see the module doc comment above) — there is no
+  // Playwright Browser/BrowserContext when the daemon is relaying CDP
+  // through the extension instead of `connectOverCDP`.
+  browser: Browser | null;
+  context: BrowserContext | null;
   cdpHttpUrl: string;
   cdpBrowserUrl: string;
   browserKind: string;
+  // Bridge-mode fields — see bridge.ts and the module doc comment above.
+  bridgeMode: boolean;
+  bridge: Bridge | null;
   pool: CdpPool;
   consoleBuf: CircularBuffer<ConsoleEntry>;
   networkBuf: CircularBuffer<NetworkEntry>;
@@ -119,6 +144,11 @@ function register(name: string, fn: Handler) {
 // ─── Page / target helpers ─────────────────────────────────────
 
 async function allPages(ctx: Ctx): Promise<Page[]> {
+  // Bridge mode has no Playwright Browser to enumerate — every non-bridge
+  // verb that reaches here (anything but goto/eval/text) will surface as
+  // "No tabs open in attached browser" via activePage() below, which is an
+  // honest error for a walking-skeleton prototype that only wires 3 verbs.
+  if (!ctx.browser) return [];
   // connectOverCDP gives back one default context; pages are spread across
   // the browser contexts returned by browser.contexts().
   const pages: Page[] = [];
@@ -580,10 +610,12 @@ register('find', async (ctx, args) => {
 });
 
 register('newWindow', async (ctx, args) => {
+  const browser = ctx.browser;
+  if (!browser) throw new Error('newWindow: not available in bridge mode');
   const url = args[0] ? String(args[0]) : 'about:blank';
-  const context = ctx.browser.contexts()[0];
+  const context = browser.contexts()[0];
   if (!context) throw new Error('newWindow: no browser context available');
-  const cdpSession = await ctx.browser.newBrowserCDPSession();
+  const cdpSession = await browser.newBrowserCDPSession();
   try {
     // Race-free: subscribe to the "page" event BEFORE firing createTarget.
     // Playwright surfaces the new page as soon as the target becomes
@@ -655,6 +687,10 @@ register('downloads', async (ctx, _args, opts) => {
 register('goto', async (ctx, args) => {
   const url = String(args[0] ?? '');
   if (!url) throw new Error('Usage: goto <url>');
+  if (ctx.bridgeMode) {
+    if (!ctx.bridge) throw new Error('bridge not initialized');
+    return await bridgeGoto(ctx.bridge, url);
+  }
   const page = await activePage(ctx);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   return { url: page.url(), title: await page.title().catch(() => '') };
@@ -689,11 +725,17 @@ register('reload', async (ctx) => {
 register('eval', async (ctx, args, opts) => {
   const js = String(args[0] ?? '');
   if (!js) throw new Error('Usage: eval <js>');
-  const page = await activePage(ctx);
-  // Navigation in flight when eval lands will destroy the execution
-  // context mid-call. Wait for the next load state once and retry before
-  // giving up — matches what a human would do manually.
-  const result = await evalWithNavRetry(page, js);
+  let result: unknown;
+  if (ctx.bridgeMode) {
+    if (!ctx.bridge) throw new Error('bridge not initialized');
+    result = await bridgeEvaluate(ctx.bridge, js);
+  } else {
+    const page = await activePage(ctx);
+    // Navigation in flight when eval lands will destroy the execution
+    // context mid-call. Wait for the next load state once and retry before
+    // giving up — matches what a human would do manually.
+    result = await evalWithNavRetry(page, js);
+  }
   // --max-bytes caps the stringified result so an accidental
   // `document.body.innerText` on a heavy page can't blow out the
   // LLM operator's context window. Measured in UTF-8 bytes, not
@@ -785,7 +827,6 @@ register('try', async (ctx, args, opts) => {
 });
 
 register('text', async (ctx, _args, opts) => {
-  const page = await activePage(ctx);
   const selector = (opts.selector as string | undefined) ?? null;
   // --skip/--length paginate the returned string. The daemon still
   // pulls full innerText — the win is on the wire, which is where
@@ -797,20 +838,51 @@ register('text', async (ctx, _args, opts) => {
   const lengthRaw = opts.length !== undefined ? Number(opts.length) : null;
   const length = lengthRaw !== null && Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
   let text: string;
-  if (selector) {
-    text = await page.locator(selector).first().innerText();
+  if (ctx.bridgeMode) {
+    if (!ctx.bridge) throw new Error('bridge not initialized');
+    if (selector) throw new Error('--selector is not supported yet in bridge mode');
+    text = await bridgeText(ctx.bridge);
   } else {
-    // Same nav-in-flight retry as `eval` — heavy pages with still-running
-    // XHR-driven navigation will trip `Execution context was destroyed`
-    // the first time around; waiting for the next load event and
-    // retrying once rescues the operator from a spurious failure.
-    text = (await evalWithNavRetry(page, 'document.body.innerText')) as string;
+    const page = await activePage(ctx);
+    if (selector) {
+      text = await page.locator(selector).first().innerText();
+    } else {
+      // Same nav-in-flight retry as `eval` — heavy pages with still-running
+      // XHR-driven navigation will trip `Execution context was destroyed`
+      // the first time around; waiting for the next load event and
+      // retrying once rescues the operator from a spurious failure.
+      text = (await evalWithNavRetry(page, 'document.body.innerText')) as string;
+    }
   }
   if (skip > 0 || length !== null) {
     const end = length !== null ? skip + length : undefined;
     text = text.slice(skip, end);
   }
   return text;
+});
+
+// Bridge-mode-only: point the extension at a tab without a popup click.
+// Backs `ghax attach --extension --control-active` (via env) and the
+// standalone `ghax bridge control [--active | --tab-id N | --stop]`.
+register('bridge.control', async (ctx, _args, opts) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new Error('bridge.control requires bridge mode — start with `ghax attach --extension`');
+  }
+  const mode = String(opts.mode ?? '');
+  let target: ControlTarget;
+  if (mode === 'active') {
+    target = { action: 'control-active' };
+  } else if (mode === 'stop') {
+    target = { action: 'stop' };
+  } else if (mode === 'tab') {
+    const tabId = Number(opts.tabId ?? opts['tab-id']);
+    if (!Number.isFinite(tabId)) throw new Error('bridge.control tab mode requires --tab-id <n>');
+    target = { action: 'control-tab', tabId };
+  } else {
+    throw new Error(`bridge.control: unknown mode '${mode}' (expected active | tab | stop)`);
+  }
+  const ack = await ctx.bridge.sendControl(target);
+  return { ok: ack.ok, tabId: ack.tabId };
 });
 
 register('html', async (ctx, args) => {
@@ -2846,7 +2918,13 @@ async function main() {
   // We treat it as a simple glob: '*' → any, otherwise the pattern is
   // converted to a RegExp with * → .* for matching URL substrings.
   const captureBodiesPattern = process.env.GHAX_CAPTURE_BODIES ?? null;
-  if (!cdpHttpUrl || !cdpBrowserUrl) {
+  // Bridge mode (`ghax attach --extension`) — see the module doc comment
+  // and bridge.ts. No CDP endpoint is required in this mode: there is no
+  // `connectOverCDP` at all, so GHAX_CDP_HTTP_URL/GHAX_CDP_BROWSER_URL are
+  // only mandatory on the normal path.
+  const bridgeMode = process.env.GHAX_BRIDGE === '1';
+  const bridgePort = Number(process.env.GHAX_BRIDGE_PORT) || 9223;
+  if (!bridgeMode && (!cdpHttpUrl || !cdpBrowserUrl)) {
     console.error('ghax daemon: missing GHAX_CDP_HTTP_URL / GHAX_CDP_BROWSER_URL env');
     process.exit(4);
   }
@@ -2860,7 +2938,7 @@ async function main() {
       // best-effort
     }
   };
-  log(`daemon starting, cdpHttp=${cdpHttpUrl}`);
+  log(bridgeMode ? `daemon starting in bridge mode, wsPort=${bridgePort}` : `daemon starting, cdpHttp=${cdpHttpUrl}`);
 
   // Defense-in-depth: a stray async throw (e.g. inside a CDP event handler,
   // where there's no promise for the caller to await) must not silently kill
@@ -2875,32 +2953,60 @@ async function main() {
     log(`UNCAUGHT EXCEPTION: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
   });
 
-  const browser = await chromium.connectOverCDP(cdpHttpUrl);
-  const contexts = browser.contexts();
-  const context = contexts[0] ?? (await browser.newContext());
+  let browser: Browser | null = null;
+  let context: BrowserContext | null = null;
+  let bridge: Bridge | null = null;
 
-  // If the user quits the browser (or it crashes) while we're attached,
-  // Playwright fires `disconnected` on the Browser object. Without this
-  // listener, subsequent commands throw a raw "Target page has been closed"
-  // stack trace. Here we catch the event and shut the daemon cleanly — the
-  // state file gets cleared, and the next `ghax attach` starts fresh.
-  browser.on('disconnected', () => {
-    log('browser disconnected — shutting down daemon');
-    // shutdown() is defined further down in the outer scope via closure;
-    // call it via setImmediate to avoid running inside a Playwright event
-    // handler which can re-enter odd code paths during teardown.
-    setImmediate(() => {
-      void shutdown('browser-disconnected');
+  if (bridgeMode) {
+    bridge = new Bridge(bridgePort, log);
+    log(`bridge: listening on ws://127.0.0.1:${bridgePort} — waiting for extension`);
+    bridge.on('hello', (info: { agent?: string; version?: string }) => {
+      log(`bridge: extension connected (${info.agent ?? 'unknown'} v${info.version ?? '?'})`);
     });
-  });
+    bridge.on('controlled', (tabId: number | null) => {
+      log(`bridge: controlled tab = ${tabId ?? 'none'}`);
+    });
+    bridge.on('disconnect', () => {
+      log('bridge: extension disconnected — waiting for reconnect');
+    });
+    // `ghax attach --extension --control-active` sets this so the extension
+    // drives the browser's active tab immediately on connect — no popup
+    // click. Stored (not sent) here; the Bridge's `hello` handler sends it
+    // once the extension is live, and re-asserts it on every reconnect.
+    if (process.env.GHAX_BRIDGE_CONTROL === 'active') {
+      bridge.setDesiredControl({ action: 'control-active' });
+      log('bridge: will control the active tab on connect (--control-active)');
+    }
+  } else {
+    browser = await chromium.connectOverCDP(cdpHttpUrl!);
+    const contexts = browser.contexts();
+    context = contexts[0] ?? (await browser.newContext());
+
+    // If the user quits the browser (or it crashes) while we're attached,
+    // Playwright fires `disconnected` on the Browser object. Without this
+    // listener, subsequent commands throw a raw "Target page has been closed"
+    // stack trace. Here we catch the event and shut the daemon cleanly — the
+    // state file gets cleared, and the next `ghax attach` starts fresh.
+    browser.on('disconnected', () => {
+      log('browser disconnected — shutting down daemon');
+      // shutdown() is defined further down in the outer scope via closure;
+      // call it via setImmediate to avoid running inside a Playwright event
+      // handler which can re-enter odd code paths during teardown.
+      setImmediate(() => {
+        void shutdown('browser-disconnected');
+      });
+    });
+  }
 
   const ctx: Ctx = {
     browser,
     context,
-    cdpHttpUrl,
-    cdpBrowserUrl,
+    cdpHttpUrl: cdpHttpUrl ?? '',
+    cdpBrowserUrl: cdpBrowserUrl ?? '',
     browserKind,
-    pool: new CdpPool(cdpHttpUrl),
+    bridgeMode,
+    bridge,
+    pool: new CdpPool(cdpHttpUrl ?? ''),
     consoleBuf: new CircularBuffer<ConsoleEntry>(BUFFER_CAP),
     networkBuf: new CircularBuffer<NetworkEntry>(BUFFER_CAP),
     sourceMapCache: new SourceMapCache(),
@@ -2920,25 +3026,27 @@ async function main() {
     browserSession: null,
   };
 
-  // Undo Playwright's download hijack. connectOverCDP has, by now, issued
-  // `Browser.setDownloadBehavior` (allowAndName → its temp artifacts dir).
-  // Open our own browser-level CDP session, re-assert `behavior: 'allow'`
-  // with downloadPath = the real Downloads dir, and keep it alive to receive
-  // downloadWillBegin / downloadProgress events.
-  try {
-    ctx.browserSession = await browser.newBrowserCDPSession();
-    wireDownloadEvents(ctx);
-    await assertDownloadBehavior(ctx);
-    log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
-  } catch (err) {
-    log(`WARN: failed to set download behavior: ${String(err)}`);
-  }
+  if (!bridgeMode && browser) {
+    // Undo Playwright's download hijack. connectOverCDP has, by now, issued
+    // `Browser.setDownloadBehavior` (allowAndName → its temp artifacts dir).
+    // Open our own browser-level CDP session, re-assert `behavior: 'allow'`
+    // with downloadPath = the real Downloads dir, and keep it alive to receive
+    // downloadWillBegin / downloadProgress events.
+    try {
+      ctx.browserSession = await browser.newBrowserCDPSession();
+      wireDownloadEvents(ctx);
+      await assertDownloadBehavior(ctx);
+      log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
+    } catch (err) {
+      log(`WARN: failed to set download behavior: ${String(err)}`);
+    }
 
-  // Instrument the first page now so console/network start capturing immediately.
-  const pages = await allPages(ctx);
-  if (pages.length > 0) {
-    ctx.activePageId = await pageTargetId(pages[0]);
-    await instrumentPage(ctx, pages[0]);
+    // Instrument the first page now so console/network start capturing immediately.
+    const pages = await allPages(ctx);
+    if (pages.length > 0) {
+      ctx.activePageId = await pageTargetId(pages[0]);
+      await instrumentPage(ctx, pages[0]);
+    }
   }
 
   let lastActivity = Date.now();
@@ -2974,6 +3082,19 @@ async function main() {
         pid: process.pid,
         uptimeMs: Date.now() - ctx.startedAt,
         browserKind,
+      });
+      return;
+    }
+    // Bridge-mode-only: `ghax attach --extension` polls this until the
+    // extension's `hello` handshake lands (see attach.rs). Harmless (and
+    // always `connected:false`) outside bridge mode.
+    if (url === '/bridge-status' && req.method === 'GET') {
+      json(res, 200, {
+        ok: true,
+        bridgeMode,
+        connected: ctx.bridge?.connected ?? false,
+        controlledTabId: ctx.bridge?.controlledTabId ?? null,
+        extensionInfo: ctx.bridge?.extensionInfo ?? null,
       });
       return;
     }
@@ -3089,7 +3210,7 @@ async function main() {
   const state: DaemonState = {
     pid: process.pid,
     port,
-    browserUrl: cdpBrowserUrl,
+    browserUrl: cdpBrowserUrl ?? `bridge://127.0.0.1:${bridgePort}`,
     browserKind: browserKind as DaemonState['browserKind'],
     attachedAt: new Date().toISOString(),
     cwd: process.cwd(),
@@ -3114,7 +3235,8 @@ async function main() {
     try {
       ctx.pool.close();
       ctx.sourceMapCache.destroy();
-      await browser.close().catch(() => undefined);
+      if (bridge) bridge.close();
+      if (browser) await browser.close().catch(() => undefined);
     } catch {
       // ignore
     }

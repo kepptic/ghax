@@ -6,6 +6,43 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Experimental** `ghax attach --extension` — a walking-skeleton second
+  transport for the "Edge 150+/Chrome 136+ ignore `--remote-debugging-port`
+  on the default profile" problem. Instead of `chromium.connectOverCDP`,
+  the daemon starts in bridge mode (`GHAX_BRIDGE=1`) and opens a localhost
+  WebSocket (`src/bridge.ts`, default `127.0.0.1:9223`, override with
+  `--bridge-port` / `GHAX_BRIDGE_PORT`) that a new unpacked MV3 extension
+  (`extension/`, "ghax bridge") connects to from the real browser and
+  relays CDP commands through via `chrome.debugger` — which the socket
+  restriction does not affect. Only three verbs are wired to this path so
+  far: `ghax goto`, `ghax eval`, `ghax text` (see the `ctx.bridgeMode`
+  branches in `src/daemon.ts`); every other verb still assumes the
+  Playwright/CDP path and errors cleanly if run while attached this way.
+  Load the extension unpacked, click "Control this tab" in its popup, and
+  `ghax attach --extension` prints load-unpacked instructions and polls
+  `/bridge-status` until the extension's `hello` handshake lands (60s
+  timeout). See `extension/README.md` for the full walkthrough and the
+  documented "debugging this browser" banner behavior.
+  - **Self-healing keepalive** — the bridge extension's MV3 service worker
+    would evict after ~30s idle and never recover, dropping the bridge
+    permanently. It now stays alive and reconnects on its own: a
+    `chrome.alarms` keepalive (new `"alarms"` permission) resurrects an
+    evicted worker and reconnects within one alarm period, an
+    application-level `{type:"ping"}`/`{type:"pong"}` every ~15s keeps the
+    socket warm, and `onStartup`/`onInstalled` also kick a connect. The
+    daemon remembers the desired control target and re-asserts it on every
+    reconnect, so control resumes with no user action after an eviction.
+  - **Scriptable activation** — control no longer requires a human popup
+    click. `ghax attach --extension --control-active` drives the browser's
+    active tab (`chrome.tabs.query({active:true,lastFocusedWindow:true})`)
+    the moment the extension connects, and waits until a controlled tab is
+    reported before returning so the first `ghax goto` can't race the
+    handshake. A new `ghax bridge control [--active | --tab-id <n> |
+    --stop]` (re)points the bridge mid-session via a daemon→extension
+    control channel distinct from CDP commands. `/bridge-status` now also
+    reports the controlled tab id.
+
 ### Fixed
 - `ghax attach`'s no-CDP-found hint no longer tells you to relaunch your
   normal browser with just `--remote-debugging-port`. Edge 150+/Chrome

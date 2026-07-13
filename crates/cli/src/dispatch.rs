@@ -42,6 +42,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "attach" => return attach::cmd_attach(&args::parse(rest), cfg),
         "detach" => return attach::cmd_detach(cfg),
         "restart" => return attach::cmd_restart(&args::parse(rest), cfg),
+        "bridge" => return crate::bridge::cmd_bridge(cfg, rest),
         "status" => return small::cmd_status(rest),
         "pair" => return small::cmd_pair(rest),
         "diff-state" => return small::cmd_diff_state(rest),

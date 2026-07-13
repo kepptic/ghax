@@ -9,7 +9,7 @@
   },
   "scripts": {
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
-    "build": "esbuild src/daemon.ts --bundle --platform=node --format=esm --outfile=dist/ghax-daemon.mjs --external:electron --external:chromium-bidi --external:@playwright/test --external:playwright --external:playwright-core --external:source-map --legal-comments=none",
+    "build": "esbuild src/daemon.ts --bundle --platform=node --format=esm --outfile=dist/ghax-daemon.mjs --external:electron --external:chromium-bidi --external:@playwright/test --external:playwright --external:playwright-core --external:source-map --external:ws --legal-comments=none",
     "build:rust": "cargo build --release --manifest-path crates/cli/Cargo.toml",
     "build:all": "npm run build:rust && npm run build",
     "typecheck": "tsc --noEmit",
@@ -25,7 +25,8 @@
   },
   "dependencies": {
     "playwright": "^1.58.2",
-    "source-map": "^0.7.6"
+    "source-map": "^0.7.6",
+    "ws": "^8.18.1"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -56,6 +57,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.25.3",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3"

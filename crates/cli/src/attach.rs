@@ -874,6 +874,43 @@ fn build_daemon_cmd(
     // terminal, insulating the daemon from `kill(-pgid)` group signals and
     // terminal-close SIGHUP alike. Async-signal-safe, so it's fine in the
     // post-fork/pre-exec window.
+    detach_session(&mut cmd);
+
+    cmd
+}
+
+/// `--extension` bridge-mode variant of `build_daemon_cmd`: no CDP endpoint
+/// env vars at all (there is no `connectOverCDP` in this mode) — just
+/// `GHAX_BRIDGE=1` + the port the daemon's WebSocket server should listen
+/// on. `GHAX_BROWSER_KIND` is a display label only in this mode (bridge
+/// mode is browser-agnostic; the daemon never launches or detects one).
+fn build_daemon_cmd_bridge(
+    cfg: &Config,
+    bridge_port: u16,
+    control_active: bool,
+    bundle: &std::path::Path,
+    stderr_file: std::fs::File,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg("--enable-source-maps")
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .env("GHAX_STATE_FILE", cfg.state_file.as_os_str())
+        .env("GHAX_BRIDGE", "1")
+        .env("GHAX_BRIDGE_PORT", bridge_port.to_string())
+        .env("GHAX_BROWSER_KIND", "chrome");
+    if control_active {
+        cmd.env("GHAX_BRIDGE_CONTROL", "active");
+    }
+    detach_session(&mut cmd);
+    cmd
+}
+
+/// Shared setsid pre_exec — see the comment above its call site in
+/// `build_daemon_cmd` for why the daemon needs its own session.
+fn detach_session(cmd: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -890,8 +927,10 @@ fn build_daemon_cmd(
             });
         }
     }
-
-    cmd
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
 }
 
 fn open_stderr_capture(cfg: &Config) -> Result<(std::path::PathBuf, std::fs::File)> {
@@ -912,14 +951,41 @@ fn spawn_daemon(
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
+    run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
+        build_daemon_cmd(cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file)
+    })
+}
 
-    // Up to 2 attempts: initial spawn, then optional bootstrap-and-retry if
-    // the daemon's stderr signals a missing bare-import dep (the BUG-001
-    // case — playwright/source-map not installed beside the bundle).
+/// `ghax attach --extension` variant of `spawn_daemon` — starts the daemon
+/// in bridge mode (`GHAX_BRIDGE=1`) instead of pointing it at a CDP
+/// endpoint. `control_active` maps to `GHAX_BRIDGE_CONTROL=active`, which
+/// makes the daemon drive the browser's active tab as soon as the extension
+/// connects. See `build_daemon_cmd_bridge` and daemon.ts's bridge-mode
+/// branch in `main()`.
+fn spawn_daemon_bridge(cfg: &Config, bridge_port: u16, control_active: bool) -> Result<DaemonState> {
+    ensure_state_dir(cfg)?;
+    let bundle = resolve_daemon_bundle()?;
+    run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
+        build_daemon_cmd_bridge(cfg, bridge_port, control_active, &bundle, stderr_file)
+    })
+}
+
+/// Shared attempt/bootstrap-retry loop used by both `spawn_daemon` (CDP
+/// mode) and `spawn_daemon_bridge` (`--extension` mode): up to 2 attempts —
+/// initial spawn, then an optional bootstrap-and-retry if the daemon's
+/// stderr signals a missing bare-import dep (the BUG-001 case — playwright/
+/// source-map/ws not installed beside the bundle). `build_cmd` receives a
+/// fresh stderr-capture file per attempt and returns the ready-to-spawn
+/// `Command`.
+fn run_spawn_retry_loop(
+    cfg: &Config,
+    bundle: &std::path::Path,
+    mut build_cmd: impl FnMut(std::fs::File) -> std::process::Command,
+) -> Result<DaemonState> {
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..2 {
         let (stderr_path, stderr_file) = open_stderr_capture(cfg)?;
-        let mut cmd = build_daemon_cmd(cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file);
+        let mut cmd = build_cmd(stderr_file);
         let child = cmd.spawn().map_err(|e| {
             anyhow::anyhow!("Failed to spawn daemon (node {bundle:?}): {e}")
         })?;
@@ -959,7 +1025,8 @@ fn spawn_daemon(
 
 /// Drop a minimal package.json + run `npm install` in `dir`. Pulls in every
 /// runtime dep marked external by the daemon's esbuild step (playwright +
-/// source-map). Used by the auto-bootstrap path.
+/// source-map + ws, the last one only exercised by `--extension` bridge
+/// mode). Used by the auto-bootstrap path.
 ///
 /// Versions are read from a sibling `package.json` if one exists (release
 /// archives ship one); otherwise we fall back to compile-time constants
@@ -975,7 +1042,8 @@ fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
   "description": "Sibling deps for ghax-daemon.mjs (auto-bootstrapped by ghax attach)",
   "dependencies": {{
     "playwright": "{PLAYWRIGHT_VERSION}",
-    "source-map": "{SOURCE_MAP_VERSION}"
+    "source-map": "{SOURCE_MAP_VERSION}",
+    "ws": "{WS_VERSION}"
   }}
 }}
 "#
@@ -1002,6 +1070,7 @@ fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
 // package.json is present in the install dir.
 const PLAYWRIGHT_VERSION: &str = "^1.58.2";
 const SOURCE_MAP_VERSION: &str = "^0.7.6";
+const WS_VERSION: &str = "^8.18.1";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // pickEndpoint — mirrors `pickEndpoint` in cli.ts
@@ -1138,6 +1207,11 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         }
         // Stale state file.
         clear_state(cfg);
+    }
+
+    // ── Bridge mode (`--extension`) — no CDP endpoint involved at all. ──────
+    if matches!(parsed.flags.get("extension"), Some(serde_json::Value::Bool(true))) {
+        return cmd_attach_extension(parsed, cfg);
     }
 
     // ── Step 1: find an endpoint ─────────────────────────────────────────────
@@ -1303,6 +1377,185 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         );
     }
     Ok(EXIT_OK)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `ghax attach --extension` — the chrome.debugger bridge (experimental).
+//
+// Since Edge 150 / Chrome 136, `--remote-debugging-port` is silently
+// ignored on the browser's default profile, so nothing above this comment
+// (CDP endpoint scanning, `chromium.connectOverCDP`, browser launching) can
+// reach the user's real, already-logged-in session. This path sidesteps
+// all of that: it starts the daemon in bridge mode (`GHAX_BRIDGE=1`, see
+// bridge.ts + daemon.ts) and waits for the ghax-bridge MV3 extension
+// (`extension/`) to connect over a localhost WebSocket and relay CDP
+// through `chrome.debugger` instead. Only `goto`/`eval`/`text` work this
+// way today — see extension/README.md for the full scope note.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
+    let bridge_port: u16 = parsed
+        .flags
+        .get("bridge-port")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9223);
+    let control_active = matches!(
+        parsed.flags.get("control-active"),
+        Some(serde_json::Value::Bool(true))
+    );
+
+    match resolve_extension_dir() {
+        Some(dir) => println!("ghax bridge (experimental): load unpacked from {}", dir.display()),
+        None => println!(
+            "ghax bridge (experimental): could not auto-locate the extension/ directory.\n  \
+             Load unpacked from the `extension/` directory of your ghax checkout \
+             (or set GHAX_EXTENSION_DIR to point at it)."
+        ),
+    }
+    println!("  1. edge://extensions or chrome://extensions → enable Developer mode → Load unpacked.");
+    if control_active {
+        println!(
+            "  2. Nothing else to click — with --control-active the daemon drives the browser's active tab as soon as the extension connects."
+        );
+    } else {
+        println!("  2. Click the \"ghax bridge\" toolbar icon → \"Control this tab\" on the tab you want ghax to drive.");
+    }
+    println!(
+        "Starting daemon in bridge mode — waiting for the extension on ws://127.0.0.1:{bridge_port} (up to 60s)..."
+    );
+
+    let state = spawn_daemon_bridge(cfg, bridge_port, control_active)?;
+
+    match wait_for_extension(state.port, Duration::from_secs(60), control_active) {
+        Ok((info, controlled_tab)) => {
+            let label = match info {
+                Some((agent, version)) => format!(" ({agent} v{version})"),
+                None => String::new(),
+            };
+            let tab_note = match controlled_tab {
+                Some(id) => format!(", controlling tab {id}"),
+                None => String::new(),
+            };
+            println!(
+                "ghax bridge: extension connected{label}{tab_note} — pid {}, port {}",
+                state.pid, state.port
+            );
+            Ok(EXIT_OK)
+        }
+        Err(e) => {
+            eprintln!("ghax: {e}");
+            Ok(EXIT_NOT_ATTACHED)
+        }
+    }
+}
+
+/// Poll `GET /bridge-status` on the daemon until the extension's `hello`
+/// handshake lands (and, when `require_control` is set, until it reports a
+/// controlled tab), or `timeout` elapses. Returns the extension's
+/// `(agent, version)` plus the controlled tab id (if any).
+fn wait_for_extension(
+    port: u16,
+    timeout: Duration,
+    require_control: bool,
+) -> Result<(Option<(String, String)>, Option<i64>)> {
+    let deadline = Instant::now() + timeout;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()?;
+    let url = format!("http://127.0.0.1:{port}/bridge-status");
+    loop {
+        if let Ok(resp) = client.get(&url).send() {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    if body.get("connected").and_then(|v| v.as_bool()) == Some(true) {
+                        let controlled = body.get("controlledTabId").and_then(|v| v.as_i64());
+                        // With --control-active, don't declare success until
+                        // the active tab is actually under control, or the
+                        // first `ghax goto` would race the control handshake.
+                        if !require_control || controlled.is_some() {
+                            let info = body.get("extensionInfo").and_then(|v| v.as_object());
+                            let agent = info
+                                .and_then(|m| m.get("agent"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let version = info
+                                .and_then(|m| m.get("version"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string();
+                            return Ok((Some((agent, version)), controlled));
+                        }
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            let extra = if require_control {
+                "\n  (--control-active) The extension connected but never reported a controlled tab. \
+                 Make sure a normal tab is focused (not edge://extensions itself)."
+            } else {
+                ""
+            };
+            return Err(anyhow::anyhow!(
+                "timed out after 60s waiting for the ghax bridge extension on :{port}.\n  \
+                 Check: extension loaded unpacked (developer mode on), and — without --control-active — \
+                 that you clicked \"Control this tab\" in its popup. The daemon is still running — \
+                 `ghax detach` to stop it, or retry once the extension is loaded.{extra}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// Best-effort discovery of the `extension/` directory to tell the user
+/// where to `Load unpacked` from. Same tier ordering as
+/// `resolve_daemon_bundle`, minus the GitHub-release self-heal (there's
+/// nothing to download — the extension only exists in the source repo).
+fn resolve_extension_dir() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("GHAX_EXTENSION_DIR") {
+        let p = PathBuf::from(&val);
+        if p.join("manifest.json").exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("extension");
+            if candidate.join("manifest.json").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(share) = stable_share_dir() {
+        let candidate = share.join("extension");
+        if candidate.join("manifest.json").exists() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        loop {
+            let pkg = dir.join("package.json");
+            if pkg.exists() {
+                if let Ok(raw) = std::fs::read_to_string(&pkg) {
+                    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                    if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
+                        let candidate = dir.join("extension");
+                        if candidate.join("manifest.json").exists() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
+        }
+    }
+    None
 }
 
 /// `ghax detach` — mirror of `cmdDetach` in cli.ts.
