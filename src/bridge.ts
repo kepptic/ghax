@@ -402,38 +402,22 @@ export async function bridgeEvaluate(bridge: Bridge, expression: string): Promis
 }
 
 /**
- * `Page.navigate` + a short wait for `Page.loadEventFired` (falls back to a
- * fixed timeout so a page that never fires load — e.g. a download URL, or
- * one already mid-navigation — can't wedge the RPC forever), then reads
- * back the final URL + title via `Runtime.evaluate`.
+ * Navigate through the extension, which waits for the tab load and recovers
+ * an unattachable cert/chrome-error target via chrome.tabs.update before it
+ * re-attaches. Then read back the final URL + title via Runtime.evaluate.
  */
 export async function bridgeGoto(
   bridge: Bridge,
   url: string,
   loadTimeoutMs = 8_000,
 ): Promise<{ url: string; title: string }> {
-  await bridge.send('Page.enable', {});
+  const navigation = await bridge.send('Page.navigate', {
+    url,
+    ghaxLoadTimeoutMs: loadTimeoutMs,
+  }) as { ghaxFinalUrl?: string; ghaxTitle?: string } | undefined;
 
-  const waitForLoad = new Promise<void>((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      unsubscribe();
-      resolve();
-    };
-    const timer = setTimeout(finish, loadTimeoutMs);
-    const unsubscribe = bridge.onEvent((ev) => {
-      if (ev.method === 'Page.loadEventFired') finish();
-    });
-  });
-
-  await bridge.send('Page.navigate', { url });
-  await waitForLoad;
-
-  let finalUrl = url;
-  let title = '';
+  let finalUrl = navigation?.ghaxFinalUrl || url;
+  let title = navigation?.ghaxTitle || '';
   try {
     const info = (await bridgeEvaluate(bridge, '({ url: location.href, title: document.title })')) as
       | { url?: string; title?: string }

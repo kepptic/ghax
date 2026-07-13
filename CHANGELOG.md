@@ -6,6 +6,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Extension-bridge `goto` now escapes certificate interstitials and other
+  unattachable browser pages with `chrome.tabs.update`, waits for the new page,
+  and re-attaches `chrome.debugger` so later commands retain control.
+
 ### Added
 - **Experimental** `ghax attach --extension` — a walking-skeleton second
   transport for the "Edge 150+/Chrome 136+ ignore `--remote-debugging-port`

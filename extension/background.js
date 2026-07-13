@@ -33,6 +33,7 @@ const DEFAULT_PORT = 9223;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
 const PING_INTERVAL_MS = 15000;
+const NAVIGATION_TIMEOUT_MS = 8000;
 const KEEPALIVE_ALARM = 'ghax-bridge-keepalive';
 // Chrome clamps repeating alarms to a 30s (0.5 min) floor. 0.5 is the
 // smallest value that fires without a warning and reliably resurrects an
@@ -46,6 +47,7 @@ let pingTimer = null;
 let controlledTabId = null;
 let attached = false;
 let reattachTimer = null;
+let navigationInProgress = false;
 
 async function getPort() {
   const { bridgePort } = await chrome.storage.local.get('bridgePort');
@@ -188,11 +190,17 @@ async function attachTo(tabId) {
 }
 
 function isTemporarilyUnattachable(err) {
-  return /cannot attach to this target|no tab with given id|target closed/i.test(err?.message ?? String(err));
+  return /cannot attach to this target|cannot (?:access|attach to) (?:a )?(?:chrome|edge):\/\/|no tab with given id|target closed/i.test(err?.message ?? String(err));
+}
+
+function cancelReattach() {
+  if (!reattachTimer) return;
+  clearTimeout(reattachTimer);
+  reattachTimer = null;
 }
 
 function scheduleReattach(delay = 250) {
-  if (reattachTimer || controlledTabId == null || attached) return;
+  if (reattachTimer || controlledTabId == null || attached || navigationInProgress) return;
   reattachTimer = setTimeout(async () => {
     reattachTimer = null;
     if (controlledTabId == null || attached) return;
@@ -239,10 +247,7 @@ async function switchControlTo(tabId) {
 }
 
 async function stopControl() {
-  if (reattachTimer) {
-    clearTimeout(reattachTimer);
-    reattachTimer = null;
-  }
+  cancelReattach();
   if (controlledTabId != null) {
     await chrome.debugger.detach({ tabId: controlledTabId }).catch(() => undefined);
   }
@@ -250,6 +255,102 @@ async function stopControl() {
   await persistTab(null);
   await setStatus();
   reportControlled();
+}
+
+function watchTabLoad(tabId, timeoutMs) {
+  let settled = false;
+  let timer;
+  let resolvePromise;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+  const finish = (tab) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    resolvePromise(tab);
+  };
+  const onUpdated = (updatedTabId, changeInfo, tab) => {
+    if (updatedTabId === tabId && changeInfo.status === 'complete') finish(tab);
+  };
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  timer = setTimeout(() => {
+    void chrome.tabs.get(tabId).then(finish, () => finish(null));
+  }, timeoutMs);
+  return { promise, cancel: () => finish(null) };
+}
+
+async function navigateControlledTab(params) {
+  const url = params?.url;
+  if (typeof url !== 'string') throw new Error('Page.navigate requires a URL');
+  if (controlledTabId == null) {
+    throw new Error('no tab under control — click "Control this tab" in the ghax bridge popup, or run `ghax bridge control --active`');
+  }
+
+  const tabId = controlledTabId;
+  const requestedTimeout = Number(params.ghaxLoadTimeoutMs);
+  const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 0
+    ? Math.min(requestedTimeout, 30000)
+    : NAVIGATION_TIMEOUT_MS;
+  const { ghaxLoadTimeoutMs: _ghaxLoadTimeoutMs, ...navigateParams } = params;
+  const load = watchTabLoad(tabId, timeoutMs);
+  let result = {};
+  let tab = null;
+  let needsReattach = false;
+
+  navigationInProgress = true;
+  cancelReattach();
+  try {
+    let useTabsUpdate = false;
+    try {
+      await ensureAttached();
+      await chrome.debugger.sendCommand({ tabId }, 'Page.enable', {});
+    } catch (err) {
+      if (!isTemporarilyUnattachable(err)) throw err;
+      attached = false;
+      useTabsUpdate = true;
+    }
+
+    if (!useTabsUpdate) {
+      try {
+        result = await chrome.debugger.sendCommand({ tabId }, 'Page.navigate', navigateParams);
+      } catch {
+        // Page.navigate may commit a cert-error navigation and then lose its
+        // debugger session before replying. Reissuing the same URL through
+        // chrome.tabs is safe and does not require an attachable target.
+        attached = false;
+        useTabsUpdate = true;
+      }
+    }
+
+    if (useTabsUpdate) await chrome.tabs.update(tabId, { url });
+    tab = await load.promise;
+
+    if (!attached) {
+      try {
+        await attachTo(tabId);
+      } catch (err) {
+        if (!isTemporarilyUnattachable(err)) throw err;
+        // The requested destination may itself be a cert interstitial. Keep
+        // control selected so the next goto can escape via chrome.tabs.update.
+        needsReattach = true;
+      }
+    }
+  } catch (err) {
+    load.cancel();
+    throw err;
+  } finally {
+    navigationInProgress = false;
+    if (needsReattach) scheduleReattach();
+  }
+
+  await setStatus();
+  return {
+    ...(result ?? {}),
+    ghaxFinalUrl: tab?.url ?? url,
+    ghaxTitle: tab?.title ?? '',
+  };
 }
 
 async function handleMessage(raw) {
@@ -273,21 +374,11 @@ async function handleMessage(raw) {
   if (typeof msg.id !== 'number' || typeof msg.method !== 'string') return;
   try {
     let result;
-    try {
+    if (msg.method === 'Page.navigate') {
+      result = await navigateControlledTab(msg.params ?? {});
+    } else {
       await ensureAttached();
       result = await chrome.debugger.sendCommand({ tabId: controlledTabId }, msg.method, msg.params ?? {});
-    } catch (err) {
-      // Navigating to a certificate-error page can detach chrome.debugger
-      // before Page.navigate replies. chrome.tabs.update is outside the
-      // debugger session, so it still commits the requested navigation; the
-      // onUpdated/onDetach recovery path re-attaches when Chromium permits it.
-      if (msg.method !== 'Page.navigate' || typeof msg.params?.url !== 'string') {
-        throw err;
-      }
-      await chrome.tabs.update(controlledTabId, { url: msg.params.url });
-      attached = false;
-      scheduleReattach();
-      result = { frameId: '' };
     }
     send({ id: msg.id, result: result ?? {} });
   } catch (err) {
