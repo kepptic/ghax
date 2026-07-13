@@ -224,6 +224,27 @@ how they install it. Current blockers:
       something we're not proud of. Public comes after the Rust CLI
       lands and distribution works cleanly.
 
+## v0.5 — real-session bridge (extension transport) — in progress
+
+Upstream Chromium hardening (Chrome 136 / Edge 150, shipped 2026-07-09)
+silently blocks `--remote-debugging-port` on the default profile, so
+`connectOverCDP` can no longer reach the user's **real** browser session
+— only `--launch` scratch profiles. Restoring real-session control means
+driving the browser from *inside* the profile via a `chrome.debugger`
+extension relayed to the daemon over a localhost WebSocket. Full
+reasoning, architecture, security posture, and the parity roadmap:
+[`07-extension-bridge.md`](./07-extension-bridge.md).
+
+- [x] Walking skeleton — `extension/` (MV3 relay) + `src/bridge.ts`
+      (daemon WS server) + `ghax attach --extension [--control-active]`
+      + `ghax bridge control`, proving `goto`/`eval`/`text` against the
+      real tab. Verified live on scratch Edge 150 (2026-07-13), including
+      SW-eviction self-heal (chrome.alarms + WS ping keepalive) and
+      scriptable activation (daemon→ext control channel).
+- [ ] Full browse-surface parity over the bridge (snapshot/click/fill/
+      screenshot/console/network, multi-tab).
+- [ ] Handshake token + reconnect hardening; packaging decision.
+
 ## v0.4 — beyond the browse primitive (in progress)
 
 Flagship `ghax browse` is now solid. v0.4 starts layering orchestrated
