@@ -26,11 +26,9 @@
  * IS a CDP command dispatcher, so reusing that mental model means the
  * bridge "looks like" talking to a CdpTarget from the daemon's side.
  *
- * Scope (walking skeleton): exactly the commands `goto`/`eval`/`text` need
- * (Page.enable, Page.navigate, Runtime.evaluate) plus whatever events those
- * verbs listen for (Page.loadEventFired). No attempt at CDP-session/target
- * multiplexing, no reconnect-time command replay, no back-pressure — the
- * doc-comment at the top of daemon.ts's bridge branch says why.
+ * The bridge is deliberately page-scoped: one controlled tab at a time.
+ * Browser-level operations (tab enumeration/switching/window creation) use
+ * the adjacent control channel implemented by extension/background.js.
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
@@ -53,12 +51,34 @@ export interface BridgeExtensionInfo {
  */
 export type ControlTarget =
   | { action: 'control-active' }
-  | { action: 'control-tab'; tabId: number }
+  | { action: 'control-tab'; tabId: number; quiet?: boolean }
+  | { action: 'list-tabs' }
+  | { action: 'new-window'; url: string }
   | { action: 'stop' };
 
 export interface ControlAck {
   ok: boolean;
   tabId: number | null;
+  result?: unknown;
+}
+
+export interface BridgeTab {
+  id: number;
+  title: string;
+  url: string;
+  active: boolean;
+}
+
+export interface BridgeRef {
+  backendNodeId: number;
+  role: string;
+  name: string;
+}
+
+export interface BridgeSnapshotResult {
+  text: string;
+  refs: Map<string, BridgeRef>;
+  count: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -213,7 +233,11 @@ export class Bridge extends EventEmitter {
       if (msg.ok && typeof msg.tabId === 'number') this._controlledTabId = msg.tabId;
       else if (msg.ok && msg.tabId === null) this._controlledTabId = null;
       if (p) {
-        if (msg.ok) p.resolve({ ok: true, tabId: typeof msg.tabId === 'number' ? msg.tabId : null });
+        if (msg.ok) p.resolve({
+          ok: true,
+          tabId: typeof msg.tabId === 'number' ? msg.tabId : null,
+          ...(msg.result !== undefined ? { result: msg.result } : {}),
+        });
         else p.reject(new Error(msg.error || 'bridge: control failed'));
       }
       return;
@@ -290,7 +314,9 @@ export class Bridge extends EventEmitter {
    * extension is connected, or after `CONTROL_TIMEOUT_MS`.
    */
   sendControl(target: ControlTarget, timeoutMs = CONTROL_TIMEOUT_MS): Promise<ControlAck> {
-    this.desiredControl = target.action === 'stop' ? null : target;
+    if (target.action === 'stop') this.desiredControl = null;
+    else if (target.action === 'control-active') this.desiredControl = target;
+    else if (target.action === 'control-tab') this.desiredControl = { ...target, quiet: true };
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._connected) {
       return Promise.reject(
         new Error(
@@ -425,4 +451,300 @@ export async function bridgeGoto(
 export async function bridgeText(bridge: Bridge): Promise<string> {
   const value = await bridgeEvaluate(bridge, 'document.body.innerText');
   return typeof value === 'string' ? value : String(value ?? '');
+}
+
+const BRIDGE_INTERACTIVE_ROLES = new Set([
+  'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox',
+  'listbox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+  'option', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',
+  'treeitem',
+]);
+
+interface AxValue { value?: unknown }
+interface AxNode {
+  nodeId: string;
+  parentId?: string;
+  childIds?: string[];
+  backendDOMNodeId?: number;
+  ignored?: boolean;
+  role?: AxValue;
+  name?: AxValue;
+  value?: AxValue;
+  properties?: Array<{ name: string; value?: AxValue }>;
+}
+
+function axRole(node: AxNode): string {
+  const raw = String(node.role?.value ?? '');
+  if (raw === 'StaticText' || raw === 'LineBreak') return 'text';
+  return raw.toLowerCase();
+}
+
+function axProps(node: AxNode): string {
+  const values: string[] = [];
+  for (const prop of node.properties ?? []) {
+    const value = prop.value?.value;
+    if (value === undefined || value === null || value === false || value === '') continue;
+    if (prop.name === 'focusable' || prop.name === 'editable' || prop.name === 'settable') continue;
+    if (value === true) values.push(prop.name);
+    else if (['checked', 'pressed', 'expanded', 'selected', 'level', 'valuetext', 'value'].includes(prop.name)) {
+      values.push(`${prop.name}=${String(value)}`);
+    }
+  }
+  return values.length > 0 ? `[${values.join(', ')}]` : '';
+}
+
+async function runtimeObjectFor(
+  bridge: Bridge,
+  expression: string,
+): Promise<{ objectId: string; backendNodeId: number } | null> {
+  const evaluated = await bridge.send('Runtime.evaluate', {
+    expression,
+    returnByValue: false,
+  }) as { result?: { objectId?: string; subtype?: string } };
+  const objectId = evaluated.result?.objectId;
+  if (!objectId || evaluated.result?.subtype === 'null') return null;
+  try {
+    const described = await bridge.send('DOM.describeNode', { objectId }) as {
+      node?: { backendNodeId?: number };
+    };
+    const backendNodeId = described.node?.backendNodeId;
+    return typeof backendNodeId === 'number' ? { objectId, backendNodeId } : null;
+  } catch {
+    await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    return null;
+  }
+}
+
+async function tagBackendNode(bridge: Bridge, backendNodeId: number, ref: string): Promise<boolean> {
+  try {
+    const resolved = await bridge.send('DOM.resolveNode', {
+      backendNodeId,
+      objectGroup: 'ghax-refs',
+    }) as { object?: { objectId?: string } };
+    const objectId = resolved.object?.objectId;
+    if (!objectId) return false;
+    await bridge.send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function(ref) {
+        if (this && this.nodeType === Node.ELEMENT_NODE) this.setAttribute('data-ghax-ref', ref);
+        return true;
+      }`,
+      arguments: [{ value: ref }],
+      returnByValue: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Build the bridge snapshot from Chromium's own accessibility tree. Every
+ * emitted ref keeps the AX node's backendDOMNodeId and is also tagged in the
+ * page DOM for human inspection/debugging. The backend id is the resolver;
+ * the attribute is not relied on for interaction and therefore survives
+ * selector changes caused by React rerenders better than a CSS path.
+ */
+export async function bridgeSnapshot(
+  bridge: Bridge,
+  opts: {
+    interactive?: boolean;
+    compact?: boolean;
+    depth?: number;
+    selector?: string;
+    cursorInteractive?: boolean;
+    dialogScope?: boolean;
+  } = {},
+): Promise<BridgeSnapshotResult> {
+  await bridge.send('Runtime.enable');
+  await bridge.send('DOM.enable');
+  await bridge.send('Accessibility.enable');
+  await bridgeEvaluate(bridge, `(() => {
+    const walk = (root) => {
+      for (const el of root.querySelectorAll('*')) {
+        el.removeAttribute('data-ghax-ref');
+        if (el.shadowRoot) walk(el.shadowRoot);
+      }
+    };
+    walk(document);
+  })()`).catch(() => undefined);
+  await bridge.send('Runtime.releaseObjectGroup', { objectGroup: 'ghax-refs' }).catch(() => undefined);
+
+  let rootBackendNodeId: number | null = null;
+  if (opts.selector) {
+    const root = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(opts.selector)})`);
+    if (!root) throw new Error(`Selector not found: ${opts.selector}`);
+    rootBackendNodeId = root.backendNodeId;
+    await bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
+  } else if (opts.dialogScope !== false) {
+    const modal = await runtimeObjectFor(bridge, `(() => {
+      const selectors = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
+      const visible = [...document.querySelectorAll(selectors)].filter((el) => {
+        const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+      });
+      return visible.at(-1) || document.body;
+    })()`);
+    if (modal) {
+      rootBackendNodeId = modal.backendNodeId;
+      await bridge.send('Runtime.releaseObject', { objectId: modal.objectId }).catch(() => undefined);
+    }
+  }
+  if (rootBackendNodeId === null) {
+    const body = await runtimeObjectFor(bridge, 'document.body');
+    if (body) {
+      rootBackendNodeId = body.backendNodeId;
+      await bridge.send('Runtime.releaseObject', { objectId: body.objectId }).catch(() => undefined);
+    }
+  }
+
+  const result = await bridge.send('Accessibility.getFullAXTree', {}) as { nodes?: AxNode[] };
+  const nodes = result.nodes ?? [];
+  const byId = new Map(nodes.map((n) => [n.nodeId, n]));
+  let root = rootBackendNodeId === null
+    ? undefined
+    : nodes.find((n) => n.backendDOMNodeId === rootBackendNodeId);
+  root ??= nodes.find((n) => !n.parentId) ?? nodes[0];
+
+  const refs = new Map<string, BridgeRef>();
+  const output: string[] = [];
+  let nextRef = 1;
+  const walk = async (node: AxNode, depth: number): Promise<void> => {
+    const role = axRole(node);
+    const rawRole = String(node.role?.value ?? '');
+    const axName = String(node.name?.value ?? '');
+    const name = rawRole === 'StaticText' || rawRole === 'LineBreak' ? '' : axName;
+    const children = rawRole === 'StaticText' || rawRole === 'LineBreak'
+      ? axName
+      : (node.value?.value === undefined ? '' : String(node.value.value));
+    const skipStructural = node.ignored || !role || role === 'none' || role === 'rootwebarea' ||
+      role === 'webarea' || role === 'inlineTextBox'.toLowerCase() || (role === 'generic' && !name);
+    const isInteractive = BRIDGE_INTERACTIVE_ROLES.has(role);
+    const withinDepth = opts.depth === undefined || depth <= opts.depth;
+    const compactSkip = Boolean(opts.compact && !isInteractive && !name);
+    if (!skipStructural && withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
+      if (typeof node.backendDOMNodeId === 'number') {
+        const ref = `e${nextRef++}`;
+        await tagBackendNode(bridge, node.backendDOMNodeId, ref);
+        refs.set(ref, { backendNodeId: node.backendDOMNodeId, role, name });
+        let line = `${'  '.repeat(Math.max(0, depth))}@${ref} [${role}]`;
+        if (name) line += ` ${JSON.stringify(name)}`;
+        const props = axProps(node);
+        if (props) line += ` ${props}`;
+        if (children) line += `: ${children}`;
+        output.push(line);
+      }
+    }
+    for (const childId of node.childIds ?? []) {
+      const child = byId.get(childId);
+      if (child) await walk(child, skipStructural ? depth : depth + 1);
+    }
+  };
+  if (root) await walk(root, -1);
+
+  const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
+  if (wantCursor) {
+    const cursor = await bridgeEvaluate(bridge, `(() => {
+      const standard = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','SUMMARY','DETAILS']);
+      const out = []; let n = 1;
+      const walk = (root, inShadow) => {
+        for (const el of root.querySelectorAll('*')) {
+          const style = getComputedStyle(el);
+          const visible = style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+          const tabindex = el.hasAttribute('tabindex') && Number(el.getAttribute('tabindex')) >= 0;
+          if (visible && !standard.has(el.tagName) && !el.hasAttribute('role') &&
+              (style.cursor === 'pointer' || el.hasAttribute('onclick') || tabindex)) {
+            const ref = 'c' + n++;
+            el.setAttribute('data-ghax-ref', ref);
+            const reasons = [];
+            if (inShadow) reasons.push('shadow');
+            if (style.cursor === 'pointer') reasons.push('cursor:pointer');
+            if (el.hasAttribute('onclick')) reasons.push('onclick');
+            if (tabindex) reasons.push('tabindex=' + el.getAttribute('tabindex'));
+            out.push({ ref, text: (el.innerText || el.tagName.toLowerCase()).trim().slice(0, 80), reason: reasons.join(', ') });
+          }
+          if (el.shadowRoot) walk(el.shadowRoot, true);
+        }
+      };
+      walk(document, false);
+      return out;
+    })()`) as Array<{ ref: string; text: string; reason: string }>;
+    if (cursor.length > 0) {
+      output.push('', '── cursor-interactive (not in ARIA tree) ──');
+      for (const item of cursor) {
+        const object = await runtimeObjectFor(bridge, `(() => {
+          const find = (root) => {
+            const hit = root.querySelector('[data-ghax-ref="${item.ref}"]');
+            if (hit) return hit;
+            for (const el of root.querySelectorAll('*')) if (el.shadowRoot) { const nested = find(el.shadowRoot); if (nested) return nested; }
+            return null;
+          };
+          return find(document);
+        })()`);
+        if (!object) continue;
+        refs.set(item.ref, { backendNodeId: object.backendNodeId, role: 'cursor-interactive', name: item.text });
+        await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
+        output.push(`@${item.ref} [${item.reason}] ${JSON.stringify(item.text)}`);
+      }
+    }
+  }
+
+  if (output.length === 0) {
+    return {
+      text: opts.interactive ? '(no interactive elements found)' : '(no accessible elements found)',
+      refs,
+      count: 0,
+    };
+  }
+  return { text: output.join('\n'), refs, count: refs.size };
+}
+
+/** Resolve a normal CSS selector to the same backend-node handle refs use. */
+export async function bridgeResolveSelector(bridge: Bridge, selector: string): Promise<BridgeRef> {
+  const object = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`);
+  if (!object) throw new Error(`Selector not found: ${selector}`);
+  await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
+  return { backendNodeId: object.backendNodeId, role: '', name: '' };
+}
+
+export async function bridgeBox(
+  bridge: Bridge,
+  ref: BridgeRef,
+): Promise<{ x: number; y: number; width: number; height: number }> {
+  await bridge.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: ref.backendNodeId }).catch(() => undefined);
+  const model = await bridge.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }) as {
+    model?: { border?: number[]; content?: number[] };
+  };
+  const quad = model.model?.border ?? model.model?.content;
+  if (!quad || quad.length < 8) throw new Error('element not visible or not in layout');
+  const xs = [quad[0], quad[2], quad[4], quad[6]];
+  const ys = [quad[1], quad[3], quad[5], quad[7]];
+  const minX = Math.min(...xs); const maxX = Math.max(...xs);
+  const minY = Math.min(...ys); const maxY = Math.max(...ys);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+export async function bridgeCallOn(
+  bridge: Bridge,
+  ref: BridgeRef,
+  functionDeclaration: string,
+  args: unknown[] = [],
+): Promise<unknown> {
+  const resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as {
+    object?: { objectId?: string };
+  };
+  const objectId = resolved.object?.objectId;
+  if (!objectId) throw new Error('element no longer exists. Run \'ghax snapshot\' again.');
+  try {
+    const result = await bridge.send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration,
+      arguments: args.map((value) => ({ value })),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    return unwrapEvalResult(result);
+  } finally {
+    await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+  }
 }

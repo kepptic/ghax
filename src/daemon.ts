@@ -34,11 +34,8 @@
  * daemon skips `connectOverCDP` entirely and instead starts a `Bridge`
  * (see bridge.ts) — a small WebSocket server an MV3 extension connects to,
  * relaying CDP commands via `chrome.debugger` (which the socket
- * restriction does not affect). Only `goto`/`eval`/`text` are wired to
- * this path today (see the `ctx.bridgeMode` branches in those three
- * handlers below) — every other verb still assumes a Playwright `Browser`
- * and will error cleanly (not crash) if invoked in bridge mode, since
- * `ctx.browser` is `null` there.
+ * restriction does not affect). Page operations use raw CDP and browser
+ * tab/window operations use the extension's adjacent control channel.
  */
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
@@ -48,7 +45,19 @@ import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from
 import { SourceMapCache, resolveStack } from './source-maps';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
-import { Bridge, bridgeEvaluate, bridgeGoto, bridgeText, type ControlTarget } from './bridge';
+import {
+  Bridge,
+  bridgeBox,
+  bridgeCallOn,
+  bridgeEvaluate,
+  bridgeGoto,
+  bridgeResolveSelector,
+  bridgeSnapshot,
+  bridgeText,
+  type BridgeRef,
+  type BridgeTab,
+  type ControlTarget,
+} from './bridge';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
@@ -114,6 +123,8 @@ interface Ctx {
   captureBodiesRe: RegExp | null;  // null = don't capture; set = capture URLs matching
   activePageId: string | null;
   refs: Map<string, RefEntry>;
+  bridgeRefs: Map<string, BridgeRef>;
+  bridgeNetworkRequests: Map<string, NetworkEntry>;
   instrumented: WeakSet<Page>;
   startedAt: number;
   stateDir: string;
@@ -137,8 +148,25 @@ type Handler = (ctx: Ctx, args: unknown[], opts: Record<string, unknown>) => Pro
 
 const handlers = new Map<string, Handler>();
 
+// The bridge is page-scoped and intentionally does not emulate a browser
+// debugging endpoint. Keep one explicit allow-list so any command that still
+// depends on Playwright, /json/list, or browser-level CDP fails with a useful
+// message instead of leaking a cryptic URL/parser error from those paths.
+const BRIDGE_SUPPORTED_COMMANDS = new Set([
+  'status', 'tabs', 'tab', 'find', 'newWindow',
+  'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
+  'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type',
+  'console', 'network', 'wait', 'bridge.control',
+  'batch', 'record.start', 'record.stop', 'record.status',
+]);
+
 function register(name: string, fn: Handler) {
-  handlers.set(name, fn);
+  handlers.set(name, async (ctx, args, opts) => {
+    if (ctx.bridgeMode && !BRIDGE_SUPPORTED_COMMANDS.has(name)) {
+      throw new Error(`${name}: not supported over the extension bridge yet`);
+    }
+    return fn(ctx, args, opts);
+  });
 }
 
 // ─── Page / target helpers ─────────────────────────────────────
@@ -405,6 +433,149 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   });
 }
 
+function remoteObjectText(value: unknown): string {
+  const obj = value as { value?: unknown; description?: string; unserializableValue?: string };
+  if (obj.value !== undefined) {
+    if (typeof obj.value === 'string') return obj.value;
+    try { return JSON.stringify(obj.value); } catch { return String(obj.value); }
+  }
+  return obj.unserializableValue ?? obj.description ?? '';
+}
+
+function bridgeTimestamp(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return Date.now();
+  return n > 10_000_000_000 ? n : Math.round(n * 1000);
+}
+
+function bridgeHeaders(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object') return {};
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k.toLowerCase(), String(v)]));
+}
+
+function wireBridgeEvents(ctx: Ctx): void {
+  const bridge = requireBridge(ctx);
+  bridge.onEvent((ev) => {
+    const p = ev.params as any;
+    if (ev.method === 'Runtime.consoleAPICalled') {
+      const levels: Record<string, ConsoleEntry['level']> = {
+        log: 'log', info: 'info', warning: 'warn', error: 'error', debug: 'debug', verbose: 'debug', trace: 'trace', assert: 'error',
+      };
+      const frame = p.stackTrace?.callFrames?.[0];
+      const entry: ConsoleEntry = {
+        timestamp: bridgeTimestamp(p.timestamp),
+        level: levels[String(p.type)] ?? 'log',
+        text: Array.isArray(p.args) ? p.args.map(remoteObjectText).join(' ') : '',
+        ...(frame?.url ? { url: String(frame.url) } : {}),
+        source: 'tab',
+      };
+      ctx.consoleBuf.push(entry);
+      for (const listener of ctx.consoleListeners) listener(entry);
+      return;
+    }
+    if (ev.method === 'Runtime.exceptionThrown') {
+      const details = p.exceptionDetails ?? {};
+      const description = details.exception?.description ?? details.text ?? 'Uncaught exception';
+      const stack = parseStack(String(description));
+      const entry: ConsoleEntry = {
+        timestamp: bridgeTimestamp(p.timestamp),
+        level: 'error',
+        text: `[pageerror] ${String(details.exception?.description ?? details.text ?? 'Uncaught exception').split('\n')[0]}`,
+        ...(details.url ? { url: String(details.url) } : {}),
+        source: 'tab',
+        ...(stack.length > 0 ? { stack } : {}),
+      };
+      ctx.consoleBuf.push(entry);
+      for (const listener of ctx.consoleListeners) listener(entry);
+      return;
+    }
+    if (ev.method === 'Log.entryAdded') {
+      const logEntry = p.entry ?? {};
+      const rawLevel = String(logEntry.level ?? 'log');
+      const level: ConsoleEntry['level'] = rawLevel === 'warning' ? 'warn' :
+        (['log', 'info', 'warn', 'error', 'debug', 'trace'].includes(rawLevel) ? rawLevel : 'log') as ConsoleEntry['level'];
+      const entry: ConsoleEntry = {
+        timestamp: bridgeTimestamp(logEntry.timestamp),
+        level,
+        text: String(logEntry.text ?? ''),
+        ...(logEntry.url ? { url: String(logEntry.url) } : {}),
+        source: 'tab',
+      };
+      ctx.consoleBuf.push(entry);
+      for (const listener of ctx.consoleListeners) listener(entry);
+      return;
+    }
+    if (ev.method === 'Network.requestWillBeSent') {
+      const request = p.request ?? {};
+      const entry: NetworkEntry = {
+        timestamp: Date.now(),
+        method: String(request.method ?? 'GET'),
+        url: String(request.url ?? ''),
+        resourceType: p.type ? String(p.type).toLowerCase() : undefined,
+        requestHeaders: bridgeHeaders(request.headers),
+      };
+      if (request.postData !== undefined && ctx.captureBodiesRe?.test(entry.url)) {
+        const ct = entry.requestHeaders?.['content-type'] ?? '';
+        if (CAPTURABLE_CONTENT_TYPE_RE.test(ct)) {
+          const capped = capBody(String(request.postData));
+          entry.requestBody = capped.text;
+          if (capped.truncated) entry.requestBodyTruncated = true;
+        }
+      }
+      ctx.networkBuf.push(entry);
+      ctx.bridgeNetworkRequests.set(String(p.requestId), entry);
+      for (const listener of ctx.networkListeners) listener(entry);
+      return;
+    }
+    if (ev.method === 'Network.responseReceived') {
+      const entry = ctx.bridgeNetworkRequests.get(String(p.requestId));
+      if (!entry) return;
+      const response = p.response ?? {};
+      entry.status = Number(response.status ?? 0);
+      entry.statusText = String(response.statusText ?? '');
+      entry.responseHeaders = bridgeHeaders(response.headers);
+      entry.responseAt = Date.now();
+      entry.duration = entry.responseAt - entry.timestamp;
+      return;
+    }
+    if (ev.method === 'Network.loadingFinished' || ev.method === 'Network.loadingFailed') {
+      const requestId = String(p.requestId);
+      const entry = ctx.bridgeNetworkRequests.get(requestId);
+      if (entry) {
+        entry.responseAt ??= Date.now();
+        entry.duration ??= entry.responseAt - entry.timestamp;
+        if (ev.method === 'Network.loadingFinished' && typeof p.encodedDataLength === 'number') entry.size = p.encodedDataLength;
+        if (ev.method === 'Network.loadingFailed' && !entry.statusText) entry.statusText = String(p.errorText ?? 'failed');
+        if (
+          ev.method === 'Network.loadingFinished' &&
+          ctx.captureBodiesRe?.test(entry.url) &&
+          CAPTURABLE_CONTENT_TYPE_RE.test(entry.responseHeaders?.['content-type'] ?? '')
+        ) {
+          void bridge.send('Network.getResponseBody', { requestId }).then((bodyResult) => {
+            const body = bodyResult as { body?: string; base64Encoded?: boolean };
+            if (typeof body.body !== 'string' || body.base64Encoded) return;
+            const capped = capBody(body.body);
+            entry.responseBody = capped.text;
+            if (capped.truncated) entry.responseBodyTruncated = true;
+          }).catch(() => undefined);
+        }
+      }
+      ctx.bridgeNetworkRequests.delete(requestId);
+    }
+  });
+}
+
+async function enableBridgeDomains(ctx: Ctx): Promise<void> {
+  const bridge = requireBridge(ctx);
+  await Promise.all([
+    bridge.send('Page.enable'),
+    bridge.send('Runtime.enable'),
+    bridge.send('Log.enable'),
+    bridge.send('Network.enable'),
+    bridge.send('DOM.enable'),
+  ]).catch(() => undefined);
+}
+
 function resolveRef(ctx: Ctx, target: string, page: Page): Locator {
   if (target.startsWith('@')) {
     const key = target.slice(1);
@@ -413,6 +584,41 @@ function resolveRef(ctx: Ctx, target: string, page: Page): Locator {
     return entry.locator;
   }
   return page.locator(target);
+}
+
+function requireBridge(ctx: Ctx): Bridge {
+  if (!ctx.bridge) throw new Error('ghax bridge: extension bridge is not initialized');
+  return ctx.bridge;
+}
+
+function clearSnapshotRefs(ctx: Ctx): void {
+  ctx.refs.clear();
+  ctx.bridgeRefs.clear();
+}
+
+async function listBridgeTabs(ctx: Ctx): Promise<BridgeTab[]> {
+  const ack = await requireBridge(ctx).sendControl({ action: 'list-tabs' });
+  if (!Array.isArray(ack.result)) throw new Error('tabs: extension returned an invalid tab list');
+  return (ack.result as unknown[]).flatMap((value) => {
+    const tab = value as Partial<BridgeTab>;
+    if (typeof tab.id !== 'number') return [];
+    return [{
+      id: tab.id,
+      title: typeof tab.title === 'string' ? tab.title : '',
+      url: typeof tab.url === 'string' ? tab.url : '',
+      active: Boolean(tab.active),
+    }];
+  });
+}
+
+async function resolveBridgeTarget(ctx: Ctx, target: string): Promise<BridgeRef> {
+  if (target.startsWith('@')) {
+    const key = target.slice(1);
+    const entry = ctx.bridgeRefs.get(key);
+    if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
+    return entry;
+  }
+  return bridgeResolveSelector(requireBridge(ctx), target);
 }
 
 // ─── Command handlers ──────────────────────────────────────────
@@ -487,6 +693,22 @@ register('batch', async (ctx, args, opts) => {
 });
 
 register('status', async (ctx) => {
+  if (ctx.bridgeMode) {
+    const tabs = await listBridgeTabs(ctx);
+    const active = tabs.find((tab) => tab.id === ctx.bridge?.controlledTabId) ?? null;
+    return {
+      pid: process.pid,
+      uptimeMs: Date.now() - ctx.startedAt,
+      browserKind: ctx.browserKind,
+      browserUrl: ctx.cdpBrowserUrl,
+      tabCount: tabs.length,
+      targetCount: tabs.length,
+      extensionCount: 0,
+      activeTabId: active ? String(active.id) : null,
+      activeTabTitle: active?.title ?? '',
+      activeTabUrl: active?.url ?? '',
+    };
+  }
   const pages = await allPages(ctx);
   const targets = await ctx.pool.list();
   const extIds = new Set<string>();
@@ -521,7 +743,6 @@ register('status', async (ctx) => {
 });
 
 register('tabs', async (ctx, _args, opts) => {
-  const pages = await allPages(ctx);
   const filterStr = (opts.filter as string | undefined) ?? null;
   let filterRe: RegExp | null = null;
   if (filterStr) {
@@ -538,12 +759,14 @@ register('tabs', async (ctx, _args, opts) => {
   const fields: Set<string> | null = fieldsArg
     ? new Set(fieldsArg.split(',').map((s) => s.trim()).filter(Boolean))
     : null;
-  const all = await Promise.all(
-    pages.map(async (p) => {
-      const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
-      return { id, title, url: p.url(), active: id === ctx.activePageId };
-    }),
-  );
+  const all = ctx.bridgeMode
+    ? (await listBridgeTabs(ctx)).map((t) => ({ id: String(t.id), title: t.title, url: t.url, active: t.active }))
+    : await Promise.all(
+        (await allPages(ctx)).map(async (p) => {
+          const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+          return { id, title, url: p.url(), active: id === ctx.activePageId };
+        }),
+      );
   const matched = filterRe
     ? all.filter((t) => filterRe!.test(t.url) || filterRe!.test(t.title))
     : all;
@@ -558,6 +781,18 @@ register('tabs', async (ctx, _args, opts) => {
 register('tab', async (ctx, args, opts) => {
   const id = String(args[0] ?? '');
   if (!id) throw new Error('Usage: tab <id>');
+  if (ctx.bridgeMode) {
+    const tabId = Number(id);
+    if (!Number.isInteger(tabId)) throw new Error(`No tab with id ${id}`);
+    const tabs = await listBridgeTabs(ctx);
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) throw new Error(`No tab with id ${id}`);
+    const bridge = requireBridge(ctx);
+    await bridge.sendControl({ action: 'control-tab', tabId, quiet: Boolean(opts.quiet) });
+    clearSnapshotRefs(ctx);
+    ctx.activePageId = String(tabId);
+    return { id: String(tabId), url: tab.url, title: tab.title };
+  }
   const pages = await allPages(ctx);
   for (const p of pages) {
     const tid = await pageTargetId(p);
@@ -599,6 +834,11 @@ register('tab', async (ctx, args, opts) => {
 register('find', async (ctx, args) => {
   const pattern = String(args[0] ?? '');
   if (!pattern) throw new Error('Usage: find <url-substring>');
+  if (ctx.bridgeMode) {
+    return (await listBridgeTabs(ctx))
+      .filter((tab) => tab.url.includes(pattern))
+      .map((tab) => ({ id: String(tab.id), url: tab.url, title: tab.title }));
+  }
   const pages = await allPages(ctx);
   const hits = pages.filter((p) => p.url().includes(pattern));
   return Promise.all(
@@ -610,9 +850,19 @@ register('find', async (ctx, args) => {
 });
 
 register('newWindow', async (ctx, args) => {
-  const browser = ctx.browser;
-  if (!browser) throw new Error('newWindow: not available in bridge mode');
   const url = args[0] ? String(args[0]) : 'about:blank';
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    const ack = await bridge.sendControl({ action: 'new-window', url });
+    const tab = ack.result as BridgeTab | undefined;
+    if (!tab || typeof tab.id !== 'number') throw new Error('newWindow: extension did not return the new tab');
+    bridge.setDesiredControl({ action: 'control-tab', tabId: tab.id, quiet: true });
+    clearSnapshotRefs(ctx);
+    ctx.activePageId = String(tab.id);
+    return { id: String(tab.id), url: tab.url, title: tab.title };
+  }
+  const browser = ctx.browser;
+  if (!browser) throw new Error('newWindow: no browser available');
   const context = browser.contexts()[0];
   if (!context) throw new Error('newWindow: no browser context available');
   const cdpSession = await browser.newBrowserCDPSession();
@@ -688,8 +938,8 @@ register('goto', async (ctx, args) => {
   const url = String(args[0] ?? '');
   if (!url) throw new Error('Usage: goto <url>');
   if (ctx.bridgeMode) {
-    if (!ctx.bridge) throw new Error('bridge not initialized');
-    return await bridgeGoto(ctx.bridge, url);
+    clearSnapshotRefs(ctx);
+    return await bridgeGoto(requireBridge(ctx), url);
   }
   const page = await activePage(ctx);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -705,18 +955,46 @@ register('goto', async (ctx, args) => {
 // happens for both fresh loads and bfcache restores. The explicit timeout is
 // a backstop so no pathological navigation can ever wedge the daemon.
 register('back', async (ctx) => {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    const history = await bridge.send('Page.getNavigationHistory') as {
+      currentIndex?: number; entries?: Array<{ id: number; url: string }>;
+    };
+    const index = history.currentIndex ?? 0;
+    const entry = history.entries?.[index - 1];
+    if (entry) await bridge.send('Page.navigateToHistoryEntry', { entryId: entry.id });
+    clearSnapshotRefs(ctx);
+    return { url: entry?.url ?? String(await bridgeEvaluate(bridge, 'location.href')) };
+  }
   const page = await activePage(ctx);
   await page.goBack({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
 });
 
 register('forward', async (ctx) => {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    const history = await bridge.send('Page.getNavigationHistory') as {
+      currentIndex?: number; entries?: Array<{ id: number; url: string }>;
+    };
+    const index = history.currentIndex ?? 0;
+    const entry = history.entries?.[index + 1];
+    if (entry) await bridge.send('Page.navigateToHistoryEntry', { entryId: entry.id });
+    clearSnapshotRefs(ctx);
+    return { url: entry?.url ?? String(await bridgeEvaluate(bridge, 'location.href')) };
+  }
   const page = await activePage(ctx);
   await page.goForward({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
 });
 
 register('reload', async (ctx) => {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    await bridge.send('Page.reload', {});
+    clearSnapshotRefs(ctx);
+    return { url: String(await bridgeEvaluate(bridge, 'location.href').catch(() => '')) };
+  }
   const page = await activePage(ctx);
   await page.reload({ waitUntil: 'domcontentloaded' });
   return { url: page.url() };
@@ -839,9 +1117,16 @@ register('text', async (ctx, _args, opts) => {
   const length = lengthRaw !== null && Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
   let text: string;
   if (ctx.bridgeMode) {
-    if (!ctx.bridge) throw new Error('bridge not initialized');
-    if (selector) throw new Error('--selector is not supported yet in bridge mode');
-    text = await bridgeText(ctx.bridge);
+    const bridge = requireBridge(ctx);
+    if (selector) {
+      text = String(await bridgeEvaluate(bridge, `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) throw new Error('Selector not found: ' + ${JSON.stringify(selector)});
+        return el.innerText;
+      })()`));
+    } else {
+      text = await bridgeText(bridge);
+    }
   } else {
     const page = await activePage(ctx);
     if (selector) {
@@ -887,19 +1172,29 @@ register('bridge.control', async (ctx, _args, opts) => {
 
 register('html', async (ctx, args) => {
   const sel = args[0] ? String(args[0]) : null;
+  if (ctx.bridgeMode) {
+    return bridgeEvaluate(requireBridge(ctx), sel
+      ? `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) throw new Error('Selector not found: ' + ${JSON.stringify(sel)}); return el.innerHTML; })()`
+      : `document.doctype ? '<!DOCTYPE ' + document.doctype.name + '>' + document.documentElement.outerHTML : document.documentElement.outerHTML`);
+  }
   const page = await activePage(ctx);
   if (sel) return await page.locator(sel).first().innerHTML();
   return await page.content();
 });
 
 register('screenshot', async (ctx, args, opts) => {
-  const page = await activePage(ctx);
   const outPath = (opts.path as string) || `/tmp/ghax-shot-${Date.now()}.png`;
   const target = args[0] ? String(args[0]) : null;
   // Accept both `--fullPage` (v0.1 camelCase) and `--full-page` (kebab,
   // matches every other CLI flag). Kebab is the preferred form going
   // forward; camelCase stays for back-compat with live scripts.
   const fullPage = Boolean(opts.fullPage || opts['full-page']);
+  if (ctx.bridgeMode) {
+    const ref = target ? await resolveBridgeTarget(ctx, target) : null;
+    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref);
+    return { path: outPath };
+  }
+  const page = await activePage(ctx);
   if (target) {
     await resolveRef(ctx, target, page).screenshot({ path: outPath });
   } else {
@@ -907,6 +1202,36 @@ register('screenshot', async (ctx, args, opts) => {
   }
   return { path: outPath };
 });
+
+async function captureBridgeScreenshot(
+  bridge: Bridge,
+  outPath: string,
+  fullPage: boolean,
+  ref: BridgeRef | null = null,
+): Promise<void> {
+  await bridge.send('Page.enable');
+  let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
+  if (ref) {
+    clip = { ...(await bridgeBox(bridge, ref)), scale: 1 };
+  } else if (fullPage) {
+    const metrics = await bridge.send('Page.getLayoutMetrics') as {
+      cssContentSize?: { x?: number; y?: number; width?: number; height?: number };
+      contentSize?: { x?: number; y?: number; width?: number; height?: number };
+    };
+    const size = metrics.cssContentSize ?? metrics.contentSize;
+    if (size?.width && size?.height) {
+      clip = { x: size.x ?? 0, y: size.y ?? 0, width: size.width, height: size.height, scale: 1 };
+    }
+  }
+  const shot = await bridge.send('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true,
+    captureBeyondViewport: Boolean(fullPage || ref),
+    ...(clip ? { clip } : {}),
+  }) as { data?: string };
+  if (!shot.data) throw new Error('screenshot: bridge returned no image data');
+  fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
+}
 
 // ─── xpath / box — utility queries ─────────────────────────────
 //
@@ -968,6 +1293,16 @@ register('xpath', async (ctx, args, opts) => {
 register('box', async (ctx, args) => {
   const target = args[0] ? String(args[0]) : null;
   if (!target) throw new Error('Usage: box <@ref|selector>');
+  if (ctx.bridgeMode) {
+    try {
+      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target));
+    } catch (err) {
+      if (String((err as Error)?.message ?? err).includes('element not visible')) {
+        throw new Error(`${target}: element not visible or not in layout`);
+      }
+      throw err;
+    }
+  }
   const page = await activePage(ctx);
   const locator = resolveRef(ctx, target, page);
   const box = await locator.first().boundingBox();
@@ -976,6 +1311,25 @@ register('box', async (ctx, args) => {
 });
 
 register('snapshot', async (ctx, _args, opts) => {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    const result = await bridgeSnapshot(bridge, {
+      interactive: Boolean(opts.interactive),
+      compact: Boolean(opts.compact),
+      depth: opts.depth === undefined ? undefined : Number(opts.depth),
+      selector: opts.selector as string | undefined,
+      cursorInteractive: Boolean(opts.cursorInteractive),
+      dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
+    });
+    ctx.refs.clear();
+    ctx.bridgeRefs = result.refs;
+    let annotatedPath: string | null = null;
+    if (opts.annotate) {
+      annotatedPath = (opts.output as string) || `/tmp/ghax-annotated-${Date.now()}.png`;
+      await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
+    }
+    return { text: result.text, count: result.count, ...(annotatedPath ? { annotatedPath } : {}) };
+  }
   const page = await activePage(ctx);
   const result = await takeSnapshot(page, {
     interactive: Boolean(opts.interactive),
@@ -1001,6 +1355,49 @@ register('snapshot', async (ctx, _args, opts) => {
     ...(annotatedPath ? { annotatedPath } : {}),
   };
 });
+
+async function annotateBridgeScreenshot(
+  bridge: Bridge,
+  refs: Map<string, BridgeRef>,
+  outPath: string,
+): Promise<void> {
+  const boxes: Array<{ ref: string; x: number; y: number; width: number; height: number }> = [];
+  for (const [ref, entry] of refs) {
+    try {
+      boxes.push({ ref, ...(await bridgeBox(bridge, entry)) });
+    } catch {
+      // Hidden/off-layout refs are omitted, matching the Playwright path.
+    }
+  }
+  await bridgeEvaluate(bridge, `(() => {
+    document.getElementById('__ghax_annotate__')?.remove();
+    const data = ${JSON.stringify(boxes)};
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.id = '__ghax_annotate__';
+    const w = Math.max(document.documentElement.scrollWidth, innerWidth);
+    const h = Math.max(document.documentElement.scrollHeight, innerHeight);
+    svg.setAttribute('width', String(w)); svg.setAttribute('height', String(h));
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    svg.style.cssText = 'position:absolute;top:0;left:0;z-index:2147483647;pointer-events:none';
+    for (const b of data) {
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      for (const [k,v] of Object.entries({x:b.x,y:b.y,width:b.width,height:b.height})) rect.setAttribute(k, String(v));
+      rect.setAttribute('fill','rgba(255,0,0,.08)'); rect.setAttribute('stroke','#e00'); rect.setAttribute('stroke-width','2');
+      svg.appendChild(rect);
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', String(b.x + 4)); label.setAttribute('y', String(b.y + 14));
+      label.setAttribute('font-family','ui-monospace,monospace'); label.setAttribute('font-size','11');
+      label.setAttribute('fill','#fff'); label.setAttribute('stroke','#000'); label.setAttribute('stroke-width','3');
+      label.setAttribute('paint-order','stroke'); label.textContent = '@' + b.ref; svg.appendChild(label);
+    }
+    document.body.appendChild(svg);
+  })()`);
+  try {
+    await captureBridgeScreenshot(bridge, outPath, true);
+  } finally {
+    await bridgeEvaluate(bridge, `document.getElementById('__ghax_annotate__')?.remove()`).catch(() => undefined);
+  }
+}
 
 async function annotateScreenshot(
   page: Page,
@@ -1094,9 +1491,6 @@ async function annotateScreenshot(
 register('click', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   if (!target) throw new Error('Usage: click <@ref|selector>');
-  const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
-
   const observe = opts.observe !== false && opts['no-observe'] !== true;
   const observeMs = (() => {
     const raw = opts['observe-ms'] ?? opts.observeMs;
@@ -1104,6 +1498,49 @@ register('click', async (ctx, args, opts) => {
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : 300;
   })();
+
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    const ref = await resolveBridgeTarget(ctx, target);
+    const readState = async () => bridgeEvaluate(bridge, `(() => {
+      const sel = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
+      const dialogs = [...document.querySelectorAll(sel)].filter((el) => {
+        const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+      }).length;
+      return { dialogs, url: location.href };
+    })()`) as Promise<{ dialogs: number; url: string }>;
+    const pre = observe ? await readState() : { dialogs: 0, url: '' };
+    const box = await bridgeBox(bridge, ref);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await bridge.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await bridge.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await bridge.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    if (!observe) return { ok: true };
+    const deadline = Date.now() + observeMs;
+    let post = pre;
+    let urlChanged = false;
+    while (Date.now() < deadline) {
+      post = await readState().catch(() => post);
+      urlChanged = post.url !== pre.url;
+      if (urlChanged || post.dialogs < pre.dialogs) break;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    post = await readState().catch(() => post);
+    urlChanged ||= post.url !== pre.url;
+    return {
+      ok: true,
+      dialogDismissed: post.dialogs < pre.dialogs,
+      urlChanged,
+      preDialogCount: pre.dialogs,
+      postDialogCount: post.dialogs,
+      observedMs: observeMs,
+    };
+  }
+
+  const page = await activePage(ctx);
+  const loc = resolveRef(ctx, target, page);
 
   const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
   const preUrl = observe ? page.url() : '';
@@ -1151,6 +1588,37 @@ register('fill', async (ctx, args) => {
   const target = String(args[0] ?? '');
   const value = String(args[1] ?? '');
   if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
+  if (ctx.bridgeMode) {
+    const result = await bridgeCallOn(
+      requireBridge(ctx),
+      await resolveBridgeTarget(ctx, target),
+      `function(v) {
+        const start = this;
+        const container = start.closest?.('.monaco-editor') || start.closest?.('[data-mode-id]');
+        const root = container?.classList?.contains('monaco-editor') ? container : (container?.closest?.('.monaco-editor') || container);
+        const editors = globalThis.monaco?.editor?.getEditors?.() || [];
+        const editor = root && editors.find((ed) => { const node = ed.getDomNode(); return node && (node === root || node.contains(root) || root.contains(node)); });
+        if (editor) { editor.setValue(v); return { editor: 'monaco' }; }
+        const e = this;
+        if (e.getAttribute?.('contenteditable') === 'true') {
+          e.focus(); e.textContent = v;
+          e.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: v }));
+          e.dispatchEvent(new Event('change', { bubbles: true }));
+          e.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+          return {};
+        }
+        const proto = Object.getPrototypeOf(e);
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        e.focus(); if (setter) setter.call(e, v); else e.value = v;
+        e.dispatchEvent(new Event('input', { bubbles: true }));
+        e.dispatchEvent(new Event('change', { bubbles: true }));
+        e.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        return {};
+      }`,
+      [value],
+    ) as { editor?: string } | undefined;
+    return result?.editor === 'monaco' ? { ok: true, editor: 'monaco' } : { ok: true };
+  }
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
 
@@ -1489,6 +1957,10 @@ function buildSelectError(target: string, attempts: string[]): string {
 register('press', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: press <key>');
+  if (ctx.bridgeMode) {
+    await pressBridgeKey(requireBridge(ctx), key);
+    return { ok: true };
+  }
   const page = await activePage(ctx);
   await page.keyboard.press(key);
   return { ok: true };
@@ -1513,10 +1985,54 @@ register('upload', async (ctx, args) => {
 
 register('type', async (ctx, args) => {
   const text = String(args[0] ?? '');
+  if (ctx.bridgeMode) {
+    await requireBridge(ctx).send('Input.insertText', { text });
+    return { ok: true };
+  }
   const page = await activePage(ctx);
   await page.keyboard.type(text);
   return { ok: true };
 });
+
+async function pressBridgeKey(bridge: Bridge, spec: string): Promise<void> {
+  const parts = spec.split('+').filter(Boolean);
+  const keyName = parts.pop() ?? spec;
+  let modifiers = 0;
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (lower === 'alt') modifiers |= 1;
+    else if (lower === 'control' || lower === 'ctrl') modifiers |= 2;
+    else if (lower === 'meta' || lower === 'command' || lower === 'cmd') modifiers |= 4;
+    else if (lower === 'shift') modifiers |= 8;
+  }
+  const aliases: Record<string, { key: string; code: string; keyCode: number }> = {
+    Enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
+    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+    Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+    Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+    Home: { key: 'Home', code: 'Home', keyCode: 36 },
+    End: { key: 'End', code: 'End', keyCode: 35 },
+    PageUp: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
+    PageDown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
+    Space: { key: ' ', code: 'Space', keyCode: 32 },
+  };
+  const known = aliases[keyName];
+  const key = known?.key ?? keyName;
+  const code = known?.code ?? (key.length === 1 && /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : key);
+  const keyCode = known?.keyCode ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+  const common = { key, code, modifiers, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode };
+  await bridge.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    ...common,
+    ...(key.length === 1 && (modifiers & 7) === 0 ? { text: key, unmodifiedText: key } : {}),
+  });
+  await bridge.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+}
 
 register('console', async (ctx, _args, opts) => {
   const errorsOnly = Boolean(opts.errors);
@@ -1899,6 +2415,59 @@ register('is', async (ctx, args) => {
 });
 
 register('wait', async (ctx, args, opts) => {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    if (opts.networkidle) {
+      await bridge.send('Network.enable');
+      const deadline = Date.now() + 30_000;
+      let idleSince = ctx.bridgeNetworkRequests.size === 0 ? Date.now() : 0;
+      while (Date.now() < deadline) {
+        if (ctx.bridgeNetworkRequests.size === 0) {
+          if (!idleSince) idleSince = Date.now();
+          if (Date.now() - idleSince >= 500) return { ok: true };
+        } else {
+          idleSince = 0;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error('wait --networkidle timed out after 30000ms');
+    }
+    if (opts.load) {
+      if (await bridgeEvaluate(bridge, 'document.readyState === "complete"').catch(() => false)) return { ok: true };
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { off(); reject(new Error('wait --load timed out after 30000ms')); }, 30_000);
+        const off = bridge.onEvent((ev) => {
+          if (ev.method === 'Page.loadEventFired') { clearTimeout(timer); off(); resolve(); }
+        });
+      });
+      return { ok: true };
+    }
+    const a = args[0];
+    if (typeof a === 'string' && /^\d+$/.test(a)) {
+      await new Promise((resolve) => setTimeout(resolve, Number(a)));
+      return { ok: true };
+    }
+    if (typeof a === 'string') {
+      const result = await bridge.send('Runtime.evaluate', {
+        expression: `(async () => {
+          const selector = ${JSON.stringify(a)};
+          const deadline = Date.now() + 30000;
+          while (Date.now() < deadline) {
+            const el = document.querySelector(selector);
+            if (el) { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); if (s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0) return true; }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return false;
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      }, 31_000);
+      const visible = Boolean((result as { result?: { value?: unknown } }).result?.value);
+      if (!visible) throw new Error(`wait selector timed out after 30000ms: ${a}`);
+      return { ok: true };
+    }
+    throw new Error('Usage: wait <selector|ms|--networkidle|--load>');
+  }
   const page = await activePage(ctx);
   if (opts.networkidle) {
     await page.waitForLoadState('networkidle');
@@ -3002,7 +3571,7 @@ async function main() {
     browser,
     context,
     cdpHttpUrl: cdpHttpUrl ?? '',
-    cdpBrowserUrl: cdpBrowserUrl ?? '',
+    cdpBrowserUrl: cdpBrowserUrl ?? (bridgeMode ? `bridge://127.0.0.1:${bridgePort}` : ''),
     browserKind,
     bridgeMode,
     bridge,
@@ -3013,6 +3582,8 @@ async function main() {
     captureBodiesRe: captureBodiesPattern !== null ? globToRegExp(captureBodiesPattern) : null,
     activePageId: null,
     refs: new Map(),
+    bridgeRefs: new Map(),
+    bridgeNetworkRequests: new Map(),
     instrumented: new WeakSet<Page>(),
     startedAt: Date.now(),
     stateDir: cfg.stateDir,
@@ -3025,6 +3596,23 @@ async function main() {
     downloads: new CircularBuffer<DownloadEntry>(200),
     browserSession: null,
   };
+
+  if (bridgeMode && bridge) {
+    wireBridgeEvents(ctx);
+    bridge.on('controlled', (tabId: number | null) => {
+      clearSnapshotRefs(ctx);
+      ctx.bridgeNetworkRequests.clear();
+      ctx.activePageId = tabId === null ? null : String(tabId);
+      if (tabId !== null) void enableBridgeDomains(ctx);
+    });
+    bridge.on('hello', () => {
+      if (bridge.controlledTabId !== null) void enableBridgeDomains(ctx);
+    });
+    if (bridge.controlledTabId !== null) {
+      ctx.activePageId = String(bridge.controlledTabId);
+      void enableBridgeDomains(ctx);
+    }
+  }
 
   if (!bridgeMode && browser) {
     // Undo Playwright's download hijack. connectOverCDP has, by now, issued
@@ -3145,6 +3733,12 @@ async function main() {
         ctx.networkListeners.add(write);
         cleanup = () => ctx.networkListeners.delete(write);
       } else if (url.startsWith('/sse/ext-sw-logs/')) {
+        if (ctx.bridgeMode) {
+          write({ error: 'ext.sw.logs: not supported over the extension bridge yet' });
+          clearInterval(keepAlive);
+          res.end();
+          return;
+        }
         const extId = decodeURIComponent(url.slice('/sse/ext-sw-logs/'.length));
         try {
           // Force the subscription to exist before attaching the listener.

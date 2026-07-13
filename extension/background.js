@@ -45,6 +45,7 @@ let reconnectTimer = null;
 let pingTimer = null;
 let controlledTabId = null;
 let attached = false;
+let reattachTimer = null;
 
 async function getPort() {
   const { bridgePort } = await chrome.storage.local.get('bridgePort');
@@ -124,20 +125,26 @@ async function connect() {
     // A respawned worker persisted its controlled tab — re-attach proactively
     // so control survives eviction even if the daemon doesn't re-assert.
     await loadPersistedTab();
-    let reattached = false;
+    let retainedControl = false;
     if (controlledTabId != null) {
       try {
         await attachTo(controlledTabId);
-        reattached = true;
-      } catch {
-        await persistTab(null); // tab is gone; forget it
+        retainedControl = true;
+      } catch (err) {
+        if (isTemporarilyUnattachable(err)) {
+          // Keep the desired tab through cert/chrome-error interstitials.
+          retainedControl = true;
+          scheduleReattach();
+        } else {
+          await persistTab(null); // tab is gone or another debugger owns it
+        }
       }
     }
     send({
       type: 'hello',
       agent: 'ghax-ext',
       version: chrome.runtime.getManifest().version,
-      controlledTabId: reattached ? controlledTabId : null,
+      controlledTabId: retainedControl ? controlledTabId : null,
     });
     startPing();
     setStatus();
@@ -180,6 +187,26 @@ async function attachTo(tabId) {
   attached = true;
 }
 
+function isTemporarilyUnattachable(err) {
+  return /cannot attach to this target|no tab with given id|target closed/i.test(err?.message ?? String(err));
+}
+
+function scheduleReattach(delay = 250) {
+  if (reattachTimer || controlledTabId == null || attached) return;
+  reattachTimer = setTimeout(async () => {
+    reattachTimer = null;
+    if (controlledTabId == null || attached) return;
+    try {
+      await attachTo(controlledTabId);
+      await setStatus();
+      reportControlled();
+    } catch (err) {
+      if (isTemporarilyUnattachable(err)) scheduleReattach(Math.min(delay * 2, 4000));
+      else await setStatus({ detachedReason: err?.message ?? String(err) });
+    }
+  }, delay);
+}
+
 async function ensureAttached() {
   if (attached) return;
   if (controlledTabId == null) {
@@ -197,12 +224,25 @@ async function switchControlTo(tabId) {
     attached = false;
   }
   await persistTab(tabId);
-  await ensureAttached();
+  try {
+    await ensureAttached();
+  } catch (err) {
+    // Certificate interstitials and chrome-error:// pages temporarily refuse
+    // chrome.debugger.attach. Keep the tab selected and retry as it returns
+    // to an attachable page instead of losing control entirely.
+    if (!isTemporarilyUnattachable(err)) throw err;
+    attached = false;
+    scheduleReattach();
+  }
   await setStatus();
   reportControlled();
 }
 
 async function stopControl() {
+  if (reattachTimer) {
+    clearTimeout(reattachTimer);
+    reattachTimer = null;
+  }
   if (controlledTabId != null) {
     await chrome.debugger.detach({ tabId: controlledTabId }).catch(() => undefined);
   }
@@ -232,8 +272,23 @@ async function handleMessage(raw) {
   // Everything else is a CDP command to relay: {id, method, params}.
   if (typeof msg.id !== 'number' || typeof msg.method !== 'string') return;
   try {
-    await ensureAttached();
-    const result = await chrome.debugger.sendCommand({ tabId: controlledTabId }, msg.method, msg.params ?? {});
+    let result;
+    try {
+      await ensureAttached();
+      result = await chrome.debugger.sendCommand({ tabId: controlledTabId }, msg.method, msg.params ?? {});
+    } catch (err) {
+      // Navigating to a certificate-error page can detach chrome.debugger
+      // before Page.navigate replies. chrome.tabs.update is outside the
+      // debugger session, so it still commits the requested navigation; the
+      // onUpdated/onDetach recovery path re-attaches when Chromium permits it.
+      if (msg.method !== 'Page.navigate' || typeof msg.params?.url !== 'string') {
+        throw err;
+      }
+      await chrome.tabs.update(controlledTabId, { url: msg.params.url });
+      attached = false;
+      scheduleReattach();
+      result = { frameId: '' };
+    }
     send({ id: msg.id, result: result ?? {} });
   } catch (err) {
     send({ id: msg.id, error: { message: err?.message ?? String(err) } });
@@ -248,6 +303,36 @@ async function handleControl(msg) {
       send({ type: 'control-ack', id, ok: true, tabId: null });
       return;
     }
+    if (msg.action === 'list-tabs') {
+      const tabs = await chrome.tabs.query({});
+      send({
+        type: 'control-ack', id, ok: true, tabId: controlledTabId,
+        result: tabs.filter((tab) => typeof tab.id === 'number').map((tab) => ({
+          id: tab.id,
+          title: tab.title ?? '',
+          url: tab.url ?? '',
+          active: tab.id === controlledTabId,
+        })),
+      });
+      return;
+    }
+    if (msg.action === 'new-window') {
+      const win = await chrome.windows.create({ url: msg.url || 'about:blank', focused: false });
+      const candidates = win.tabs?.length ? win.tabs : await chrome.tabs.query({ windowId: win.id });
+      let tab = candidates.find((candidate) => typeof candidate.id === 'number');
+      if (!tab?.id) throw new Error('new window did not create a controllable tab');
+      await switchControlTo(tab.id);
+      const deadline = Date.now() + 5000;
+      while (tab.status !== 'complete' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        tab = await chrome.tabs.get(tab.id);
+      }
+      send({
+        type: 'control-ack', id, ok: true, tabId: tab.id,
+        result: { id: tab.id, title: tab.title ?? '', url: tab.url ?? msg.url ?? 'about:blank', active: true },
+      });
+      return;
+    }
     let tabId;
     if (msg.action === 'control-active') {
       // A service worker has no "current window" — currentWindow can return
@@ -258,6 +343,10 @@ async function handleControl(msg) {
     } else if (msg.action === 'control-tab') {
       if (typeof msg.tabId !== 'number') throw new Error('control-tab requires a numeric tabId');
       tabId = msg.tabId;
+      if (!msg.quiet) {
+        const tab = await chrome.tabs.update(tabId, { active: true });
+        if (typeof tab.windowId === 'number') await chrome.windows.update(tab.windowId, { focused: true });
+      }
     } else {
       throw new Error(`unknown control action: ${msg.action}`);
     }
@@ -280,6 +369,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId !== controlledTabId) return;
   attached = false;
   void setStatus({ detachedReason: reason });
+  if (reason === 'target_closed') scheduleReattach();
+});
+
+// A cert interstitial temporarily turns the controlled target into an
+// unattachable chrome-error:// page. Any subsequent navigation/update is a
+// chance to recover, including the user clicking through the interstitial.
+chrome.tabs.onUpdated.addListener((tabId) => {
+  if (tabId === controlledTabId && !attached) scheduleReattach();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

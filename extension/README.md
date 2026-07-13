@@ -1,4 +1,4 @@
-# ghax bridge extension (experimental, walking skeleton)
+# ghax bridge extension
 
 Since Edge 150 / Chrome 136, `--remote-debugging-port` is silently ignored
 on the browser's **default profile** — Playwright's `chromium.connectOverCDP`
@@ -7,9 +7,11 @@ already-logged-in session. `chrome.debugger` is not subject to that
 restriction, so this MV3 extension relays CDP commands from the ghax daemon
 to your real tab through it.
 
-This is a **prototype covering exactly 3 verbs** — `ghax goto`, `ghax eval`,
-`ghax text` — not full ghax parity. See `../CHANGELOG.md` (Unreleased) and
-`crates/cli/src/attach.rs` for the current scope.
+The bridge covers the normal page-driving surface: tabs/windows, navigation,
+HTML/text/eval, accessibility snapshots and `@ref` interactions, screenshots,
+keyboard input, waits, console, and network capture. Commands that require a
+browser-level CDP endpoint, including the `ext` family, return an explicit
+"not supported over the extension bridge yet" error.
 
 ## Load it (unpacked)
 
@@ -34,8 +36,9 @@ This is a **prototype covering exactly 3 verbs** — `ghax goto`, `ghax eval`,
    for anything using `chrome.debugger`. It disappears when you click
    **Stop** in the popup, run `ghax bridge control --stop`, close the tab,
    or close the browser.
-4. Run `ghax goto <url>`, `ghax eval <js>`, `ghax text` from another
-   terminal — they now drive the tab under control.
+4. Run normal page commands from another terminal. Start with
+   `ghax snapshot -i`, then use its refs with commands such as
+   `ghax click @e3` and `ghax fill @e7 'value'`.
 
 ### Staying connected (MV3 service-worker eviction)
 
@@ -49,7 +52,7 @@ alive and self-healing so you don't have to babysit it:
 - The controlled tab id is persisted in `chrome.storage.local`, so a
   respawned worker re-attaches to it, and the daemon re-asserts the desired
   control target on every reconnect. Net effect: leave it idle, come back,
-  and `ghax goto/eval/text` still work — no user action needed.
+    and page commands still work — no user action needed.
 
 ## How it fits together
 
@@ -71,11 +74,31 @@ ghax CLI (Rust)  --HTTP RPC-->  ghax daemon (Node)  --WebSocket-->  this extensi
   extension (or opening the popup and clicking Control this tab again)
   replaces the old one; the daemon logs the replacement.
 
-## Known limits (intentional — this is a skeleton, not a rewrite)
+## Bridge-capable commands
 
-- Only `goto` / `eval` / `text` are wired up. Every other `ghax` verb still
-  assumes the old `connectOverCDP` path and will error cleanly (not crash)
-  if you run it while attached in `--extension` mode.
-- One controlled tab at a time, no multi-tab/window support.
+- Tabs/windows: `status`, `tabs`, `tab`, `find`, `new-window`.
+- Navigation/content: `goto`, `back`, `forward`, `reload`, `eval`, `text`,
+  `html`.
+- Inspection/interaction: `snapshot` (`-i`, `-C`, selector/depth/compact,
+  annotated screenshot), `box`, `screenshot`, `click`, `fill`, `press`,
+  `type`, `wait` (milliseconds, visible selector, load, network idle).
+- Diagnostics: `console`, `network`, including the existing filters and HAR
+  output. Body capture follows the daemon's `--capture-bodies` setting.
+- Local orchestration: `batch`, recording state, and `bridge control`.
+
+The extension drives one tab at a time, but `tabs`, `tab <id>`, and
+`new-window <url>` can enumerate and move that control. Switching control
+invalidates all snapshot refs. The `ext` family and browser-level operations
+such as cookies, storage, uploads, profiling, and viewport emulation remain on
+the normal CDP-port transport and fail clearly in bridge mode.
+
+Certificate interstitials can temporarily make a tab refuse
+`chrome.debugger.attach`. Navigation falls back to `chrome.tabs.update`; the
+extension retains the controlled tab and retries attach when it becomes
+attachable again (for example after the user proceeds or navigates back).
+
+## Known limits
+
+- One controlled tab at a time; commands are not multiplexed across tabs.
 - No fragmented-WebSocket-frame handling on the daemon side (see
   `src/bridge.ts`) — fine for the small JSON messages this bridge sends.

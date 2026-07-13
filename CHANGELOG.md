@@ -15,10 +15,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--bridge-port` / `GHAX_BRIDGE_PORT`) that a new unpacked MV3 extension
   (`extension/`, "ghax bridge") connects to from the real browser and
   relays CDP commands through via `chrome.debugger` — which the socket
-  restriction does not affect. Only three verbs are wired to this path so
-  far: `ghax goto`, `ghax eval`, `ghax text` (see the `ctx.bridgeMode`
-  branches in `src/daemon.ts`); every other verb still assumes the
-  Playwright/CDP path and errors cleanly if run while attached this way.
+  restriction does not affect. The bridge now covers the standard page
+  surface: tab enumeration/switching and new windows; navigation, eval,
+  text, and HTML; accessibility snapshots with bridge-native `@ref`
+  interaction; viewport/element/full and annotated screenshots; click,
+  fill, press, and type; selector/load/network-idle waits; and relayed
+  console/network buffers with the existing filters and output shapes.
+  Commands that still require Playwright or browser-level CDP, including
+  the full `ext` family, return a clear "not supported over the extension
+  bridge yet" error instead of reaching an invalid `/json/list` URL.
   Load the extension unpacked, click "Control this tab" in its popup, and
   `ghax attach --extension` prints load-unpacked instructions and polls
   `/bridge-status` until the extension's `hello` handshake lands (60s
@@ -42,6 +47,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     --stop]` (re)points the bridge mid-session via a daemon→extension
     control channel distinct from CDP commands. `/bridge-status` now also
     reports the controlled tab id.
+  - **Raw-CDP refs and interactions** — bridge snapshots use
+    `Accessibility.getFullAXTree` and retain each ref's
+    `backendDOMNodeId` in a controlled-tab-scoped daemon map. Clicks use
+    `DOM.getBoxModel` plus trusted `Input.dispatchMouseEvent`; fills use
+    the framework-safe native setter/event sequence (including Monaco),
+    and key input uses the Input domain. A new control-channel tab/window
+    protocol preserves ref invalidation on control changes.
+  - **Certificate-error recovery** — if a cert interstitial or
+    `chrome-error://` transition detaches `chrome.debugger`, navigation
+    falls back to `chrome.tabs.update`. The extension retains the selected
+    tab and re-attaches automatically when it becomes attachable again.
 
 ### Fixed
 - `ghax attach`'s no-CDP-found hint no longer tells you to relaunch your

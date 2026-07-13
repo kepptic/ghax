@@ -115,7 +115,7 @@ so the guardrails matter:
 - **Scoped attach.** The extension attaches to the tab the user picks in
   the popup, not blanket auto-attach to every tab.
 
-## Prototype scope (walking skeleton, 2026-07-13) — verified live
+## Initial prototype (2026-07-13) — verified live
 
 First cut proves the round-trip and the transport is robust, not full
 command parity:
@@ -155,18 +155,46 @@ process can reach the localhost bridge and drive the browser. Acceptable
 for an experimental single-user prototype; needs a token (written to
 `.ghax/`, checked at `hello`) before it's a daily default.
 
-## Path to full parity (not yet built)
+## Page-command parity (implemented 2026-07-13)
 
-- Map the rest of the browse surface onto `bridge.send`: `snapshot -i`
-  (inject the existing a11y-walker JS via `Runtime.evaluate`, or
-  `Accessibility.getFullAXTree`), `click`/`fill`/`press` (`Input.*` +
-  the React-safe setter), `screenshot` (`Page.captureScreenshot`),
-  `console`/`network` (`Log`/`Network` domains via relayed events).
-- Multi-tab / tab-switch semantics over the bridge (attach per tab; keep
-  the ref-map-clears-on-tab-switch invariant from `CLAUDE.md`).
-- Handshake token + reconnect hardening.
-- Packaging: signed `.crx` / store listing vs. keep unpacked for the
-  team. Decide once parity lands.
+The bridge now supports the standard page-driving surface without creating a
+fake browser-level CDP endpoint:
+
+- The control channel exposes `chrome.tabs.query`, tab switching, and
+  `chrome.windows.create`, backing `tabs`, `tab`, `find`, and `new-window`.
+- `snapshot` reads `Accessibility.getFullAXTree`. Each emitted `@e` ref keeps
+  its `backendDOMNodeId` in a daemon-side map and tags the DOM node with
+  `data-ghax-ref` for inspection. `-C` adds open-shadow/cursor refs. The map is
+  replaced on every snapshot and cleared whenever control changes.
+- `click` resolves the backend node, scrolls it into view, reads
+  `DOM.getBoxModel`, and sends trusted `Input.dispatchMouseEvent` events.
+  `fill` uses `Runtime.callFunctionOn` with the same native-value-setter and
+  input/change/blur sequence as the Playwright path, plus Monaco model support.
+  `press` and `type` use the Input domain.
+- `html`, viewport/element/full-page screenshots, annotated snapshots, and
+  selector/load/network-idle waits use raw Runtime/Page/DOM/Network commands.
+- Runtime/Log/Network events feed the same daemon circular buffers used by the
+  CDP-port path, so existing `console` and `network` filters and output shapes
+  are unchanged.
+- A single bridge allow-list guards every remaining handler. Browser-level
+  operations, including the feasibility-uncertain `ext` family, return
+  `<verb>: not supported over the extension bridge yet` instead of reaching
+  `/json/list` with an empty CDP URL.
+
+Navigation has a second recovery lane for certificate interstitials and
+`chrome-error://` transitions. If `Page.navigate` loses the debugger session,
+the extension commits the URL with `chrome.tabs.update`, retains the controlled
+tab id, and retries `chrome.debugger.attach` on tab updates and reconnects.
+
+Not ported: cookies/storage/upload (sensitive or file-backed browser-context
+operations), viewport/responsive emulation, select's framework-specific
+strategy cascade, QA/perf/profile/download workflows, and all `ext` commands.
+Those remain available through `ghax attach --launch` and fail explicitly over
+the extension bridge.
+
+Remaining product work is handshake authentication and packaging (signed
+`.crx` / store listing versus unpacked team use). Authentication is deliberately
+outside this parity change.
 
 ## Alternatives considered and rejected
 
