@@ -16,6 +16,14 @@ running Chrome or Edge via CDP**. Not a sandboxed browser — the user's own
 session, with auth, extensions, and open tabs intact. Plus a Claude Code
 skill (`/kepptic-ghax` — single skill, full command surface + recipes).
 
+Two transports (Edge 150 / Chrome 136 block CDP on the default profile):
+the **CDP path** (`chromium.connectOverCDP`) drives scratch/dedicated
+profiles, and the **bridge** (`ghax attach --extension`) drives the user's
+*real* session through an MV3 extension (`extension/`) that relays CDP via
+`chrome.debugger` over a localhost WebSocket (`src/bridge.ts` daemon side,
+`ctx.bridgeMode` verb branches). Full verb parity landed on the bridge in
+v0.5. See [`design/plan/07-extension-bridge.md`](./design/plan/07-extension-bridge.md).
+
 For the full architecture see [ARCHITECTURE.md](./ARCHITECTURE.md). For the
 "why" behind each design decision see
 [`design/plan/`](./design/plan/).

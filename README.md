@@ -12,6 +12,7 @@ It's an alternative to playwright-cli, Puppeteer, and Claude-in-Chrome for inter
 - Screenshot the page, or read its text and DOM state
 - Read console messages and network requests as they happen
 - Drive Chrome extensions — service workers, `chrome.storage`, hot-reload after a rebuild
+- Drive your **real logged-in session** (real auth, SSO cookies, open tabs) via the ghax bridge extension — even though Edge 150 / Chrome 136 block CDP on the default profile
 
 ```bash
 ghax attach
@@ -156,13 +157,26 @@ Full methodology, per-operation breakdowns, and reproduction steps: [docs/BENCHM
 
 ## Profile modes
 
-Three modes, one flag each.
-
 | Mode | How | When |
 |------|-----|------|
 | **Scratch profile** | `ghax attach --launch` (add `--headless` for no window) | Default. Fresh instance, reproducible environments, CI-style runs. |
 | **Dedicated profile** | Launch with `--remote-debugging-port=9222` **and** `--user-data-dir=<persistent path>`, then `ghax attach` | A reusable automation profile that accumulates logins/state across sessions. |
-| **Existing (default-profile) session** | Not possible on Edge 150+/Chrome 136+ — the CDP flag is ignored on the default data dir | Use an extension-based bridge (e.g. Claude-in-Chrome) for the real session. |
+| **Real session (bridge)** | `ghax attach --extension` — the ghax bridge extension relays CDP from your real profile | Your actual logged-in browser: real auth, SSO cookies, open tabs. CDP can't reach the default profile since Edge 150 / Chrome 136 — the bridge is how. |
+
+### Real session via the ghax bridge (experimental, v0.5+)
+
+Since Edge 150 / Chrome 136, `--remote-debugging-port` is ignored on the default profile, so plain CDP can't drive your everyday browser. The **ghax bridge** restores that: a small MV3 extension (`extension/`) relays CDP to a real tab through `chrome.debugger` — the one API the restriction doesn't touch — over a localhost WebSocket.
+
+```bash
+# One-time: load the extension unpacked
+#   edge://extensions → Developer mode → Load unpacked → ./extension
+ghax attach --extension --control-active   # drive the active tab, no popup click
+ghax snapshot -i                            # full verb surface over your real session
+ghax bridge control --tab-id <n>            # or point it at a specific tab (see `tabs`)
+ghax bridge control --stop                  # release the tab (debugging banner clears)
+```
+
+Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); reload the unpacked extension after updating ghax; the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act.
 
 ---
 
@@ -284,7 +298,7 @@ These agents read a project memory file ([`AGENTS.md`](./AGENTS.md), `.cursorrul
 
 When a task requires a browser, use the `ghax` CLI. Three patterns:
 
-1. Attach: `ghax attach` (or `ghax attach --launch` for a scratch browser)
+1. Attach: `ghax attach` (scratch), `ghax attach --launch` (fresh instance), or `ghax attach --extension --control-active` (the user's real session via the bridge)
 2. Snapshot-then-interact:
    `ghax snapshot -i --json` → `ghax click @e3` → `ghax fill @e5 "..."`
 3. One-round-trip batch:
@@ -303,7 +317,7 @@ Chromium-family only: Edge, Chrome, Chromium, Brave, Arc. Firefox and Safari are
 
 Chrome 136+ and Edge 150+ silently ignore `--remote-debugging-port` on the default user-data-dir ([Chromium's remote-debugging hardening](https://developer.chrome.com/blog/remote-debugging-port)) — no error, no `DevToolsActivePort` file, nothing listens. There is no policy or flag bypass, and copying the default profile into another directory doesn't carry sessions over (cookies/passwords are encrypted per data dir). Always pass `--user-data-dir=<path>` explicitly (the quickstart above shows this), or use `ghax attach --launch`.
 
-To drive a user's *real* logged-in session, use a browser-extension-based bridge (e.g. Claude-in-Chrome) — extensions use `chrome.debugger` inside the profile, which the socket restriction doesn't affect.
+To drive your *real* logged-in session anyway, use the **ghax bridge** (`ghax attach --extension`, see [Real session via the ghax bridge](#real-session-via-the-ghax-bridge-experimental-v05)) — its extension uses `chrome.debugger` inside the profile, which the socket restriction doesn't affect. Any other extension bridge (e.g. Claude-in-Chrome) works on the same principle.
 
 Both browsers set `navigator.webdriver = true` when launched with `--remote-debugging-port`. Add `--disable-blink-features=AutomationControlled` to suppress that bit if a page you're automating treats it as a bot signal. Full notes: [CONTRIBUTING.md → Known browser quirks](./CONTRIBUTING.md#known-browser-quirks).
 

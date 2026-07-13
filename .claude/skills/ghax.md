@@ -1,6 +1,6 @@
 ---
 name: ghax
-description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP; the user's live session is driven via the Claude-in-Chrome extension, and ghax drives fresh user-approved instances. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
+description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP directly, so ghax drives the user's REAL session through its own bridge extension (`ghax attach --extension`, full verb parity) and drives fresh user-approved scratch instances via `--launch`. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
 ---
 
 # Skill: ghax
@@ -12,9 +12,11 @@ snapshots, MV3 extension internals, real gestures, console/network
 capture — things sandboxed tools don't surface cleanly.
 
 **Since Edge 150 / Chrome 136 the user's real (default-profile) browser
-cannot expose CDP** — see "Browser control model" below before doing
-anything. Short version: the user's live session is driven via the
-Claude-in-Chrome extension; ghax drives fresh, user-approved instances.
+cannot expose CDP directly** — see "Browser control model" below before
+doing anything. Short version: ghax drives the user's real session
+through its own **bridge extension** (`ghax attach --extension`, full
+command parity as of v0.5), and drives fresh user-approved scratch
+instances via `ghax attach --launch`.
 
 ## When to reach for ghax
 
@@ -36,15 +38,13 @@ Claude-in-Chrome extension; ghax drives fresh, user-approved instances.
 
 ## When NOT to reach for ghax
 
-- The task needs the **user's real logged-in session** (their open
-  tabs, real SSO cookies, a dashboard they're signed into) → drive the
-  existing browser via the **Claude-in-Chrome extension**
-  (`mcp__claude-in-chrome__*` tools). CDP can't reach the real profile
-  anymore — see "Browser control model" below.
 - Quick one-off headless testing → use **gstack browse** (`$B`).
 - Programmatic test suites, tracing, video → **playwright-cli**.
-- No CDP instance is running and the user doesn't approve launching
-  one → fall back to gstack browse with a saved-cookies import.
+- The task needs the user's real session but the **ghax bridge extension
+  isn't installed** and can't be → fall back to the **Claude-in-Chrome
+  extension** (`mcp__claude-in-chrome__*`) or gstack browse with saved
+  `.auth/` cookies. (With the bridge installed, real-session work is a
+  ghax job — see Lane 1 below.)
 
 ## Prerequisites
 
@@ -82,55 +82,88 @@ loses every cookie and saved password to per-data-dir encryption
 (also verified 2026-07-12). Don't waste a session rediscovering any of
 this.
 
-So there are two lanes; pick by what the task needs:
+So there are two lanes; pick by what the task needs.
 
-**Lane 1 — the user's existing (real) Edge session** → drive it through
-the **Claude-in-Chrome extension** (`mcp__claude-in-chrome__*` tools).
-The extension runs inside the real profile and uses `chrome.debugger`,
-which the socket restriction doesn't touch — it is now the *only* way
-to reach real auth, real SSO cookies, and the user's open tabs. This
-supersedes older guidance that called those MCP tools a last resort.
+### Lane 1 — the user's real session, via the ghax bridge (v0.5+)
 
-**Lane 2 — ghax / CDP work** (a11y snapshots with @refs, extension
-hot-reload dev loops, perf capture, network/console tailing, QA
-crawls) → **ask the user first**, then launch a fresh, empty instance:
+ghax drives the real Edge/Chrome session itself through its own MV3
+extension (`extension/`, "ghax bridge"), which relays CDP to a real tab
+via `chrome.debugger` — the one API the socket restriction doesn't touch
+— over a localhost WebSocket. This is the primary path for real auth,
+SSO cookies, and the user's open tabs; it is local (no cloud relay) and
+inside the ghax CLI.
+
+```bash
+# One-time install: edge://extensions → Developer mode → Load unpacked
+#   → <repo>/extension  (persists in the profile; reload after ghax updates)
+ghax attach --extension --control-active   # drives the active tab, no popup
+ghax snapshot -i                            # then the full verb surface works
+ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
+```
+
+**Works over the bridge:** goto/back/forward/reload, eval/text/html,
+snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box,
+tabs/tab/new-window, wait, console/network, batch. **Not (yet) over the
+bridge** — these return a clear "not supported over the extension bridge
+yet": cookies, storage, viewport/responsive, qa/perf/profile, gestures,
+and the `ext` family (SW/panel/hot-reload).
+
+Bridge caveats:
+
+- **Reload after updating ghax.** Unpacked extensions load from disk at
+  load time — after pulling new ghax, reload the extension in
+  `edge://extensions` or the real Edge keeps running old code.
+- **Security (interim).** The bridge WS is localhost-only but currently
+  has **no auth token** — while the daemon runs, any local process could
+  connect and drive the browser. Acceptable on a single-user machine;
+  a handshake token is the next hardening step. Treat
+  `ghax attach --extension` as a deliberate foreground act, and prefer
+  `bridge control --stop` / `ghax detach` when done.
+- **Consent is visible.** Attaching shows Edge's persistent "ghax bridge
+  is debugging this browser" banner — expected, not an error.
+- **One controlled tab.** The bridge drives the tab you point it at
+  (`--control-active` or `bridge control --tab-id`). `tabs` lists them.
+- **Fallback:** if the bridge extension isn't installed and can't be, use
+  the Claude-in-Chrome extension (same `chrome.debugger` mechanism, but
+  slower cloud relay, outside ghax).
+
+### Lane 2 — a fresh, empty CDP instance (scratch profile)
+
+For clean-room work, extension dev/hot-reload, or when you explicitly do
+NOT want the real session:
 
 ```bash
 ghax attach --launch --browser edge   # scratch profile ~/.ghax/edge-profile
 curl -s http://127.0.0.1:9222/json/version | head -3   # verify
 ```
 
-The scratch profile persists between runs but holds no personal data.
-Use `--data-dir <path>` for a task-specific dir, `--load-extension` to
-pre-load an unpacked extension for dev work.
+The scratch profile persists but holds no personal data. `--data-dir
+<path>` for a task-specific dir, `--load-extension` to pre-load an
+unpacked extension for dev work.
 
 Rules and caveats:
 
 - **Never point CDP at the real profile and never give the daily-driver
   Edge a `--user-data-dir` it didn't have.** The real Edge stays
-  flag-free; ghax instances are always separate.
-- **Launching a new instance requires user approval** — it spawns a
-  visible second browser on their machine. Ask, unless they already
-  told you to.
+  flag-free; CDP scratch instances are always separate. (Real-session
+  work goes through the bridge in Lane 1, not CDP.)
+- **Launching a new CDP instance requires user approval** — it spawns a
+  visible second browser. Ask unless told otherwise. (The bridge, by
+  contrast, drives the browser they already have.)
 - **Dock-icon hijack:** if a custom-data-dir instance is the only Edge
   running, the Dock icon and `open -a "Microsoft Edge"` open windows
   in the *automation* profile — to the user it looks like their
   extensions and sign-ins vanished (2026-07-12 `/tmp/edge-dag`
-  incident). It isn't data loss. If the user reports a "blank" Edge,
-  check `ps aux | grep -i "Microsoft Edge" | grep user-data-dir` and
-  make sure their normal (no-flags) Edge is running too.
-- Quitting/killing any Edge instance closes its tabs — **ask first**
-  unless the user already told you to restart it.
+  incident). It isn't data loss. Check
+  `ps aux | grep -i "Microsoft Edge" | grep user-data-dir` and make
+  sure their normal (no-flags) Edge is running too.
+- Quitting/killing any Edge instance closes its tabs — **ask first**.
 - Custom data dirs must never live in `/tmp` (wiped on reboot).
-- If a ghax task needs a logged-in session (SaaS QA, authed dashboards),
-  prefer Lane 1, or fall back to gstack browse with saved `.auth/`
-  cookies — don't try to log the scratch instance into the user's
-  accounts without asking.
 
 ## Command cheat sheet
 
 ```bash
-# Connect
+# Connect — CDP (scratch profile)
 ghax attach                              # reuses running browser on :9222
 ghax attach --launch --browser edge      # launches a scratch-profile Edge
 ghax attach --launch --load-extension ./my-ext --data-dir /tmp/dev-profile
@@ -138,6 +171,14 @@ ghax attach --launch --load-extension ./my-ext --data-dir /tmp/dev-profile
                                          # pre-loaded into an isolated profile
 ghax status                              # tabs, targets, ext count
 ghax detach                              # clean daemon shutdown
+
+# Connect — bridge (the user's REAL session, via the ghax bridge extension)
+ghax attach --extension --control-active # drive the active real tab, no popup
+ghax attach --extension                  # connect only; then pick a tab:
+ghax bridge control --active             #   control the current active tab
+ghax bridge control --tab-id <n>         #   control a specific tab (see `tabs`)
+ghax bridge control --stop               #   release the tab (banner clears)
+ghax attach --extension --bridge-port N  # non-default WS port (default 9223)
 
 # Tab work
 ghax tabs                                # list {id, title, url, active}

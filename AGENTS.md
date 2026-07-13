@@ -6,7 +6,7 @@ Claude Code users: [CLAUDE.md](./CLAUDE.md) extends this file with Claude-specif
 
 ## What this project is
 
-ghax is a CLI that attaches to the user's real running Chrome or Edge over Chrome DevTools Protocol. It drives tabs, takes accessibility-tree snapshots with `@e<n>` refs, works with MV3 extension internals, and captures console/network traffic. The CLI is Rust (small, fast binary); the daemon is Node (because Chromium automation needs a Node runtime).
+ghax is a CLI that attaches to the user's real running Chrome or Edge over Chrome DevTools Protocol. It drives tabs, takes accessibility-tree snapshots with `@e<n>` refs, works with MV3 extension internals, and captures console/network traffic. The CLI is Rust (small, fast binary); the daemon is Node (because Chromium automation needs a Node runtime). Two transports: direct CDP (`connectOverCDP`) for scratch/dedicated profiles, and — since Edge 150 / Chrome 136 block CDP on the default profile — the **bridge** (`ghax attach --extension`), an MV3 extension that relays CDP from the user's real session via `chrome.debugger` (see `docs/design/plan/07-extension-bridge.md`).
 
 If you just arrived and need to install: see [llms.txt](./llms.txt) for the install + verify sequence.
 
