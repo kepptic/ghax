@@ -264,6 +264,9 @@ async function connect() {
     const session = chrome.storage.session
       ? await chrome.storage.session.get('ghaxSessionToken').catch(() => ({}))
       : {};
+    // Pairing code, if the user set one in the popup. Ignored by daemons that
+    // don't require pairing; required by those started with a pair code.
+    const { ghaxPairToken } = await chrome.storage.local.get('ghaxPairToken');
     send({
       type: 'hello',
       agent: 'ghax-ext',
@@ -273,6 +276,7 @@ async function connect() {
       label: identity.label,
       controlledTabId, // the tab we WANT; attachment awaits the disposition
       resumeToken: session?.ghaxSessionToken ?? null,
+      ...(typeof ghaxPairToken === 'string' && ghaxPairToken ? { pairToken: ghaxPairToken } : {}),
     });
     startPing();
     setStatus();
@@ -700,7 +704,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         connected: ws?.readyState === WebSocket.OPEN,
         controlledTabId,
         attached,
+        role: bridgeRole,
+        dormantReason,
       });
+      return;
+    }
+
+    if (message?.action === 'reconnect') {
+      // The user just entered/changed a pairing code. Clear dormancy and dial
+      // now instead of waiting out the slow retry.
+      dormantReason = null;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectDelay = RECONNECT_BASE_MS;
+      void connect();
+      sendResponse({ ok: true });
       return;
     }
 

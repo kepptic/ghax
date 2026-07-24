@@ -5,6 +5,9 @@ pub const HELP: &str = r#"ghax — attach to your real Chrome/Edge via CDP and d
 
 Connection:
   attach [--port <n>] [--browser edge|chrome|chromium|brave|arc] [--launch]
+  attach --extension [--control-active] [--browser <bind-filter>] [--pair[=code]]
+                                  # drive your REAL session via the bridge ext;
+                                  #   --pair requires a code typed into the popup
          [--headless] [--load-extension <path>] [--data-dir <path>]
          [--capture-bodies[=<url-glob>]] [--verbose]
          # Without --port, scans :9222-9230. Multiple running → picker.

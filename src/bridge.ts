@@ -104,6 +104,14 @@ export interface BridgeOptions {
   graceMs?: number;
   /** Silence before a bound socket is terminated. Default 25s. */
   livenessMs?: number;
+  /**
+   * Opt-in pairing code. When set, a `hello` must carry a matching
+   * `pairToken` or it's rejected (`hello-reject` → the extension goes
+   * dormant). The bridge WS is already localhost-only; this closes the
+   * "any local process can drive the browser" gap flagged in
+   * design/plan/07. Off by default — no behaviour change unless requested.
+   */
+  pairCode?: string | null;
 }
 /** Commands queued while DEGRADED before we stop pretending and fail fast. */
 const QUEUE_CAP = 32;
@@ -144,6 +152,14 @@ export class BridgeInterrupted extends Error {
   constructor(public readonly method: string) {
     super(`bridge: connection lost while '${method}' was in flight`);
   }
+}
+
+/** Constant-time string compare, so the pairing check can't be timed. */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
 }
 
 interface Peer {
@@ -234,6 +250,7 @@ export class Bridge extends EventEmitter {
   private readonly log: (msg: string) => void;
   private readonly graceMs: number;
   private readonly livenessMs: number;
+  private readonly pairCode: string | null;
 
   constructor(
     public readonly port: number,
@@ -244,6 +261,7 @@ export class Bridge extends EventEmitter {
     this.log = log;
     this.graceMs = opts.graceMs ?? GRACE_MS;
     this.livenessMs = opts.livenessMs ?? LIVENESS_MS;
+    this.pairCode = opts.pairCode && opts.pairCode.trim() ? opts.pairCode.trim() : null;
     this.wss = new WebSocketServer({ host: '127.0.0.1', port });
     this.wss.on('connection', (ws) => this.handleConnection(ws));
     this.wss.on('error', (err) => this.log(`bridge: server error: ${String(err)}`));
@@ -465,6 +483,21 @@ export class Bridge extends EventEmitter {
    * is always explicit via `use()`.
    */
   private handleHello(msg: any, ws: WebSocket): void {
+    // Pairing gate (opt-in). A wrong/absent code is rejected explicitly —
+    // `hello-reject` sends the extension dormant (a slow retry), NOT a socket
+    // close that would restart its fast reconnect loop.
+    if (this.pairCode) {
+      const supplied = typeof msg.pairToken === 'string' ? msg.pairToken : '';
+      if (!timingSafeEqualStr(supplied, this.pairCode)) {
+        this.log(`bridge: rejecting hello — ${supplied ? 'wrong' : 'missing'} pairing code`);
+        this.rawSend(ws, {
+          type: 'hello-reject',
+          reason: 'auth',
+          message: 'pairing code required — enter the code ghax printed into the ghax bridge popup',
+        });
+        return;
+      }
+    }
     let instanceId = typeof msg.instanceId === 'string' && msg.instanceId ? msg.instanceId : '';
     const legacy = !instanceId;
     if (legacy) {

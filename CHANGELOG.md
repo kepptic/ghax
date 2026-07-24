@@ -7,6 +7,27 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Opt-in bridge pairing** (`ghax attach --extension --pair`). The bridge
+  WebSocket is localhost-only, but any local process could previously drive
+  the browser through it. `--pair` mints a 6-digit code (or `--pair <code>`
+  uses your own); the daemon then rejects any `hello` without a matching
+  `pairToken`, and the extension goes dormant (a slow retry, not a hot
+  reconnect loop) until the right code is entered in the popup's new pairing
+  field. The check is constant-time. Off by default — no behaviour change
+  unless you ask for it. Closes the hardening item flagged in
+  design/plan/07.
+- `ghax back` / `ghax forward` over the bridge now **reconcile** after a
+  reconnect instead of reporting a blanket "outcome unknown". They capture the
+  source and target history-entry ids up front, and if the connection drops
+  mid-navigation they wait for resume and compare actual
+  `Page.getNavigationHistory`: landed on the target → `outcome: "succeeded"`;
+  still on the source → `"unknown"` (safe to retry); somewhere else →
+  `"concurrent-navigation"`. The fixed target id means the reconcile itself
+  can't double-step.
+- `test/bridge-live.ts` (`npm run test:bridge-live`, gated on
+  `GHAX_SMOKE_BRIDGE=1`) — an end-to-end test over a REAL browser and the
+  loaded extension, the counterpart to the browser-free simulator. Drives
+  goto/`--stable`/snapshot/eval/back/forward through the actual CDP relay.
 - **`--stable` — wait for the DOM to stop changing.** The fix for reads that
   intermittently returned only the nav shell because they raced SPA hydration.
   `ghax wait --stable [--quiet <ms>] [--timeout <ms>] [--min-nodes <n>]

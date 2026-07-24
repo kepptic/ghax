@@ -12,6 +12,7 @@ const tabInfo = document.getElementById('tabInfo');
 const errEl = document.getElementById('err');
 const labelInput = document.getElementById('labelInput');
 const portInput = document.getElementById('portInput');
+const pairInput = document.getElementById('pairInput');
 const savedEl = document.getElementById('saved');
 
 /**
@@ -105,9 +106,12 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 // The port field is the escape hatch for running a second daemon against a
 // second browser (GHAX_STATE_FILE + --bridge-port on the daemon side).
 async function loadSettings() {
-  const { ghaxLabel, bridgePort } = await chrome.storage.local.get(['ghaxLabel', 'bridgePort']);
+  const { ghaxLabel, bridgePort, ghaxPairToken } = await chrome.storage.local.get(
+    ['ghaxLabel', 'bridgePort', 'ghaxPairToken'],
+  );
   if (typeof ghaxLabel === 'string') labelInput.value = ghaxLabel;
   if (Number.isFinite(Number(bridgePort)) && Number(bridgePort) > 0) portInput.value = String(bridgePort);
+  if (typeof ghaxPairToken === 'string') pairInput.value = ghaxPairToken;
 }
 
 let savedTimer = null;
@@ -131,6 +135,20 @@ portInput.addEventListener('change', async () => {
   }
   await chrome.storage.local.set({ bridgePort: port });
   flashSaved('port saved — reconnect to apply');
+});
+
+pairInput.addEventListener('change', async () => {
+  const code = pairInput.value.trim();
+  if (!code) {
+    await chrome.storage.local.remove('ghaxPairToken');
+    flashSaved('pairing code cleared');
+    return;
+  }
+  await chrome.storage.local.set({ ghaxPairToken: code });
+  // A fresh code likely means we were rejected; nudge a reconnect attempt so
+  // the user doesn't wait out the dormant retry window.
+  chrome.runtime.sendMessage({ action: 'reconnect' }).catch(() => undefined);
+  flashSaved('pairing code saved — reconnecting');
 });
 
 loadSettings();

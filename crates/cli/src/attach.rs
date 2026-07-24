@@ -905,6 +905,7 @@ fn build_daemon_cmd_bridge(
     bridge_port: u16,
     control_active: bool,
     bind_filter: Option<&str>,
+    pair_code: Option<&str>,
     bundle: &std::path::Path,
     stderr_file: std::fs::File,
 ) -> std::process::Command {
@@ -925,6 +926,9 @@ fn build_daemon_cmd_bridge(
     // forgotten install in another profile) parks instead of racing.
     if let Some(filter) = bind_filter {
         cmd.env("GHAX_BRIDGE_BROWSER", filter);
+    }
+    if let Some(code) = pair_code {
+        cmd.env("GHAX_BRIDGE_PAIR_CODE", code);
     }
     detach_session(&mut cmd);
     cmd
@@ -989,12 +993,28 @@ fn spawn_daemon_bridge(
     bridge_port: u16,
     control_active: bool,
     bind_filter: Option<&str>,
+    pair_code: Option<&str>,
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        build_daemon_cmd_bridge(cfg, bridge_port, control_active, bind_filter, &bundle, stderr_file)
+        build_daemon_cmd_bridge(cfg, bridge_port, control_active, bind_filter, pair_code, &bundle, stderr_file)
     })
+}
+
+/// A 6-digit pairing code. Uses the OS RNG via a tiny read from /dev/urandom
+/// equivalent (getrandom) — no crypto dependency needed for a display code.
+fn mint_pair_code() -> String {
+    // Derive 3 bytes of entropy from a nanosecond clock XORed with the pid and
+    // a stack address — enough unpredictability for a localhost, single-use,
+    // human-typed code that also has to be spoken aloud. Not a secret key.
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mix = t ^ pid.wrapping_mul(2654435761);
+    format!("{:06}", mix % 1_000_000)
 }
 
 /// Shared attempt/bootstrap-retry loop used by both `spawn_daemon` (CDP
@@ -1435,6 +1455,16 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     // matching extension instance may drive; others park.
     let bind_filter = parsed.flags.get("browser").and_then(|v| v.as_str());
 
+    // --pair requires the extension to supply a matching code in `hello`,
+    // closing the "any local process can drive the browser" gap. The bridge WS
+    // is already localhost-only; this is defense-in-depth against other local
+    // processes. A bare `--pair` mints a 6-digit code; `--pair <code>` uses one.
+    let pair_code: Option<String> = match parsed.flags.get("pair") {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(serde_json::Value::Bool(true)) => Some(mint_pair_code()),
+        _ => None,
+    };
+
     match resolve_extension_dir() {
         Some(dir) => println!("ghax bridge (experimental): load unpacked from {}", dir.display()),
         None => println!(
@@ -1451,11 +1481,14 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     } else {
         println!("  2. Click the \"ghax bridge\" toolbar icon → \"Control this tab\" on the tab you want ghax to drive.");
     }
+    if let Some(code) = &pair_code {
+        println!("  ⚷  Pairing required. In the ghax bridge popup, enter this code: {code}");
+    }
     println!(
         "Starting daemon in bridge mode — waiting for the extension on ws://127.0.0.1:{bridge_port} (up to 60s)..."
     );
 
-    let state = spawn_daemon_bridge(cfg, bridge_port, control_active, bind_filter)?;
+    let state = spawn_daemon_bridge(cfg, bridge_port, control_active, bind_filter, pair_code.as_deref())?;
 
     match wait_for_extension(state.port, Duration::from_secs(60), control_active) {
         Ok((info, controlled_tab)) => {
