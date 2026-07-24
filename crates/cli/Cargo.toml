@@ -48,3 +48,8 @@ urlencoding = "2"
 # in attach.rs (see resolve_daemon_bundle). No C toolchain/OpenSSL dependency,
 # so it doesn't disturb the cargo-dist cross-compile targets.
 sha2 = "0.10"
+# getrandom: OS CSPRNG for the bridge pairing code. That code is an auth secret
+# (it gates who can drive the browser), so it MUST be unpredictable — a clock/pid
+# mix is computable by a local attacker. Already in the tree via rustls; pinning
+# it directly keeps the intent explicit. Pure Rust, no C toolchain.
+getrandom = "0.2"

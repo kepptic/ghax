@@ -516,6 +516,27 @@ async function main(): Promise<void> {
     }, { pairCode: '424242' });
   });
 
+  await test('pairing throttle never locks out the legit browser', async () => {
+    // The security-relevant invariant: an attacker spraying wrong codes must
+    // not be able to DoS the real extension. A correct code is checked first
+    // and never throttled, so it binds promptly even under a burst of failures.
+    await withBridge(async (bridge, port) => {
+      for (let i = 0; i < 12; i++) {
+        const bad = new FakeExt(port, `bad-${i}`);
+        bad.pairToken = String(100000 + i);
+        await bad.connect();
+        await until(() => bad.rejected !== null, `bad attempt ${i} rejected`, 4000);
+        bad.kill();
+      }
+      assert(!bridge.connected, 'no wrong code should ever bind');
+      const good = new FakeExt(port, 'inst-good');
+      good.pairToken = '424242';
+      await good.connect();
+      await until(() => bridge.connected, 'correct code binds despite the burst', 4000);
+      assert(good.role === 'bound', `legit browser must bind, got ${good.role}`);
+    }, { pairCode: '424242' });
+  });
+
   await test('waitForResume resolves immediately when already bound, rejects when unbound', async () => {
     await withBridge(async (bridge, port) => {
       // Unbound: history-nav reconcile relies on this rejecting, not hanging.

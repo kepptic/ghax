@@ -9,13 +9,16 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **Opt-in bridge pairing** (`ghax attach --extension --pair`). The bridge
   WebSocket is localhost-only, but any local process could previously drive
-  the browser through it. `--pair` mints a 6-digit code (or `--pair <code>`
-  uses your own); the daemon then rejects any `hello` without a matching
-  `pairToken`, and the extension goes dormant (a slow retry, not a hot
-  reconnect loop) until the right code is entered in the popup's new pairing
-  field. The check is constant-time. Off by default — no behaviour change
-  unless you ask for it. Closes the hardening item flagged in
-  design/plan/07.
+  the browser through it. `--pair` mints an 8-digit code from the OS CSPRNG
+  (or `--pair <code>` uses your own); the daemon then rejects any `hello`
+  without a matching `pairToken`, and the extension goes dormant (a slow
+  retry, not a hot reconnect loop) until the right code is entered in the
+  popup's new pairing field. The check is constant-time, and repeated bad
+  codes are throttled with an escalating delay (a correct code is never
+  delayed, so the legit browser is never locked out) — together the 10^8 code
+  space and the throttle make localhost brute-force infeasible. Off by
+  default — no behaviour change unless you ask for it. Closes the hardening
+  item flagged in design/plan/07.
 - `ghax back` / `ghax forward` over the bridge now **reconcile** after a
   reconnect instead of reporting a blanket "outcome unknown". They capture the
   source and target history-entry ids up front, and if the connection drops

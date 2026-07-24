@@ -1002,19 +1002,25 @@ fn spawn_daemon_bridge(
     })
 }
 
-/// A 6-digit pairing code. Uses the OS RNG via a tiny read from /dev/urandom
-/// equivalent (getrandom) — no crypto dependency needed for a display code.
+/// An 8-digit pairing code from the OS CSPRNG.
+///
+/// This code is the authentication secret for the bridge pairing gate, so it
+/// must be UNPREDICTABLE — an earlier clock+pid mix was computable by any local
+/// process that knew the daemon's start time and pid, which defeats the point.
+/// 8 digits (10^8 space) plus the daemon-side throttle in src/bridge.ts makes
+/// localhost brute-force infeasible while staying short enough to type/speak.
+/// Rejection sampling avoids the modulo bias a bare `% 100_000_000` would add.
 fn mint_pair_code() -> String {
-    // Derive 3 bytes of entropy from a nanosecond clock XORed with the pid and
-    // a stack address — enough unpredictability for a localhost, single-use,
-    // human-typed code that also has to be spoken aloud. Not a secret key.
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let mix = t ^ pid.wrapping_mul(2654435761);
-    format!("{:06}", mix % 1_000_000)
+    loop {
+        let mut buf = [0u8; 4];
+        getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+        let n = u32::from_le_bytes(buf);
+        // Largest multiple of 1e8 that fits in u32 (4.29e9): 4_200_000_000.
+        // Discard the biased tail so every 8-digit code is equally likely.
+        if n < 4_200_000_000 {
+            return format!("{:08}", n % 100_000_000);
+        }
+    }
 }
 
 /// Shared attempt/bootstrap-retry loop used by both `spawn_daemon` (CDP
@@ -1458,7 +1464,7 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     // --pair requires the extension to supply a matching code in `hello`,
     // closing the "any local process can drive the browser" gap. The bridge WS
     // is already localhost-only; this is defense-in-depth against other local
-    // processes. A bare `--pair` mints a 6-digit code; `--pair <code>` uses one.
+    // processes. A bare `--pair` mints an 8-digit code; `--pair <code>` uses one.
     let pair_code: Option<String> = match parsed.flags.get("pair") {
         Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(serde_json::Value::Bool(true)) => Some(mint_pair_code()),

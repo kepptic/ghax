@@ -251,6 +251,11 @@ export class Bridge extends EventEmitter {
   private readonly graceMs: number;
   private readonly livenessMs: number;
   private readonly pairCode: string | null;
+  // Timestamps of failed pairing attempts in a rolling window, used to throttle
+  // brute force. A CORRECT code is never counted and never delayed, so the
+  // legit extension is unaffected; only wrong/missing codes accrue delay. This
+  // throttles parallel attempts too, since the counter is global.
+  private pairFailures: number[] = [];
 
   constructor(
     public readonly port: number,
@@ -482,6 +487,37 @@ export class Bridge extends EventEmitter {
    * park. Parking is non-destructive, so "first wins" is safe — and takeover
    * is always explicit via `use()`.
    */
+  /**
+   * Throttled pairing rejection. Brute-forcing an 8-digit code (10^8) needs
+   * ~10^8 attempts; an escalating delay past a small free allowance makes that
+   * infeasible even in parallel, since the failure counter is global. The
+   * delay is applied to the FAILURE path only — a correct code is checked
+   * first and never reaches here — so the legit extension is never penalized.
+   */
+  private rejectPairing(ws: WebSocket, kind: 'wrong' | 'missing'): void {
+    const now = Date.now();
+    this.pairFailures = this.pairFailures.filter((t) => now - t < 60_000);
+    this.pairFailures.push(now);
+    const n = this.pairFailures.length;
+    // First few are free (real typos), then 500ms per extra failure, capped
+    // at 10s. At the cap a single client manages ~6 tries/min; 10^8 codes make
+    // brute force take on the order of centuries.
+    const FREE = 5;
+    const delayMs = n <= FREE ? 0 : Math.min(10_000, (n - FREE) * 500);
+    if (n === FREE + 1) {
+      this.log('bridge: repeated bad pairing codes — throttling (possible brute-force from a local process)');
+    } else {
+      this.log(`bridge: rejecting hello — ${kind} pairing code`);
+    }
+    const send = () => this.rawSend(ws, {
+      type: 'hello-reject',
+      reason: 'auth',
+      message: 'pairing code required — enter the code ghax printed into the ghax bridge popup',
+    });
+    if (delayMs === 0) send();
+    else setTimeout(send, delayMs).unref?.();
+  }
+
   private handleHello(msg: any, ws: WebSocket): void {
     // Pairing gate (opt-in). A wrong/absent code is rejected explicitly —
     // `hello-reject` sends the extension dormant (a slow retry), NOT a socket
@@ -489,14 +525,12 @@ export class Bridge extends EventEmitter {
     if (this.pairCode) {
       const supplied = typeof msg.pairToken === 'string' ? msg.pairToken : '';
       if (!timingSafeEqualStr(supplied, this.pairCode)) {
-        this.log(`bridge: rejecting hello — ${supplied ? 'wrong' : 'missing'} pairing code`);
-        this.rawSend(ws, {
-          type: 'hello-reject',
-          reason: 'auth',
-          message: 'pairing code required — enter the code ghax printed into the ghax bridge popup',
-        });
+        this.rejectPairing(ws, supplied ? 'wrong' : 'missing');
         return;
       }
+      // Correct code: a clean slate, so one legit typo doesn't leave the user
+      // throttled behind an attacker's noise.
+      this.pairFailures = [];
     }
     let instanceId = typeof msg.instanceId === 'string' && msg.instanceId ? msg.instanceId : '';
     const legacy = !instanceId;
