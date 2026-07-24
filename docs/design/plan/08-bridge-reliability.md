@@ -83,11 +83,48 @@ Profile 1. All dial `127.0.0.1:9223`. Each connect evicts the incumbent;
 the evicted one's `close` handler reschedules with backoff capped at 8s
 (`background.js:34`, `:159-164`) — a self-sustaining ping-pong.
 
-*Honest caveat:* a passive 100s listener on 9223 drew exactly **one**
-client, so this was not reproduced in the current browser state. It is a
-confirmed latent hazard, **not a confirmed history** — the plan treats it
-as a hypothesis to be settled by telemetry (§5, TASK-006), not as
-established fact. Note that `chrome.runtime.id` is path-derived and
+**CONFIRMED (2026-07-24), after Phase 1 shipped.** This was originally filed
+as a latent hazard rather than established history: a passive 100s listener
+on 9223 drew only one client, because MV3 workers in idle profiles were
+asleep. Two later measurements settled it.
+
+*Historical evidence* — `.ghax/ghax-daemon.log` under the pre-identity code:
+
+| Signal | Count |
+|---|---|
+| `bridge: hello from …` | 586 |
+| `new extension connection replacing existing one` | 581 |
+| Peak hellos in one minute | **116** (2026-07-13 21:46 and 21:48) |
+
+581 replacements against 586 hellos means **virtually every connection
+evicted an incumbent**, sustained at ~2/sec for five-plus minutes. That is
+the ping-pong signature: each eviction resets the loser's backoff to its
+500ms floor, so three installs re-dial roughly twice a second, forever.
+Every in-flight command inside that window died — which is exactly the
+reported "churn on every goto/screenshot/re-attach".
+
+*Live confirmation of the fix* — with all three profiles reloaded to v0.1.1
+and running simultaneously:
+
+```
+session  BOUND
+* bound  edge·1007d4    connected  hello×1
+  parked edge·514aee    connected  hello×1
+  parked chrome·a59dd8  connected  hello×1
+```
+
+Three distinct minted identities, one bound, two parked, and **zero new
+hellos over a 45s observation** — the same three installs that previously
+produced 116 hellos/minute. The log now records each decision and its
+reason (`→ parked (edge·1007d4 is bound)`).
+
+*Attribution caveat:* the log cannot fully separate multi-instance rivalry
+from the single-instance `CLOSING` self-race (§1b) — both emit the same
+string. The sustained ~2/sec rate across three known installs favours
+rivalry, since a lone instance racing itself would settle once its own
+socket finished closing. Both mechanisms are fixed regardless.
+
+Note that `chrome.runtime.id` is path-derived and
 therefore *identical* across all three installs — useless as a
 discriminator. Identity must be minted, not derived; a
 `crypto.randomUUID()` in `chrome.storage.local` is per-profile, so the
