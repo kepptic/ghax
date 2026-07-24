@@ -6,7 +6,108 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Bridge identity + multi-browser arbitration.** The daemon now keeps a
+  registry of extension instances instead of a single anonymous socket.
+  Exactly one instance is **bound** (drives the tab); every other healthy
+  instance is **parked** — socket held open and pinging, but holding no
+  `chrome.debugger` attachment and receiving no CDP. This is what ends the
+  "connection replaced" livelock: previously each new connection evicted the
+  incumbent, whose reconnect loop immediately fired back, so two installs of
+  the extension (e.g. the same unpacked directory loaded in two profiles)
+  would evict each other indefinitely at a 0.5–8s period, killing every
+  in-flight command. Parking satisfies the rival's reconnect loop instead of
+  retriggering it.
+  - The extension mints a per-profile `instanceId` (`crypto.randomUUID()` in
+    `chrome.storage.local`) and sends it, plus browser brand and an optional
+    label, in `hello`. `chrome.runtime.id` can't be used — it's derived from
+    the unpacked path, so every profile loading the same directory reports an
+    identical id.
+  - New `hello-ack` / `hello-reject` / `role` messages. The extension now
+    attaches **only after** the daemon grants it the active lease; previously
+    it attached before even sending `hello`, so a peer destined to be parked
+    grabbed a debugger attachment anyway.
+  - `ghax bridge instances` lists bound + parked instances with tab, hello and
+    replaced counts. `ghax bridge use <id|browser|label>` rebinds over live
+    sockets (via `role`), so a switch never disconnects either side.
+  - `ghax attach --extension --browser edge|chrome|<label>` restricts which
+    instance may bind; non-matching instances park even if they connect first.
+  - A livelock detector warns when bind ownership changes ≥3 times in 5
+    minutes — the signature of a pre-identity extension still installed in
+    another profile.
+- **Bridge session resume.** A bound peer that drops enters a grace window
+  (`DEGRADED`, default 20s) instead of failing everything: commands issued
+  during the outage are **queued** and run on reconnect, and each still
+  honours its own deadline so a 20s session grace can't turn a 5s command into
+  a 20s hang. Grace expiry (`EXPIRED`) reports a typed
+  `BRIDGE_DEGRADED_TIMEOUT` naming the lost instance. A liveness check
+  terminates a socket that goes silent for 25s, so a half-open connection
+  fails deterministically rather than hanging.
+- **Retry classification.** Commands interrupted mid-flight are no longer
+  silently lost *or* blindly replayed. Retry is decided per **operation**, not
+  per CDP command — a verb like `snapshot` spans many commands with mutable
+  intermediate state, so resuming a fragment could splice two documents or ref
+  generations together. Read-only verbs (`status`, `tabs`, `find`, `text`,
+  `html`, `screenshot`, `snapshot`, `wait`) restart in full after resume.
+  Everything else — including `click`, `fill`, `press`, `type`, `eval`,
+  `goto`, `reload`, `back`, `forward`, `box`, `new-window`, `batch` — fails
+  with `BRIDGE_OUTCOME_UNKNOWN` and an honest "the action MAY have landed —
+  verify with `ghax snapshot`" rather than risking a double-submit.
+- `test/bridge-sim.ts` (`npm run test:bridge-sim`) — 13 state-machine checks
+  that run **without a browser**. `Bridge` is a plain Node `ws` server, so a
+  simulated extension is just a WebSocket client speaking the wire protocol.
+  Covers the literal livelock reproduction (three rivals → exactly one bound,
+  two parked, zero daemon-initiated closes and zero re-hellos), resume inside
+  grace, interrupted-command semantics, grace expiry, liveness, legacy
+  (pre-identity) hello, bind filtering, and rebinding. The bridge previously
+  had zero automated coverage.
+- `ghax version [--full]` — identity and provenance. Plain `version` prints the
+  CLI version (with the build's git sha); `--full` additionally reports the
+  daemon bundle that resolves right now (path, resolution tier, sha256 — without
+  triggering the self-heal download) and, when a daemon is live, the bundle
+  sha256 the running daemon is actually executing plus the connected bridge
+  extension. A mismatch between the resolved and running bundle is flagged
+  loudly — that mismatch is exactly what a `cargo clean` or a stale symlink
+  produces. First slice of the bridge-reliability plan
+  (docs/design/plan/08-bridge-reliability.md, Phase 0).
+
+### Changed
+- `scripts/install-link.sh` now **copies** the binary and daemon bundle into
+  `~/.local` by default instead of symlinking into `target/release` and `dist/`.
+  A `cargo clean` or disk cleanup can no longer decapitate the installed CLI.
+  Pass `--link` for the old in-place symlink behaviour (handy during active
+  development). Release installs (`install-release.sh`) already copied.
+- `ghax attach` now logs which daemon bundle path it resolved and via which tier
+  (`GHAX_DAEMON_BUNDLE` / binary-adjacent / XDG-install / repo-dist) — the
+  silent preference order was the stale-binary trap.
+
 ### Fixed
+- The daemon-runtime bootstrap (`scripts/bootstrap-daemon-runtime.sh`) now
+  installs `ws` alongside `playwright` and `source-map`. The extension bridge
+  added `ws` as a runtime external but the bootstrap was never updated, so
+  installed (non-repo) users hit `Cannot find package 'ws'` the first time they
+  ran `ghax attach --extension`. The presence check also repairs installs
+  bootstrapped before the bridge landed.
+- Extension bridge: a rejected client no longer hot-loops. A client that
+  receives `hello-reject` goes **dormant** — socket closed, fast reconnect
+  cancelled, one retry every 5 minutes — instead of retrying on the 500ms
+  backoff. That backoff is retained only for "the daemon isn't listening yet",
+  where it's correct.
+- Extension bridge: an evicted socket sitting in `CLOSING` no longer lets the
+  service worker open a **second** socket while the daemon still holds the first
+  — the daemon logged that as "connection replaced" and it could self-sustain
+  churn on every `goto`/`screenshot` with no rival extension present. `connect()`
+  now treats `CLOSING` as occupied, and a socket-generation guard ensures only
+  the current socket's listeners can clear state or schedule a reconnect. A
+  second keepalive alarm phase-offset by 15s halves the worst-case wake gap
+  after a daemon restart (~30s → ~15s). Reload the ghax bridge extension in
+  `edge://extensions` to pick these up (bumped to v0.1.1).
+- Bridge-mode RPC errors now carry a machine-readable `code` and a `hint` with
+  the recovery verb, printed on its own line by the CLI: an unattachable
+  controlled tab (a `chrome://`/`edge://`/`chrome-extension://` page) names the
+  tab and points at `ghax bridge control --active` / `ghax tab <id>`; "no
+  extension connected" points at the popup / unpacked-load step.
+
 - Extension-bridge `goto` now escapes certificate interstitials and other
   unattachable browser pages with `chrome.tabs.update`, waits for the new page,
   and re-attaches `chrome.debugger` so later commands retain control.
@@ -63,6 +164,19 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `chrome-error://` transition detaches `chrome.debugger`, navigation
     falls back to `chrome.tabs.update`. The extension retains the selected
     tab and re-attaches automatically when it becomes attachable again.
+
+### Docs
+- `docs/design/plan/08-bridge-reliability.md` — bridge reliability plan
+  from a live-fire field report. Reframes `"connection replaced"` as a
+  rivalry/race bug rather than service-worker eviction (the two strings
+  come from different code paths, and WebSocket traffic has kept a
+  connected worker alive since Chrome 116), and specifies handshake v2
+  with minted per-profile identity, a bound/parked instance registry, a
+  BOUND→DEGRADED→EXPIRED resume state machine with a command queue, a
+  default-`never` retry classification, execution-context pinning, a
+  DOM-stability primitive, and `test/bridge-sim.ts` — a browser-free
+  simulated-extension suite for a transport that currently has zero test
+  coverage. Tracked in `planning/tasks.md` as TASK-001…006.
 
 ### Fixed
 - `ghax attach`'s no-CDP-found hint no longer tells you to relaunch your

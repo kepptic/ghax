@@ -47,6 +47,7 @@ import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
   Bridge,
+  BridgeInterrupted,
   bridgeBox,
   bridgeCallOn,
   bridgeEvaluate,
@@ -62,6 +63,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import type { AddressInfo } from 'net';
 
 const IDLE_MS = 30 * 60 * 1000;
@@ -156,8 +158,33 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'status', 'tabs', 'tab', 'find', 'newWindow',
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type',
-  'console', 'network', 'wait', 'bridge.control',
+  'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use',
   'batch', 'record.start', 'record.stop', 'record.status',
+]);
+
+/**
+ * Verbs whose ENTIRE operation can be re-run after a bridge reconnect.
+ *
+ * Retry is classified per *operation*, never per CDP command: a verb like
+ * `snapshot` enables domains, strips old ref tags, releases an object group,
+ * reads the AX tree, then writes fresh tags (see bridgeSnapshot in bridge.ts).
+ * Resuming from an interrupted middle command could splice two documents or
+ * two ref generations together. Restarting the whole thing against a freshly
+ * re-attached tab is safe; resuming a fragment is not.
+ *
+ * Everything absent from this set is NOT auto-replayed — see the failure
+ * message in `register` below. That includes the obvious mutators (click,
+ * fill, press, type, eval, newWindow, batch) and three less obvious ones:
+ *   - `box` scrolls before measuring, which can trigger lazy-loading.
+ *   - `goto`/`reload` re-run page lifecycle and can re-submit interstitials.
+ *   - `back`/`forward` re-read currentIndex, so a naive replay can step TWO
+ *     entries; correct handling is reconciliation against
+ *     Page.getNavigationHistory, which the conservative "report unknown"
+ *     path below is the honest subset of.
+ * Console/network need no replay at all — they read daemon-local buffers.
+ */
+const BRIDGE_RETRY_SAFE = new Set([
+  'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait',
 ]);
 
 function register(name: string, fn: Handler) {
@@ -165,7 +192,35 @@ function register(name: string, fn: Handler) {
     if (ctx.bridgeMode && !BRIDGE_SUPPORTED_COMMANDS.has(name)) {
       throw new Error(`${name}: not supported over the extension bridge yet`);
     }
-    return fn(ctx, args, opts);
+    if (!ctx.bridgeMode) return fn(ctx, args, opts);
+    try {
+      return await fn(ctx, args, opts);
+    } catch (err) {
+      // The bound extension dropped mid-operation. Only the verb layer knows
+      // whether re-running is safe, which is exactly why this lives here and
+      // not in Bridge.send().
+      if (err instanceof BridgeInterrupted) {
+        if (BRIDGE_RETRY_SAFE.has(name)) {
+          await requireBridge(ctx).waitForResume();
+          // Whole-operation replay against the re-attached tab.
+          return await fn(ctx, args, opts);
+        }
+        const e = new Error(
+          `${name}: the bridge connection dropped mid-command — the action MAY have landed. ` +
+          `Run \`ghax snapshot\` to check the page state before retrying.`,
+        );
+        (e as any).code = 'BRIDGE_OUTCOME_UNKNOWN';
+        (e as any).hint = 'Verify the page with `ghax snapshot`; ghax will not replay an action that may have mutated the page.';
+        throw e;
+      }
+      // Decorate recognized failures (unattachable tab, no extension) with a
+      // code + recovery hint. Unrecognized errors pass through unchanged.
+      const wrapped = bridgeError(err, {
+        tabId: ctx.bridge?.controlledTabId ?? null,
+      });
+      if (wrapped.code === 'BRIDGE_ERROR') throw err; // nothing to add
+      throw wrapped;
+    }
   });
 }
 
@@ -1168,6 +1223,35 @@ register('bridge.control', async (ctx, _args, opts) => {
   }
   const ack = await ctx.bridge.sendControl(target);
   return { ok: ack.ok, tabId: ack.tabId };
+});
+
+// `ghax bridge instances` — the inventory that turns "why did my session just
+// die" into a five-second diagnosis: which browsers are connected, which one
+// is driving, and whether ownership has been flapping.
+register('bridge.instances', async (ctx) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new Error('bridge.instances requires bridge mode — start with `ghax attach --extension`');
+  }
+  return {
+    state: ctx.bridge.state,
+    boundInstanceId: ctx.bridge.instances().find((i) => i.role === 'bound')?.instanceId ?? null,
+    livelockSuspected: ctx.bridge.livelockSuspected,
+    instances: ctx.bridge.instances(),
+  };
+});
+
+// `ghax bridge use <id|browser|label>` — explicit takeover. Rebinding happens
+// over live sockets (a `role` message), so neither side disconnects.
+register('bridge.use', async (ctx, args, opts) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new Error('bridge.use requires bridge mode — start with `ghax attach --extension`');
+  }
+  const selector = String(args[0] ?? opts.instance ?? opts.browser ?? '');
+  if (!selector) throw new Error('Usage: ghax bridge use <instance-id|browser|label>');
+  const instance = await ctx.bridge.use(selector);
+  clearSnapshotRefs(ctx);
+  ctx.bridgeNetworkRequests.clear();
+  return instance;
 });
 
 register('html', async (ctx, args) => {
@@ -2562,6 +2646,48 @@ class DaemonError extends Error {
   }
 }
 
+/**
+ * A bridge-mode error that carries a machine-readable `code` and a
+ * human-facing `hint` (the recovery verb / next step), surfaced by the CLI
+ * on its own line. Phase 0 of the bridge-reliability plan
+ * (docs/design/plan/08-bridge-reliability.md §2.7) — the codes that need the
+ * instance state machine land in Phase 1; these are the ones expressible
+ * today (no extension connected, unattachable controlled tab).
+ */
+class BridgeError extends Error {
+  constructor(message: string, public code: string, public hint?: string) {
+    super(message);
+  }
+}
+
+/**
+ * Wrap a raw chrome.debugger / bridge failure with a code + recovery hint.
+ * Recognizes the two failure shapes that reach an operator today: an
+ * unattachable controlled tab (chrome://, edge://, a chrome-extension:// page,
+ * or a cert interstitial) and "no extension connected".
+ */
+function bridgeError(raw: unknown, ctx?: { tabId?: number | null; url?: string; title?: string }): BridgeError {
+  const message = (raw as { message?: string } | null)?.message ?? String(raw);
+  if (/cannot (?:access|attach to)|not attachable|chrome-extension:\/\/|chrome:\/\/|edge:\/\//i.test(message)) {
+    const where = ctx?.tabId != null
+      ? `controlled tab ${ctx.tabId}${ctx.title ? ` (${JSON.stringify(ctx.title.slice(0, 40))})` : ''}`
+      : 'the controlled tab';
+    return new BridgeError(
+      message,
+      'BRIDGE_TAB_UNATTACHABLE',
+      `${where} is not attachable (browser-internal page). Run \`ghax bridge control --active\` or \`ghax tab <id>\` to point the bridge at a normal tab.`,
+    );
+  }
+  if (/no extension connected|extension is not initialized|bridge is not initialized/i.test(message)) {
+    return new BridgeError(
+      message,
+      'BRIDGE_NOT_CONNECTED',
+      'Load extension/ unpacked in edge://extensions, then click "Control this tab" in the ghax bridge popup (or run `ghax bridge control --active`).',
+    );
+  }
+  return new BridgeError(message, 'BRIDGE_ERROR');
+}
+
 // evalInTarget (below) throws DaemonError on exceptionDetails so silent
 // swallowing can't mask thrown expressions — ext.storage previously
 // returned {ok:true} on a thrown expr. Callers that want the old
@@ -3546,6 +3672,14 @@ async function main() {
       bridge.setDesiredControl({ action: 'control-active' });
       log('bridge: will control the active tab on connect (--control-active)');
     }
+    // `ghax attach --extension --browser edge|chrome|<label>` restricts which
+    // instance may bind, so a second browser (or a forgotten install in
+    // another profile) parks instead of racing for the session.
+    const bindFilter = process.env.GHAX_BRIDGE_BROWSER;
+    if (bindFilter && bindFilter.trim()) {
+      bridge.setBindFilter(bindFilter);
+      log(`bridge: only '${bindFilter}' may bind — other instances will park`);
+    }
   } else {
     browser = await chromium.connectOverCDP(cdpHttpUrl!);
     const contexts = browser.contexts();
@@ -3683,6 +3817,32 @@ async function main() {
         connected: ctx.bridge?.connected ?? false,
         controlledTabId: ctx.bridge?.controlledTabId ?? null,
         extensionInfo: ctx.bridge?.extensionInfo ?? null,
+        state: ctx.bridge?.state ?? 'UNBOUND',
+        instances: ctx.bridge?.instances() ?? [],
+        livelockSuspected: ctx.bridge?.livelockSuspected ?? false,
+      });
+      return;
+    }
+    // `ghax version --full` reads this to answer "which daemon bundle is the
+    // RUNNING daemon actually executing" — the exact question the stale-binary
+    // trap turns into a two-hour debugging session. The daemon hashes its own
+    // entry file (process.argv[1]); the CLI compares it against the bundle that
+    // resolves now and flags a mismatch.
+    if (url === '/version' && req.method === 'GET') {
+      const bundlePath = process.argv[1] ?? '';
+      let bundleSha256 = '';
+      try {
+        bundleSha256 = crypto.createHash('sha256').update(fs.readFileSync(bundlePath)).digest('hex');
+      } catch {
+        // Bundle unreadable from here (unusual) — report empty, don't crash.
+      }
+      json(res, 200, {
+        ok: true,
+        bundlePath,
+        bundleSha256,
+        bridgeMode,
+        controlledTabId: ctx.bridge?.controlledTabId ?? null,
+        extensionInfo: ctx.bridge?.extensionInfo ?? null,
       });
       return;
     }
@@ -3787,7 +3947,15 @@ async function main() {
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
         const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
-        json(res, 500, { ok: false, error: err.message || String(err), ...(exitCode !== undefined ? { exitCode } : {}) });
+        const code = typeof err?.code === 'string' ? err.code : undefined;
+        const hint = typeof err?.hint === 'string' ? err.hint : undefined;
+        json(res, 500, {
+          ok: false,
+          error: err.message || String(err),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          ...(code !== undefined ? { code } : {}),
+          ...(hint !== undefined ? { hint } : {}),
+        });
       }
       return;
     }

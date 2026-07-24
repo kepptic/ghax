@@ -33,6 +33,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
+import * as crypto from 'crypto';
 
 export interface BridgeEvent {
   method: string;
@@ -84,25 +85,116 @@ export interface BridgeSnapshotResult {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const CONTROL_TIMEOUT_MS = 10_000;
 
+// ─── Session-lifecycle constants (plan §2.2) ───────────────────
+// Env-overridable for field debugging; also settable per-instance via the
+// constructor, which is how test/bridge-sim.ts drives transitions in
+// milliseconds instead of tens of seconds (env can't be used there — ESM
+// hoists imports above any process.env assignment in the test file).
+function envMs(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+/** No frame of any kind from the bound socket → terminate it. Kills half-open. */
+const LIVENESS_MS = envMs('GHAX_BRIDGE_LIVENESS_MS', 25_000);
+/** DEGRADED → EXPIRED. Covers the ≤8s extension reconnect backoff + attach. */
+const GRACE_MS = envMs('GHAX_BRIDGE_GRACE_MS', 20_000);
+
+export interface BridgeOptions {
+  /** DEGRADED → EXPIRED window. Defaults to GHAX_BRIDGE_GRACE_MS or 20s. */
+  graceMs?: number;
+  /** Silence before a bound socket is terminated. Default 25s. */
+  livenessMs?: number;
+}
+/** Commands queued while DEGRADED before we stop pretending and fail fast. */
+const QUEUE_CAP = 32;
+/** ≥N bind-ownership changes inside this window trips the livelock warning. */
+const LIVELOCK_WINDOW_MS = 5 * 60_000;
+const LIVELOCK_THRESHOLD = 3;
+
+export type PeerRole = 'bound' | 'parked';
 /**
- * One WebSocket server, at most one live extension connection at a time.
- * If a second connection arrives (e.g. the user reloaded the extension),
- * the old one is dropped — "latest wins" per the spec, logged so it's
- * visible in the daemon log rather than a silent swap.
+ * Lifecycle of the BOUND peer only. Parked-socket churn is registry
+ * bookkeeping and never moves this. Identity answers *who may drive*; this
+ * answers *what happens when the driver blinks*.
+ */
+export type BridgeSessionState = 'UNBOUND' | 'BOUND' | 'DEGRADED' | 'EXPIRED';
+
+/** A connected extension instance, as reported by `ghax bridge instances`. */
+export interface BridgeInstance {
+  instanceId: string;
+  browser: string;
+  label: string;
+  version: string;
+  role: PeerRole;
+  connected: boolean;
+  controlledTabId: number | null;
+  lastHelloAt: number;
+  helloCount: number;
+  replacedCount: number;
+}
+
+/**
+ * Thrown to a caller whose command was in flight when the bound socket
+ * dropped. The *operation* layer (runBridgeOperation in daemon.ts) decides
+ * what to do: replay the whole operation for a `safe` verb, or surface
+ * BRIDGE_OUTCOME_UNKNOWN for anything that may have mutated the page.
+ */
+export class BridgeInterrupted extends Error {
+  readonly code = 'BRIDGE_INTERRUPTED';
+  constructor(public readonly method: string) {
+    super(`bridge: connection lost while '${method}' was in flight`);
+  }
+}
+
+interface Peer {
+  instanceId: string;
+  browser: string;
+  label: string;
+  version: string;
+  ws: WebSocket | null;
+  role: PeerRole;
+  lastHelloAt: number;
+  lastFrameAt: number;
+  helloCount: number;
+  replacedCount: number;
+  controlledTabId: number | null;
+}
+
+interface QueuedCommand {
+  method: string;
+  params: Record<string, unknown>;
+  deadline: number;
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+}
+
+/**
+ * One WebSocket server holding MANY extension connections: exactly one
+ * `bound` (the driver) and any number of `parked`.
+ *
+ * This replaced a "latest connection wins" model that closed the incumbent
+ * socket and rejected all its in-flight work. That was wrong twice over: it
+ * couldn't tell "my own service worker respawned" from "a second browser
+ * connected", and closing the loser's socket kicked its reconnect loop, so
+ * two installs would evict each other indefinitely. Identity in the
+ * handshake answers *who may drive*; keeping every healthy socket open
+ * answers *how the losers stop fighting*.
  *
  * Emits:
- *   'hello'      (info: BridgeExtensionInfo)  — handshake received
- *   'disconnect' ()                            — extension socket closed
+ *   'hello'      (info: BridgeExtensionInfo)  — bound peer handshook
+ *   'disconnect' ()                            — bound peer's socket dropped
+ *   'expired'    ()                            — grace window elapsed
+ *   'resumed'    (wasInterrupted: boolean)     — bound peer is driving again
  *   'event'      (ev: BridgeEvent)             — relayed chrome.debugger.onEvent
  *   'controlled' (tabId: number | null)        — controlled tab changed
+ *   'instances'  ()                            — registry membership changed
  */
 export class Bridge extends EventEmitter {
   private wss: WebSocketServer;
-  private ws: WebSocket | null = null;
   private nextId = 1;
   private pending = new Map<
     number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { method: string; resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
   // Control-channel replies are correlated separately from CDP replies —
   // control messages carry `type:"control-ack"` so they never collide with
@@ -112,126 +204,228 @@ export class Bridge extends EventEmitter {
     number,
     { resolve: (v: ControlAck) => void; reject: (e: Error) => void }
   >();
-  private _connected = false;
-  private _extensionInfo: BridgeExtensionInfo | null = null;
-  private _controlledTabId: number | null = null;
+  // ─── Instance registry (plan §2.4) ───────────────────────────
+  // Exactly one peer is `bound`; every other healthy peer is `parked` —
+  // socket held OPEN, pinging, discoverable, but holding no chrome.debugger
+  // attachment and receiving no CDP. Holding the socket IS the livelock cure:
+  // the rival's reconnect loop is satisfied instead of retriggered. If we ever
+  // closed a parked socket, background.js's reconnect loop would resume and
+  // the ping-pong would simply move.
+  private peers = new Map<string, Peer>();
+  private socketPeer = new WeakMap<WebSocket, Peer>();
+  private boundId: string | null = null;
+  private _state: BridgeSessionState = 'UNBOUND';
+  private sessionToken: string | null = null;
+  private legacySeq = 0;
+  /** Non-null → only instances matching (browser or label) may bind. */
+  private bindFilter: string | null = null;
+  /** Timestamps of bind-ownership changes, for the livelock detector. */
+  private bindEvents: number[] = [];
+  private livelockWarned = false;
+  private graceTimer: NodeJS.Timeout | null = null;
+  private livenessTimer: NodeJS.Timeout | null = null;
+  private queue: QueuedCommand[] = [];
+  private resumeWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
   // The desired control target, remembered across reconnects so control
-  // resumes automatically after an MV3 service-worker eviction (gap 3). Set
-  // by `setDesiredControl` (env-driven initial control) or `sendControl`
+  // resumes automatically after an MV3 service-worker eviction. Set by
+  // `setDesiredControl` (env-driven initial control) or `sendControl`
   // (mid-session `ghax bridge control`); cleared by a `stop`.
   private desiredControl: ControlTarget | null = null;
   private readonly log: (msg: string) => void;
+  private readonly graceMs: number;
+  private readonly livenessMs: number;
 
   constructor(
     public readonly port: number,
     log: (msg: string) => void = () => undefined,
+    opts: BridgeOptions = {},
   ) {
     super();
     this.log = log;
+    this.graceMs = opts.graceMs ?? GRACE_MS;
+    this.livenessMs = opts.livenessMs ?? LIVENESS_MS;
     this.wss = new WebSocketServer({ host: '127.0.0.1', port });
     this.wss.on('connection', (ws) => this.handleConnection(ws));
     this.wss.on('error', (err) => this.log(`bridge: server error: ${String(err)}`));
+    this.livenessTimer = setInterval(
+      () => this.checkLiveness(),
+      Math.max(50, Math.floor(this.livenessMs / 5)),
+    );
+    this.livenessTimer.unref?.();
   }
 
-  /** True once the current connection has sent its `hello` handshake. */
+  /** True when a bound extension is connected and handshaken. */
   get connected(): boolean {
-    return this._connected;
+    return this._state === 'BOUND' && this.boundPeer?.ws?.readyState === WebSocket.OPEN;
+  }
+
+  get state(): BridgeSessionState {
+    return this._state;
   }
 
   get extensionInfo(): BridgeExtensionInfo | null {
-    return this._extensionInfo;
+    const p = this.boundPeer;
+    return p ? { agent: 'ghax-ext', version: p.version } : null;
   }
 
-  /** The tab the extension reports it's currently driving, or null. */
+  /** The tab the bound extension reports it's currently driving, or null. */
   get controlledTabId(): number | null {
-    return this._controlledTabId;
+    return this.boundPeer?.controlledTabId ?? null;
+  }
+
+  private get boundPeer(): Peer | null {
+    return this.boundId ? this.peers.get(this.boundId) ?? null : null;
+  }
+
+  /** Restrict binding to a browser brand or label. Applied on the next hello. */
+  setBindFilter(filter: string | null): void {
+    this.bindFilter = filter && filter.trim() ? filter.trim().toLowerCase() : null;
+  }
+
+  /** Snapshot of every known instance — backs `ghax bridge instances`. */
+  instances(): BridgeInstance[] {
+    return [...this.peers.values()].map((p) => ({
+      instanceId: p.instanceId,
+      browser: p.browser,
+      label: p.label,
+      version: p.version,
+      role: p.role,
+      connected: p.ws?.readyState === WebSocket.OPEN,
+      controlledTabId: p.controlledTabId,
+      lastHelloAt: p.lastHelloAt,
+      helloCount: p.helloCount,
+      replacedCount: p.replacedCount,
+    }));
+  }
+
+  /** True once ownership has flapped enough to indicate a pre-identity rival. */
+  get livelockSuspected(): boolean {
+    return this.livelockWarned;
   }
 
   private handleConnection(ws: WebSocket): void {
-    if (this.ws) {
-      this.log('bridge: new extension connection replacing existing one');
-      this.rejectAllPending(new Error('bridge: extension connection replaced'));
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-    }
-    this.ws = ws;
-    this._connected = false;
-    this._extensionInfo = null;
-
-    ws.on('message', (data) => this.onMessage(data.toString()));
-    ws.on('close', () => {
-      if (this.ws !== ws) return; // already replaced
-      this.ws = null;
-      this._connected = false;
-      this._extensionInfo = null;
-      // The controlled tab is no longer reachable until the extension
-      // reconnects; `desiredControl` is intentionally NOT cleared so the
-      // next `hello` re-asserts it.
-      this._controlledTabId = null;
-      this.rejectAllPending(new Error('bridge: extension disconnected'));
-      this.emit('disconnect');
-    });
+    // NOTE: no eviction here. A new socket is anonymous until its `hello`
+    // names an instanceId — only then can we tell "my worker respawned" from
+    // "a second browser wants in". This is the fix for the unconditional
+    // `rejectAllPending('connection replaced')` that nuked in-flight work.
+    ws.on('message', (data) => this.onMessage(data.toString(), ws));
+    ws.on('close', () => this.handleClose(ws));
     ws.on('error', (err) => this.log(`bridge: socket error: ${String(err)}`));
   }
 
-  private rejectAllPending(err: Error): void {
-    for (const p of this.pending.values()) p.reject(err);
-    this.pending.clear();
-    for (const p of this.controlPending.values()) p.reject(err);
-    this.controlPending.clear();
+  private handleClose(ws: WebSocket): void {
+    const peer = this.socketPeer.get(ws);
+    if (!peer || peer.ws !== ws) return; // stale/superseded socket — no-op
+    peer.ws = null;
+    if (peer.instanceId !== this.boundId) {
+      // A parked peer went away. Pure bookkeeping; the session is unaffected.
+      this.emit('instances');
+      return;
+    }
+    // The bound peer's socket dropped. Enter the grace window instead of
+    // failing everything: an MV3 respawn typically reconnects in <1s.
+    this.toDegraded('socket closed');
   }
 
-  private rawSend(obj: unknown): boolean {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(obj));
+  private toDegraded(reason: string): void {
+    if (this._state !== 'BOUND') return;
+    this._state = 'DEGRADED';
+    this.log(`bridge: bound instance ${this.shortId(this.boundId)} lost (${reason}) — ${this.graceMs}ms grace`);
+    // In-flight commands can't be silently retried here: only the operation
+    // layer knows whether the verb was a read or a click. Hand them a typed
+    // interruption and let runBridgeOperation decide.
+    for (const p of this.pending.values()) p.reject(new BridgeInterrupted(p.method));
+    this.pending.clear();
+    for (const p of this.controlPending.values()) p.reject(new BridgeInterrupted('control'));
+    this.controlPending.clear();
+    if (this.graceTimer) clearTimeout(this.graceTimer);
+    this.graceTimer = setTimeout(() => this.toExpired(), this.graceMs);
+    this.emit('disconnect');
+  }
+
+  private toExpired(): void {
+    if (this._state !== 'DEGRADED') return;
+    this._state = 'EXPIRED';
+    this.graceTimer = null;
+    const who = this.describePeer(this.boundPeer);
+    const err = new Error(
+      `bridge: extension ${who} did not reconnect within ${this.graceMs}ms. Is the browser running? Check edge://extensions.`,
+    );
+    (err as any).code = 'BRIDGE_DEGRADED_TIMEOUT';
+    this.log(`bridge: grace expired for ${who}`);
+    for (const q of this.queue.splice(0)) q.reject(err);
+    for (const w of this.resumeWaiters.splice(0)) w.reject(err);
+    this.emit('expired');
+  }
+
+  private checkLiveness(): void {
+    const peer = this.boundPeer;
+    if (this._state !== 'BOUND' || !peer?.ws) return;
+    if (Date.now() - peer.lastFrameAt <= this.livenessMs) return;
+    // Nothing — not even a ping — for LIVENESS_MS. The socket is half-open;
+    // terminate so `close` fires deterministically instead of hanging.
+    this.log(`bridge: no frames from ${this.describePeer(peer)} for ${this.livenessMs}ms — terminating socket`);
+    try {
+      peer.ws.terminate();
+    } catch {
+      // ignore
+    }
+  }
+
+  private shortId(id: string | null): string {
+    return id ? id.slice(0, 6) : '?';
+  }
+
+  private describePeer(p: Peer | null): string {
+    if (!p) return 'unknown';
+    const label = p.label ? ` "${p.label}"` : '';
+    return `${p.browser || 'browser'}·${this.shortId(p.instanceId)}${label}`;
+  }
+
+  private rawSend(ws: WebSocket | null, obj: unknown): boolean {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
       return true;
     }
     return false;
   }
 
-  private onMessage(raw: string): void {
+  private onMessage(raw: string, ws: WebSocket): void {
     let msg: any;
     try {
       msg = JSON.parse(raw);
     } catch {
       return;
     }
+    const peer = this.socketPeer.get(ws);
+    if (peer) peer.lastFrameAt = Date.now();
+
     if (msg && msg.type === 'hello') {
-      this._connected = true;
-      this._extensionInfo = { agent: msg.agent, version: msg.version };
-      this._controlledTabId = typeof msg.controlledTabId === 'number' ? msg.controlledTabId : null;
-      this.log(`bridge: hello from ${msg.agent ?? 'unknown'} v${msg.version ?? '?'}`);
-      this.emit('hello', this._extensionInfo);
-      // Gap 3: re-assert the desired control target on every fresh
-      // connection so control resumes automatically after an SW eviction.
-      if (this.desiredControl && this.desiredControl.action !== 'stop') {
-        const target = this.desiredControl;
-        this.sendControl(target).catch((e) =>
-          this.log(`bridge: re-assert control failed: ${String(e)}`),
-        );
-      }
+      this.handleHello(msg, ws);
       return;
     }
     // Keepalive: reply to the extension's ping so both sides see traffic;
     // ignore any pong. Neither disturbs id/reply correlation.
     if (msg && msg.type === 'ping') {
-      this.rawSend({ type: 'pong' });
+      this.rawSend(ws, { type: 'pong' });
       return;
     }
     if (msg && msg.type === 'pong') return;
-    if (msg && msg.type === 'controlled') {
-      this._controlledTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
-      this.emit('controlled', this._controlledTabId);
+
+    // Everything below is session traffic — only the BOUND peer's socket may
+    // drive it. A parked peer that somehow sent CDP is ignored, not obeyed.
+    if (!peer || peer.instanceId !== this.boundId) return;
+
+    if (msg.type === 'controlled') {
+      peer.controlledTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
+      this.emit('controlled', peer.controlledTabId);
       return;
     }
-    if (msg && msg.type === 'control-ack') {
+    if (msg.type === 'control-ack') {
       const p = typeof msg.id === 'number' ? this.controlPending.get(msg.id) : undefined;
       if (typeof msg.id === 'number') this.controlPending.delete(msg.id);
-      if (msg.ok && typeof msg.tabId === 'number') this._controlledTabId = msg.tabId;
-      else if (msg.ok && msg.tabId === null) this._controlledTabId = null;
+      if (msg.ok && typeof msg.tabId === 'number') peer.controlledTabId = msg.tabId;
+      else if (msg.ok && msg.tabId === null) peer.controlledTabId = null;
       if (p) {
         if (msg.ok) p.resolve({
           ok: true,
@@ -242,11 +436,11 @@ export class Bridge extends EventEmitter {
       }
       return;
     }
-    if (msg && msg.type === 'event') {
+    if (msg.type === 'event') {
       this.emit('event', { method: msg.method, params: msg.params ?? {} } as BridgeEvent);
       return;
     }
-    if (msg && typeof msg.id === 'number') {
+    if (typeof msg.id === 'number') {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
@@ -257,13 +451,221 @@ export class Bridge extends EventEmitter {
   }
 
   /**
-   * Send one CDP command to the extension's controlled tab and await its
-   * reply. Rejects immediately if no extension is connected (with a
-   * message pointing the operator at the fix), or after `timeoutMs` with
-   * no reply.
+   * Handshake v2. Decides this connection's role and answers with
+   * `hello-ack`. Arbitration (plan §2.4): a bind filter makes acceptance
+   * identity-scoped; with no filter the first hello binds and later ones
+   * park. Parking is non-destructive, so "first wins" is safe — and takeover
+   * is always explicit via `use()`.
+   */
+  private handleHello(msg: any, ws: WebSocket): void {
+    let instanceId = typeof msg.instanceId === 'string' && msg.instanceId ? msg.instanceId : '';
+    const legacy = !instanceId;
+    if (legacy) {
+      // Pre-v2 extension: no minted identity. Give it a synthetic one so the
+      // registry still works, and tell the operator to reload — until every
+      // profile is reloaded, legacy clients can still fight each other.
+      instanceId = `legacy-${++this.legacySeq}`;
+      this.log(
+        'bridge: hello without instanceId — reload the ghax bridge extension in edge://extensions (every profile)',
+      );
+    }
+    const browser = typeof msg.browser === 'string' ? msg.browser : '';
+    const label = typeof msg.label === 'string' ? msg.label : '';
+    const version = typeof msg.version === 'string' ? msg.version : '?';
+
+    let peer = this.peers.get(instanceId);
+    if (!peer) {
+      peer = {
+        instanceId, browser, label, version,
+        ws: null, role: 'parked',
+        lastHelloAt: 0, lastFrameAt: Date.now(),
+        helloCount: 0, replacedCount: 0, controlledTabId: null,
+      };
+      this.peers.set(instanceId, peer);
+    }
+    if (peer.ws && peer.ws !== ws) {
+      // Same instance, new socket — its old one is stale (respawn raced the
+      // close). Drop the old quietly; this is NOT a rival.
+      peer.replacedCount++;
+      const old = peer.ws;
+      this.socketPeer.delete(old);
+      try { old.close(); } catch { /* ignore */ }
+    }
+    peer.ws = ws;
+    peer.browser = browser || peer.browser;
+    peer.label = label || peer.label;
+    peer.version = version;
+    peer.helloCount++;
+    peer.lastHelloAt = Date.now();
+    peer.lastFrameAt = Date.now();
+    peer.controlledTabId = typeof msg.controlledTabId === 'number' ? msg.controlledTabId : null;
+    this.socketPeer.set(ws, peer);
+
+    const isResume = this.boundId === instanceId;
+    const noBoundPeer = this.boundId === null;
+    const boundGone = !noBoundPeer && !isResume
+      && (this._state === 'EXPIRED' || this.boundPeer?.ws == null);
+    const matchesFilter = !this.bindFilter
+      || browser.toLowerCase() === this.bindFilter
+      || label.toLowerCase() === this.bindFilter;
+
+    let role: PeerRole;
+    if (isResume) {
+      role = 'bound';
+    } else if ((noBoundPeer || boundGone) && matchesFilter) {
+      role = 'bound';
+    } else {
+      role = 'parked';
+    }
+
+    const reason = role === 'bound'
+      ? (isResume ? 'resume' : 'first-bind')
+      : (matchesFilter
+        ? `${this.describePeer(this.boundPeer)} is bound`
+        : `does not match --browser ${this.bindFilter}`);
+    this.log(
+      `bridge: hello ${this.describePeer(peer)} v${version} → ${role} (${reason})`,
+    );
+
+    if (role === 'parked') {
+      peer.role = 'parked';
+      this.rawSend(ws, { type: 'hello-ack', role: 'parked', graceMs: this.graceMs });
+      this.emit('instances');
+      return;
+    }
+
+    // ─── Bind / resume ───────────────────────────────────────
+    const previousBound = this.boundId;
+    const ownershipChanged = previousBound !== instanceId;
+    peer.role = 'bound';
+    this.boundId = instanceId;
+    if (!this.sessionToken || ownershipChanged) {
+      this.sessionToken = crypto.randomBytes(16).toString('hex');
+    }
+    if (this.graceTimer) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = null;
+    }
+    const wasInterrupted = this._state !== 'BOUND';
+    this._state = 'BOUND';
+    if (ownershipChanged) this.noteBindChange();
+
+    this.rawSend(ws, {
+      type: 'hello-ack',
+      role: 'bound',
+      sessionToken: this.sessionToken,
+      graceMs: this.graceMs,
+    });
+    this.emit('hello', this.extensionInfo);
+    this.emit('instances');
+
+    // Resume order matters (plan §2.2): re-assert control and AWAIT its ack
+    // before anything queued is allowed to run, so replayed work can't land
+    // on a tab the respawned worker hasn't re-attached yet.
+    void this.resumeSequence(wasInterrupted);
+  }
+
+  private async resumeSequence(wasInterrupted: boolean): Promise<void> {
+    try {
+      if (this.desiredControl && this.desiredControl.action !== 'stop') {
+        await this.sendControl(this.desiredControl);
+      }
+      this.emit('resumed', wasInterrupted);
+      for (const w of this.resumeWaiters.splice(0)) w.resolve();
+      this.flushQueue();
+    } catch (e) {
+      this.log(`bridge: re-assert control failed: ${String(e)}`);
+      // Control didn't come back; let the grace timer keep running rather
+      // than flushing work at a tab we don't actually own.
+      for (const w of this.resumeWaiters.splice(0)) {
+        w.reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  }
+
+  /**
+   * Track bind-ownership changes. Flapping means something is fighting for
+   * the bridge — almost always a pre-identity extension still installed in
+   * another profile. Surface it instead of letting it churn silently.
+   */
+  private noteBindChange(): void {
+    const now = Date.now();
+    this.bindEvents = this.bindEvents.filter((t) => now - t < LIVELOCK_WINDOW_MS);
+    this.bindEvents.push(now);
+    if (this.bindEvents.length >= LIVELOCK_THRESHOLD && !this.livelockWarned) {
+      this.livelockWarned = true;
+      this.log(
+        'bridge: WARNING — bridge ownership is flapping. A pre-identity ghax bridge ' +
+        'extension is probably still installed in another profile; reload the extension ' +
+        'in edge://extensions in EVERY profile, or disable the ones you do not drive.',
+      );
+    }
+  }
+
+  private flushQueue(): void {
+    if (this._state !== 'BOUND') return;
+    const now = Date.now();
+    for (const q of this.queue.splice(0)) {
+      if (q.deadline <= now) {
+        q.reject(new Error(`bridge: ${q.method} timed out while the extension was reconnecting`));
+        continue;
+      }
+      this.dispatch(q.method, q.params, q.deadline - now).then(q.resolve, q.reject);
+    }
+  }
+
+  /**
+   * Resolve when the bridge is BOUND again (immediately if it already is),
+   * reject if the grace window expires first. The operation layer awaits this
+   * before replaying a `safe` verb.
+   */
+  waitForResume(): Promise<void> {
+    if (this._state === 'BOUND') return Promise.resolve();
+    if (this._state === 'UNBOUND' || this._state === 'EXPIRED') {
+      return Promise.reject(new Error('ghax bridge: no extension connected.'));
+    }
+    return new Promise((resolve, reject) => this.resumeWaiters.push({ resolve, reject }));
+  }
+
+  /**
+   * Send one CDP command to the bound extension's controlled tab.
+   *
+   * BOUND     → dispatched now.
+   * DEGRADED  → QUEUED (the caller sees latency, not an error, if the
+   *             extension returns inside the grace window). The command still
+   *             honours its OWN deadline: a 20s session grace must never turn
+   *             a 5s command into a 20s hang.
+   * otherwise → rejected immediately with install guidance.
    */
   send(method: string, params: Record<string, unknown> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._connected) {
+    if (this._state === 'BOUND') return this.dispatch(method, params, timeoutMs);
+    if (this._state === 'DEGRADED') {
+      if (this.queue.length >= QUEUE_CAP) {
+        return Promise.reject(new Error('bridge: too many commands queued while the extension reconnects'));
+      }
+      return new Promise((resolve, reject) => {
+        const deadline = Date.now() + timeoutMs;
+        const entry: QueuedCommand = { method, params, deadline, resolve, reject };
+        this.queue.push(entry);
+        setTimeout(() => {
+          const i = this.queue.indexOf(entry);
+          if (i >= 0) {
+            this.queue.splice(i, 1);
+            reject(new Error(`bridge: ${method} timed out after ${timeoutMs}ms (extension reconnecting)`));
+          }
+        }, timeoutMs).unref?.();
+      });
+    }
+    return Promise.reject(
+      new Error(
+        'ghax bridge: no extension connected. Load extension/ unpacked, then click "Control this tab" in the ghax bridge popup.',
+      ),
+    );
+  }
+
+  private dispatch(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    const ws = this.boundPeer?.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(
         new Error(
           'ghax bridge: no extension connected. Load extension/ unpacked, then click "Control this tab" in the ghax bridge popup.',
@@ -271,13 +673,13 @@ export class Bridge extends EventEmitter {
       );
     }
     const id = this.nextId++;
-    const ws = this.ws;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`bridge: ${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(id, {
+        method,
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);
@@ -295,6 +697,52 @@ export class Bridge extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  /**
+   * Rebind to a different instance by id, browser brand, or label. Uses the
+   * `role` message so demotion/promotion happens over LIVE sockets — no
+   * disconnect, so neither side re-enters a reconnect loop.
+   */
+  async use(selector: string): Promise<BridgeInstance> {
+    const want = selector.trim().toLowerCase();
+    const target = [...this.peers.values()].find(
+      (p) => p.instanceId.toLowerCase().startsWith(want)
+        || p.browser.toLowerCase() === want
+        || p.label.toLowerCase() === want,
+    );
+    if (!target) {
+      const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
+      throw new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`);
+    }
+    if (target.ws?.readyState !== WebSocket.OPEN) {
+      throw new Error(`bridge: instance ${this.describePeer(target)} is not connected`);
+    }
+    if (target.instanceId === this.boundId) return this.instances().find((i) => i.instanceId === target.instanceId)!;
+
+    const previous = this.boundPeer;
+    if (previous?.ws) {
+      previous.role = 'parked';
+      this.rawSend(previous.ws, { type: 'role', role: 'parked' });
+    }
+    // Drop session state tied to the old instance. Tab ids are per-browser,
+    // so refs MUST die here — the 'controlled' emit reuses the existing
+    // ref-clearing path (CLAUDE.md invariant 3) for free.
+    for (const p of this.pending.values()) p.reject(new BridgeInterrupted(p.method));
+    this.pending.clear();
+    for (const q of this.queue.splice(0)) q.reject(new Error('bridge: rebound to a different instance'));
+    this.desiredControl = null;
+
+    target.role = 'bound';
+    this.boundId = target.instanceId;
+    this._state = 'BOUND';
+    this.sessionToken = crypto.randomBytes(16).toString('hex');
+    this.noteBindChange();
+    this.rawSend(target.ws, { type: 'role', role: 'bound', sessionToken: this.sessionToken });
+    this.log(`bridge: bound → ${this.describePeer(target)}`);
+    this.emit('controlled', target.controlledTabId);
+    this.emit('instances');
+    return this.instances().find((i) => i.instanceId === target.instanceId)!;
   }
 
   /**
@@ -317,7 +765,8 @@ export class Bridge extends EventEmitter {
     if (target.action === 'stop') this.desiredControl = null;
     else if (target.action === 'control-active') this.desiredControl = target;
     else if (target.action === 'control-tab') this.desiredControl = { ...target, quiet: true };
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this._connected) {
+    const ws = this.boundPeer?.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this._state !== 'BOUND') {
       return Promise.reject(
         new Error(
           'ghax bridge: no extension connected. Load extension/ unpacked (the ghax bridge extension) and make sure the browser is running.',
@@ -325,7 +774,6 @@ export class Bridge extends EventEmitter {
       );
     }
     const id = this.controlNextId++;
-    const ws = this.ws;
     return new Promise<ControlAck>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.controlPending.delete(id);
@@ -358,14 +806,22 @@ export class Bridge extends EventEmitter {
   }
 
   close(): void {
-    this.rejectAllPending(new Error('bridge: shutting down'));
-    if (this.ws) {
+    const err = new Error('bridge: shutting down');
+    for (const p of this.pending.values()) p.reject(err);
+    this.pending.clear();
+    for (const p of this.controlPending.values()) p.reject(err);
+    this.controlPending.clear();
+    for (const q of this.queue.splice(0)) q.reject(err);
+    for (const w of this.resumeWaiters.splice(0)) w.reject(err);
+    if (this.graceTimer) clearTimeout(this.graceTimer);
+    if (this.livenessTimer) clearInterval(this.livenessTimer);
+    for (const peer of this.peers.values()) {
       try {
-        this.ws.close();
+        peer.ws?.close();
       } catch {
         // ignore
       }
-      this.ws = null;
+      peer.ws = null;
     }
     try {
       this.wss.close();

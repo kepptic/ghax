@@ -90,7 +90,7 @@ ghax/
 │   ├── design/               Design history (why the current architecture exists)
 │   └── sessions/             Field reports from production agent runs
 ├── scripts/
-│   ├── install-link.sh       Symlink into ~/.local/bin + bootstrap daemon node_modules
+│   ├── install-link.sh       Copy (default) or --link into ~/.local/bin + bootstrap daemon node_modules
 │   ├── install-release.sh    Download latest GitHub release + install
 │   ├── release.sh            Cut a release (refuses to run with dirty tree)
 │   └── bootstrap-daemon-runtime.sh   Shared npm install step

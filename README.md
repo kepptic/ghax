@@ -71,7 +71,12 @@ npm run build:all
 npm run install-link
 ```
 
-Ensure `~/.local/bin` is on `PATH`. Uninstall: `npm run uninstall-link`.
+This **copies** the binary and daemon bundle into `~/.local`, so a later
+`cargo clean` won't break the installed CLI. For active development, `bash
+scripts/install-link.sh --link` symlinks instead, so a rebuild updates the
+installed CLI in place. Ensure `~/.local/bin` is on `PATH`. Uninstall:
+`npm run uninstall-link`. Run `ghax version --full` any time to confirm which
+binary, daemon bundle, and extension you're actually running.
 
 ---
 

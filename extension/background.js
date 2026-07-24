@@ -34,13 +34,37 @@ const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
 const PING_INTERVAL_MS = 15000;
 const NAVIGATION_TIMEOUT_MS = 8000;
-const KEEPALIVE_ALARM = 'ghax-bridge-keepalive';
-// Chrome clamps repeating alarms to a 30s (0.5 min) floor. 0.5 is the
-// smallest value that fires without a warning and reliably resurrects an
-// evicted worker — worst-case reconnect is one alarm period (~30s).
+// Chrome clamps repeating alarms to a 30s (0.5 min) floor, so a single alarm
+// leaves a worst-case ~30s wake gap after the daemon restarts and the socket
+// closes. TWO alarms phase-offset by 15s halve that to ~15s — the cheap half
+// of the keepalive story (no offscreen document, per plan §3.7). Both fire the
+// same handler; whichever lands first reconnects, the other no-ops.
+const KEEPALIVE_ALARM_A = 'ghax-bridge-keepalive';   // unchanged name: survives upgrade
+const KEEPALIVE_ALARM_B = 'ghax-bridge-keepalive-b';
+const KEEPALIVE_ALARMS = new Set([KEEPALIVE_ALARM_A, KEEPALIVE_ALARM_B]);
 const KEEPALIVE_PERIOD_MIN = 0.5;
 
+const DORMANT_ALARM = 'ghax-bridge-dormant-retry';
+const DORMANT_RETRY_MIN = 5;
+
 let ws = null;
+// Socket generation — bumped on every connect(). Every socket's event
+// listeners capture their generation and act ONLY if they're still current.
+// This is what stops a superseded socket's late `close` from scheduling a
+// reconnect (or a stale `open` from re-pinging) after a newer socket has
+// already taken over. See docs/design/plan/08-bridge-reliability.md §1b.
+let socketGen = 0;
+// Disposition assigned by the daemon in `hello-ack` (or a later `role`).
+// 'bound'  — we drive the controlled tab.
+// 'parked' — socket stays OPEN and pinging, but we hold NO chrome.debugger
+//            attachment and receive no CDP. Keeping the socket is what ends
+//            the livelock: our reconnect loop is satisfied, not retriggered.
+// null     — handshake not answered yet (pre-v2 daemon); legacy behaviour.
+let bridgeRole = null;
+// Set when the daemon explicitly REJECTED us (auth/protocol). Distinct from
+// parked: a rejected client stops the fast reconnect loop entirely and retries
+// once every DORMANT_RETRY_MIN minutes, so a rejection can't become a hot loop.
+let dormantReason = null;
 let reconnectDelay = RECONNECT_BASE_MS;
 let reconnectTimer = null;
 let pingTimer = null;
@@ -64,9 +88,106 @@ async function setStatus(extra = {}) {
       connected: ws?.readyState === WebSocket.OPEN,
       controlledTabId,
       attached,
+      role: bridgeRole,
+      dormantReason,
       ...extra,
     },
   });
+}
+
+/**
+ * This install's stable identity. `chrome.runtime.id` is derived from the
+ * unpacked path, so every profile loading the same directory reports the
+ * SAME id — useless for telling two browsers apart. A UUID minted once into
+ * chrome.storage.local is per-profile, which is exactly the identity the
+ * daemon's registry needs.
+ */
+async function getIdentity() {
+  const stored = await chrome.storage.local.get(['ghaxInstanceId', 'ghaxLabel']);
+  let instanceId = stored.ghaxInstanceId;
+  if (typeof instanceId !== 'string' || !instanceId) {
+    instanceId = crypto.randomUUID();
+    await chrome.storage.local.set({ ghaxInstanceId: instanceId });
+  }
+  return {
+    instanceId,
+    label: typeof stored.ghaxLabel === 'string' ? stored.ghaxLabel : '',
+    browser: detectBrowser(),
+  };
+}
+
+function detectBrowser() {
+  const brands = (globalThis.navigator?.userAgentData?.brands) ?? [];
+  for (const b of brands) {
+    const name = String(b?.brand ?? '').toLowerCase();
+    if (name.includes('edge')) return 'edge';
+  }
+  for (const b of brands) {
+    const name = String(b?.brand ?? '').toLowerCase();
+    if (name.includes('chrome') && !name.includes('chromium')) return 'chrome';
+  }
+  return brands.length ? 'chromium' : '';
+}
+
+/**
+ * Apply a disposition from the daemon. This is the ONLY place that decides
+ * whether we hold a debugger attachment — attaching now happens strictly
+ * after the daemon has told us we're the driver (previously we attached
+ * before even sending hello, which meant a would-be parked peer grabbed an
+ * attachment anyway).
+ */
+async function applyRole(role, sessionToken) {
+  bridgeRole = role === 'bound' ? 'bound' : 'parked';
+  dormantReason = null;
+  if (typeof sessionToken === 'string' && chrome.storage.session) {
+    // storage.session survives a service-worker respawn but dies with the
+    // browser — exactly resume semantics.
+    await chrome.storage.session.set({ ghaxSessionToken: sessionToken }).catch(() => undefined);
+  }
+  if (bridgeRole === 'bound') {
+    if (controlledTabId != null && !attached) {
+      try {
+        await attachTo(controlledTabId);
+        reportControlled();
+      } catch (err) {
+        if (isTemporarilyUnattachable(err)) scheduleReattach();
+        else await persistTab(null);
+      }
+    }
+  } else if (attached && controlledTabId != null) {
+    // Demoted while driving: drop the attachment but KEEP the desired tab
+    // recorded, so a later promotion restores exactly where we were.
+    cancelReattach();
+    await chrome.debugger.detach({ tabId: controlledTabId }).catch(() => undefined);
+    attached = false;
+  }
+  await setStatus();
+}
+
+/**
+ * The daemon rejected this client outright. Stop the fast reconnect loop —
+ * retrying a rejection every 500ms is how a "no" becomes a hot loop — and
+ * check back once every few minutes instead.
+ */
+async function goDormant(reason) {
+  dormantReason = reason || 'rejected by the ghax daemon';
+  bridgeRole = null;
+  cancelReattach();
+  stopPing();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  const socket = ws;
+  socketGen++; // invalidate listeners so `close` can't schedule a reconnect
+  ws = null;
+  try {
+    socket?.close();
+  } catch {
+    // ignore
+  }
+  chrome.alarms.create(DORMANT_ALARM, { delayInMinutes: DORMANT_RETRY_MIN });
+  await setStatus();
 }
 
 async function loadPersistedTab() {
@@ -111,8 +232,17 @@ function stopPing() {
 }
 
 async function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  // Treat CLOSING as occupied, not free. A socket the daemon just evicted sits
+  // in CLOSING until its close event fires; the OLD guard (OPEN/CONNECTING
+  // only) let connect() open a SECOND socket in that window while the daemon
+  // still held the first — which the daemon logs as "connection replaced" and
+  // which self-sustains churn with no rival present. Wait for `close`; its
+  // handler schedules the reconnect. See plan §1b.
+  if (ws && (ws.readyState === WebSocket.OPEN
+          || ws.readyState === WebSocket.CONNECTING
+          || ws.readyState === WebSocket.CLOSING)) return;
   const port = await getPort();
+  const gen = ++socketGen;
   let socket;
   try {
     socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -123,42 +253,54 @@ async function connect() {
   ws = socket;
 
   socket.addEventListener('open', async () => {
+    if (gen !== socketGen) return; // superseded before we even opened
     reconnectDelay = RECONNECT_BASE_MS;
-    // A respawned worker persisted its controlled tab — re-attach proactively
-    // so control survives eviction even if the daemon doesn't re-assert.
+    // Identify FIRST, attach only once the daemon grants us the active lease
+    // (see applyRole). Attaching before the handshake — which is what this
+    // did previously — meant a peer destined to be parked still grabbed a
+    // chrome.debugger attachment, defeating the whole parked model.
     await loadPersistedTab();
-    let retainedControl = false;
-    if (controlledTabId != null) {
-      try {
-        await attachTo(controlledTabId);
-        retainedControl = true;
-      } catch (err) {
-        if (isTemporarilyUnattachable(err)) {
-          // Keep the desired tab through cert/chrome-error interstitials.
-          retainedControl = true;
-          scheduleReattach();
-        } else {
-          await persistTab(null); // tab is gone or another debugger owns it
-        }
-      }
-    }
+    const identity = await getIdentity();
+    const session = chrome.storage.session
+      ? await chrome.storage.session.get('ghaxSessionToken').catch(() => ({}))
+      : {};
     send({
       type: 'hello',
       agent: 'ghax-ext',
       version: chrome.runtime.getManifest().version,
-      controlledTabId: retainedControl ? controlledTabId : null,
+      instanceId: identity.instanceId,
+      browser: identity.browser,
+      label: identity.label,
+      controlledTabId, // the tab we WANT; attachment awaits the disposition
+      resumeToken: session?.ghaxSessionToken ?? null,
     });
     startPing();
     setStatus();
+    // Pre-v2 daemons never answer `hello`. If no disposition arrives shortly,
+    // assume the legacy contract (we are the one and only driver) so an old
+    // daemon keeps working with a new extension.
+    setTimeout(() => {
+      if (gen === socketGen && bridgeRole === null && ws?.readyState === WebSocket.OPEN) {
+        void applyRole('bound', undefined);
+      }
+    }, 1000);
   });
 
   socket.addEventListener('message', (ev) => {
+    if (gen !== socketGen) return; // a newer socket owns the bridge now
     void handleMessage(String(ev.data));
   });
 
   socket.addEventListener('close', () => {
+    // Only the current generation may clear `ws`, stop pinging, or schedule a
+    // reconnect. A superseded socket closing is a no-op — otherwise its late
+    // close would race a healthy newer socket back into the reconnect loop.
+    if (gen !== socketGen) return;
     if (ws === socket) ws = null;
     stopPing();
+    // Role is per-connection: the next handshake re-negotiates it. Without
+    // this reset a reconnecting peer would keep acting on a stale disposition.
+    bridgeRole = null;
     setStatus();
     scheduleReconnect();
   });
@@ -169,7 +311,9 @@ async function connect() {
 }
 
 function scheduleReconnect() {
-  if (reconnectTimer) return;
+  // The fast 500ms→8s backoff is correct for "daemon isn't listening yet".
+  // It is NOT correct after an explicit rejection — goDormant owns that path.
+  if (reconnectTimer || dormantReason) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
@@ -216,6 +360,9 @@ function scheduleReattach(delay = 250) {
 }
 
 async function ensureAttached() {
+  if (bridgeRole === 'parked') {
+    throw new Error('this browser is parked — another browser is bound to the ghax daemon. Run `ghax bridge use <id|browser>` to switch.');
+  }
   if (attached) return;
   if (controlledTabId == null) {
     throw new Error('no tab under control — click "Control this tab" in the ghax bridge popup, or run `ghax bridge control --active`');
@@ -364,6 +511,17 @@ async function handleMessage(raw) {
   // Keepalive frames carry no work.
   if (msg.type === 'ping' || msg.type === 'pong') return;
 
+  // Handshake disposition, and later promotion/demotion over the live socket
+  // (so a rebind never requires a disconnect).
+  if (msg.type === 'hello-ack' || msg.type === 'role') {
+    await applyRole(msg.role, msg.sessionToken);
+    return;
+  }
+  if (msg.type === 'hello-reject') {
+    await goDormant(msg.message);
+    return;
+  }
+
   // Daemon → extension control channel (scriptable activation, no popup).
   if (msg.type === 'control') {
     await handleControl(msg);
@@ -483,15 +641,31 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Keepalive alarm — resurrects an evicted SW and reconnects if the socket
 // is gone. Registered at top level so it re-arms on every SW spawn.
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== KEEPALIVE_ALARM) return;
-  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+  if (alarm.name === DORMANT_ALARM) {
+    // Slow retry after an explicit rejection — clear dormancy and try once.
+    dormantReason = null;
+    void connect();
+    return;
+  }
+  if (!KEEPALIVE_ALARMS.has(alarm.name)) return;
+  if (dormantReason) return; // rejected: wait for the slow retry, don't hammer
+  // Reconnect only when the socket is truly gone. A CLOSING socket is handled
+  // by its own close listener (which schedules the reconnect); poking connect()
+  // here would be a no-op anyway given the CLOSING guard, but not calling it
+  // keeps the intent — and the ownership — in one place.
+  if (!ws || ws.readyState === WebSocket.CLOSED) {
     void connect();
   }
 });
 
 function ensureAlarm() {
   // create() with the same name replaces any existing schedule — idempotent.
-  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
+  // Alarm B is phase-offset by ~15s so the two together fire every ~15s.
+  chrome.alarms.create(KEEPALIVE_ALARM_A, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
+  chrome.alarms.create(KEEPALIVE_ALARM_B, {
+    delayInMinutes: 0.25,
+    periodInMinutes: KEEPALIVE_PERIOD_MIN,
+  });
 }
 
 // Messages from popup.js.

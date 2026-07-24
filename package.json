@@ -14,6 +14,7 @@
     "build:all": "npm run build:rust && npm run build",
     "typecheck": "tsc --noEmit",
     "test:smoke": "tsx test/smoke.ts",
+    "test:bridge-sim": "tsx test/bridge-sim.ts",
     "test:capture-bodies": "tsx test/capture-bodies-smoke.ts",
     "test:cross-browser": "tsx test/cross-browser.ts",
     "test:benchmark": "tsx test/benchmark.ts",

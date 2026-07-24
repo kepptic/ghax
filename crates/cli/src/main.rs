@@ -21,6 +21,7 @@ mod sse;
 mod state;
 mod time_util;
 mod update;
+mod version;
 
 use std::process::ExitCode;
 
