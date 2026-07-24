@@ -122,7 +122,7 @@ The bridge WebSocket listens on `127.0.0.1` only, but by default any local
 process could connect and drive your browser. To require a code:
 
 ```bash
-ghax attach --extension --pair          # prints a 6-digit code
+ghax attach --extension --pair          # prints an 8-digit code
 # → "⚷  Pairing required. In the ghax bridge popup, enter this code: 314159"
 ```
 

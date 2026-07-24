@@ -308,6 +308,7 @@ dependencies = [
  "anyhow",
  "atty",
  "ctrlc",
+ "getrandom 0.2.17",
  "reqwest",
  "rustyline",
  "serde",
