@@ -7,6 +7,33 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`--stable` — wait for the DOM to stop changing.** The fix for reads that
+  intermittently returned only the nav shell because they raced SPA hydration.
+  `ghax wait --stable [--quiet <ms>] [--timeout <ms>] [--min-nodes <n>]
+  [<selector>]`, plus `--stable` as sugar on `goto`, `text`, and `snapshot`.
+  Works on **both** transports (CDP and the extension bridge) from one
+  implementation.
+  - One `Runtime.evaluate` with `awaitPromise:true` installs an in-page
+    `MutationObserver` — not a poll loop, which would cost 10-30x the
+    round-trips and could interleave with navigation mid-poll.
+  - "Stable" = `readyState` past loading, then zero **significant** mutations
+    for a quiet window (default 500ms), no visible `[aria-busy="true"]`, and
+    two `requestAnimationFrame`s so layout has flushed. Significant means
+    `childList` + `characterData` + the `aria-busy`/`hidden` attributes;
+    general attribute churn is ignored on purpose, because spinners and
+    class-toggling animations mutate attributes forever and a page with a
+    spinning CSS loader is still readable.
+  - **Never hangs and never throws on timeout** — a ticker or live-chat page
+    that never settles returns a truthful `{stable:false, reason:"timeout"}`
+    along with node count, text length, busy count, and elapsed/quiet timings.
+- **Suspiciously-empty detection** on `text` and `snapshot` (bridge mode).
+  A tiny read that coincides with evidence the page is still settling
+  (requests in flight, or load fired < 2s ago) gets one bounded retry after a
+  short stability wait. If it's still tiny the result is returned anyway,
+  annotated `possiblyIncomplete` with a stderr warning — it only ever warns.
+  Turning a small read into a *failure* requires an explicit `--min-nodes`,
+  because blank, media-only, sparse, and redirect pages are all legitimately
+  near-empty. Opt out with `--no-retry`. Plain-text output is unchanged.
 - **Bridge identity + multi-browser arbitration.** The daemon now keeps a
   registry of extension instances instead of a single anonymous socket.
   Exactly one instance is **bound** (drives the tab); every other healthy

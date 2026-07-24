@@ -53,6 +53,17 @@ fn try_print(data: &Value, json: bool) -> io::Result<()> {
                 if let Some(Value::String(p)) = obj.get("annotatedPath") {
                     eprintln!("\n(annotated screenshot → {p})");
                 }
+                // A read that came back suspiciously small while the page was
+                // still settling. Warn on stderr so piped stdout is unaffected
+                // — a partial read that looks like success is the failure mode
+                // this exists to prevent.
+                if obj.get("possiblyIncomplete").and_then(Value::as_bool) == Some(true) {
+                    let note = obj
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the page may still have been loading");
+                    eprintln!("warning: {note}");
+                }
                 return Ok(());
             }
             writeln!(out, "{}", serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".into()))?;

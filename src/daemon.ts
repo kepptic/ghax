@@ -55,6 +55,7 @@ import {
   bridgeResolveSelector,
   bridgeSnapshot,
   bridgeText,
+  isStaleContextError,
   type BridgeRef,
   type BridgeTab,
   type ControlTarget,
@@ -127,6 +128,20 @@ interface Ctx {
   refs: Map<string, RefEntry>;
   bridgeRefs: Map<string, BridgeRef>;
   bridgeNetworkRequests: Map<string, NetworkEntry>;
+  // Execution-context tracking (plan §2.5). `chrome.debugger` attaches to the
+  // tab's top-level target, so we only ever see the main frame — this is NOT
+  // frame selection. It exists to stop `Runtime.evaluate` landing on a
+  // document that navigation already destroyed: without a pinned context, a
+  // read issued around a navigation can execute against the OLD document (or
+  // fail with "Cannot find context with specified id"), which is one source
+  // of the intermittent nav-shell-only reads this phase targets.
+  bridgeMainFrameId: string | null;
+  // frameId → the frame's DEFAULT execution context. `uniqueId` is preferred
+  // over the numeric id, which Chromium reuses across navigations.
+  bridgeContexts: Map<string, { uniqueId: string; id: number }>;
+  // Timestamp of the last main-frame load event, so read verbs can tell
+  // "small page" from "page still settling" (suspicious-empty, §2.6).
+  bridgeLastLoadAt: number;
   instrumented: WeakSet<Page>;
   startedAt: number;
   stateDir: string;
@@ -512,6 +527,48 @@ function wireBridgeEvents(ctx: Ctx): void {
   const bridge = requireBridge(ctx);
   bridge.onEvent((ev) => {
     const p = ev.params as any;
+    // ─── Execution-context bookkeeping (plan §2.5) ────────────
+    // Track, don't guess: knowing the live main-frame context is what stops
+    // a read from executing against a document navigation already replaced.
+    if (ev.method === 'Runtime.executionContextCreated') {
+      const c = p.context ?? {};
+      const aux = c.auxData ?? {};
+      // Only the frame's DEFAULT context (i.e. not an isolated world /
+      // content-script sandbox) sees the page's own JS state.
+      if (aux.isDefault && typeof aux.frameId === 'string' && typeof c.uniqueId === 'string') {
+        ctx.bridgeContexts.set(aux.frameId, { uniqueId: c.uniqueId, id: Number(c.id) });
+      }
+      return;
+    }
+    if (ev.method === 'Runtime.executionContextDestroyed') {
+      const goneUnique = typeof p.executionContextUniqueId === 'string' ? p.executionContextUniqueId : null;
+      const goneId = typeof p.executionContextId === 'number' ? p.executionContextId : null;
+      for (const [frameId, entry] of ctx.bridgeContexts) {
+        if ((goneUnique && entry.uniqueId === goneUnique) || (goneId !== null && entry.id === goneId)) {
+          ctx.bridgeContexts.delete(frameId);
+        }
+      }
+      return;
+    }
+    if (ev.method === 'Runtime.executionContextsCleared') {
+      ctx.bridgeContexts.clear();
+      return;
+    }
+    if (ev.method === 'Page.frameNavigated') {
+      const frame = p.frame ?? {};
+      // A main-frame navigation invalidates every context we knew about, and
+      // also every @ref: backend node ids belong to the old document.
+      if (typeof frame.id === 'string' && !frame.parentId) {
+        ctx.bridgeMainFrameId = frame.id;
+        ctx.bridgeContexts.clear();
+        clearSnapshotRefs(ctx);
+      }
+      return;
+    }
+    if (ev.method === 'Page.loadEventFired') {
+      ctx.bridgeLastLoadAt = Date.now();
+      return;
+    }
     if (ev.method === 'Runtime.consoleAPICalled') {
       const levels: Record<string, ConsoleEntry['level']> = {
         log: 'log', info: 'info', warning: 'warn', error: 'error', debug: 'debug', verbose: 'debug', trace: 'trace', assert: 'error',
@@ -618,6 +675,192 @@ function wireBridgeEvents(ctx: Ctx): void {
       ctx.bridgeNetworkRequests.delete(requestId);
     }
   });
+}
+
+/**
+ * The main frame's live default execution context, or null if we don't know
+ * one yet. Waits briefly mid-navigation rather than failing: bookkeeping
+ * lagging by a few ms must never turn a valid read into an error.
+ */
+async function mainFrameContextId(ctx: Ctx, waitMs = 2000): Promise<string | null> {
+  const pick = (): string | null => {
+    if (ctx.bridgeMainFrameId) {
+      const hit = ctx.bridgeContexts.get(ctx.bridgeMainFrameId);
+      if (hit) return hit.uniqueId;
+    }
+    // No main frame id yet (e.g. attached mid-session, before any
+    // frameNavigated). Exactly one tracked context is unambiguous.
+    if (ctx.bridgeContexts.size === 1) return [...ctx.bridgeContexts.values()][0].uniqueId;
+    return null;
+  };
+  const immediate = pick();
+  if (immediate) return immediate;
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    const found = pick();
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * `Runtime.evaluate` pinned to the main frame's live context, with one
+ * self-heal retry if the pin went stale between resolve and dispatch.
+ *
+ * The retry is safe regardless of the calling verb's retry class: a stale
+ * context means the expression provably never ran.
+ */
+async function bridgeEval(ctx: Ctx, expression: string, timeoutMs?: number): Promise<unknown> {
+  const bridge = requireBridge(ctx);
+  const uniqueContextId = await mainFrameContextId(ctx, 300);
+  try {
+    return await bridgeEvaluate(bridge, expression, { uniqueContextId, timeoutMs });
+  } catch (err) {
+    if (!isStaleContextError(err)) throw err;
+    // Re-announce every context, wait for the new main-frame default, retry.
+    ctx.bridgeContexts.clear();
+    await bridge.send('Runtime.disable').catch(() => undefined);
+    await bridge.send('Runtime.enable').catch(() => undefined);
+    const fresh = await mainFrameContextId(ctx, 2000);
+    return await bridgeEvaluate(bridge, expression, { uniqueContextId: fresh, timeoutMs });
+  }
+}
+
+// ─── DOM stability (plan §2.6) ─────────────────────────────────
+//
+// The problem this solves: on an SPA, `text`/`eval`/`snapshot` frequently
+// return only the nav shell because the read raced hydration. There was no
+// way to say "wait until the page stops changing".
+//
+// Implementation is ONE `Runtime.evaluate` with `awaitPromise:true` that
+// installs an in-page MutationObserver and resolves when quiet or at
+// deadline — not a poll loop (10-30x the round-trips, coarser resolution,
+// and it can interleave with navigation mid-poll).
+//
+// "Significant" mutation = childList + characterData, plus the aria-busy and
+// hidden attributes. General attribute churn is deliberately ignored:
+// spinners and class-toggling animations mutate attributes forever, and a
+// page with a spinning CSS loader is still readable. A text-only content
+// swap, by contrast, is exactly the hydration we're waiting for.
+//
+// Never throws on timeout — an infinite-churn page (ticker, ads, live chat)
+// gets a truthful {stable:false} so the caller can proceed, not a hang.
+interface StabilityResult {
+  stable: boolean;
+  reason: string;
+  elapsedMs: number;
+  quietMs: number;
+  nodes: number;
+  textLength: number;
+  busy: number;
+}
+
+function stabilityExpression(opts: { quietMs: number; timeoutMs: number; minNodes: number; selector: string | null }): string {
+  return `(() => new Promise((resolve) => {
+    const QUIET = ${opts.quietMs}, DEADLINE = ${opts.timeoutMs}, MIN_NODES = ${opts.minNodes};
+    const SELECTOR = ${opts.selector === null ? 'null' : JSON.stringify(opts.selector)};
+    const started = Date.now();
+    let lastMutation = Date.now();
+    let observer = null;
+    let done = false;
+    const stats = () => {
+      const root = SELECTOR ? document.querySelector(SELECTOR) : document.body;
+      return {
+        nodes: root ? root.querySelectorAll('*').length : 0,
+        textLength: root ? (root.innerText || '').trim().length : 0,
+        busy: document.querySelectorAll('[aria-busy="true"]').length,
+      };
+    };
+    const finish = (stable, reason) => {
+      if (done) return;
+      done = true;
+      if (observer) observer.disconnect();
+      const s = stats();
+      resolve({ stable, reason, elapsedMs: Date.now() - started, quietMs: Date.now() - lastMutation, ...s });
+    };
+    const start = () => {
+      const root = SELECTOR ? document.querySelector(SELECTOR) : document.documentElement;
+      if (!root) { finish(false, 'selector-not-found'); return; }
+      observer = new MutationObserver((records) => {
+        for (const r of records) {
+          if (r.type === 'childList' || r.type === 'characterData') { lastMutation = Date.now(); return; }
+          if (r.type === 'attributes' && (r.attributeName === 'aria-busy' || r.attributeName === 'hidden')) {
+            lastMutation = Date.now(); return;
+          }
+        }
+      });
+      observer.observe(root, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['aria-busy', 'hidden'],
+      });
+      const tick = () => {
+        if (done) return;
+        if (Date.now() - started >= DEADLINE) { finish(false, 'timeout'); return; }
+        const quiet = Date.now() - lastMutation;
+        if (quiet >= QUIET) {
+          const s = stats();
+          // aria-busy is the page telling us it isn't ready; believe it.
+          if (s.busy > 0) { lastMutation = Date.now(); requestAnimationFrame(tick); return; }
+          if (MIN_NODES > 0 && s.nodes < MIN_NODES) { requestAnimationFrame(tick); return; }
+          // Two rAFs: let layout flush before we call it settled.
+          requestAnimationFrame(() => requestAnimationFrame(() => finish(true, 'quiet')));
+          return;
+        }
+        setTimeout(tick, Math.min(50, QUIET));
+      };
+      tick();
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+      // Guard against a document that never fires it (already-parsed edge case).
+      setTimeout(() => { if (!observer && !done) start(); }, 250);
+    } else {
+      start();
+    }
+  }))()`;
+}
+
+async function waitForStability(
+  ctx: Ctx,
+  opts: { quietMs?: number; timeoutMs?: number; minNodes?: number; selector?: string | null } = {},
+): Promise<StabilityResult> {
+  const quietMs = Number(opts.quietMs ?? 500);
+  const timeoutMs = Number(opts.timeoutMs ?? 10_000);
+  const minNodes = Number(opts.minNodes ?? 0);
+  const selector = opts.selector ?? null;
+  const expression = stabilityExpression({ quietMs, timeoutMs, minNodes, selector });
+  // The in-page promise self-limits at DEADLINE; give the RPC a margin so a
+  // transport timeout can't pre-empt the truthful {stable:false} answer.
+  const budget = timeoutMs + 5_000;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await bridgeEval(ctx, expression, budget) as StabilityResult;
+    } catch (err) {
+      // Navigation destroying the context rejects the promise — but "the page
+      // navigated" is the opposite of stable, so it's signal, not failure.
+      // Re-pin and re-run, bounded.
+      if (attempt === 0 && isStaleContextError(err)) continue;
+      throw err;
+    }
+  }
+  return { stable: false, reason: 'navigated', elapsedMs: 0, quietMs: 0, nodes: 0, textLength: 0, busy: 0 };
+}
+
+/**
+ * "Suspiciously empty" detection (plan §2.6, report item #10).
+ *
+ * Fires only when a tiny yield coincides with evidence the page is still
+ * settling — never on a genuinely sparse page, because a sparse page has no
+ * in-flight evidence. It WARNS by design: turning a small read into a failure
+ * requires an explicit --min-nodes, since blank, media-only, and redirect
+ * pages are all legitimately near-empty.
+ */
+function looksSuspiciouslyEmpty(ctx: Ctx, yieldSize: number, threshold: number): boolean {
+  if (yieldSize >= threshold) return false;
+  if (ctx.bridgeNetworkRequests.size > 0) return true;              // requests in flight
+  if (ctx.bridgeLastLoadAt && Date.now() - ctx.bridgeLastLoadAt < 2000) return true; // just loaded
+  return false;
 }
 
 async function enableBridgeDomains(ctx: Ctx): Promise<void> {
@@ -989,15 +1232,41 @@ register('downloads', async (ctx, _args, opts) => {
   return { downloadsDir: ctx.downloadsDir, count: items.length, downloads: items };
 });
 
-register('goto', async (ctx, args) => {
+register('goto', async (ctx, args, opts) => {
   const url = String(args[0] ?? '');
   if (!url) throw new Error('Usage: goto <url>');
   if (ctx.bridgeMode) {
     clearSnapshotRefs(ctx);
-    return await bridgeGoto(requireBridge(ctx), url);
+    const result = await bridgeGoto(requireBridge(ctx), url);
+    // --stable turns goto into "navigate AND wait for the SPA to settle",
+    // which is what most callers actually want before their first read.
+    if (opts.stable) {
+      const stability = await waitForStability(ctx, {
+        timeoutMs: opts.timeout !== undefined ? Number(opts.timeout) : undefined,
+        quietMs: opts.quiet !== undefined ? Number(opts.quiet) : undefined,
+        minNodes: opts['min-nodes'] !== undefined ? Number(opts['min-nodes']) : undefined,
+      });
+      return { ...result, stable: stability.stable, stableReason: stability.reason };
+    }
+    return result;
   }
   const page = await activePage(ctx);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
+  if (opts.stable) {
+    const expr = stabilityExpression({
+      quietMs: opts.quiet !== undefined ? Number(opts.quiet) : 500,
+      timeoutMs: opts.timeout !== undefined ? Number(opts.timeout) : 10_000,
+      minNodes: opts['min-nodes'] !== undefined ? Number(opts['min-nodes']) : 0,
+      selector: null,
+    });
+    const stability = await page.evaluate(expr) as StabilityResult;
+    return {
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+      stable: stability.stable,
+      stableReason: stability.reason,
+    };
+  }
   return { url: page.url(), title: await page.title().catch(() => '') };
 });
 
@@ -1061,7 +1330,9 @@ register('eval', async (ctx, args, opts) => {
   let result: unknown;
   if (ctx.bridgeMode) {
     if (!ctx.bridge) throw new Error('bridge not initialized');
-    result = await bridgeEvaluate(ctx.bridge, js);
+    // Pinned to the main frame's live context, with a stale-context self-heal
+    // — the bridge-side counterpart of the CDP path's evalWithNavRetry below.
+    result = await bridgeEval(ctx, js);
   } else {
     const page = await activePage(ctx);
     // Navigation in flight when eval lands will destroy the execution
@@ -1171,16 +1442,29 @@ register('text', async (ctx, _args, opts) => {
   const lengthRaw = opts.length !== undefined ? Number(opts.length) : null;
   const length = lengthRaw !== null && Number.isFinite(lengthRaw) && lengthRaw > 0 ? lengthRaw : null;
   let text: string;
+  let possiblyIncomplete = false;
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
-    if (selector) {
-      text = String(await bridgeEvaluate(bridge, `(() => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) throw new Error('Selector not found: ' + ${JSON.stringify(selector)});
-        return el.innerText;
-      })()`));
-    } else {
-      text = await bridgeText(bridge);
+    if (opts.stable) await waitForStability(ctx, { selector });
+    const read = async (): Promise<string> => {
+      if (selector) {
+        return String(await bridgeEval(ctx, `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) throw new Error('Selector not found: ' + ${JSON.stringify(selector)});
+          return el.innerText;
+        })()`));
+      }
+      return await bridgeText(bridge);
+    };
+    text = await read();
+    // A tiny read while the page is visibly still settling is the classic
+    // "got only the nav shell" failure. One bounded retry after a short
+    // stability wait; if it's still small, return it and SAY SO rather than
+    // failing — a genuinely sparse page must not become an error.
+    if (!opts.stable && opts['no-retry'] !== true && looksSuspiciouslyEmpty(ctx, text.trim().length, 40)) {
+      await waitForStability(ctx, { quietMs: 500, timeoutMs: 1500, selector });
+      text = await read();
+      if (text.trim().length < 40) possiblyIncomplete = true;
     }
   } else {
     const page = await activePage(ctx);
@@ -1197,6 +1481,17 @@ register('text', async (ctx, _args, opts) => {
   if (skip > 0 || length !== null) {
     const end = length !== null ? skip + length : undefined;
     text = text.slice(skip, end);
+  }
+  // Normal path returns a bare string — unchanged shape, byte-identical
+  // output. Only the suspicious case returns the annotated object, and
+  // printResult/output.rs render `{text}` exactly like a bare string, so
+  // stdout is still identical; the warning goes to stderr.
+  if (possiblyIncomplete) {
+    return {
+      text,
+      possiblyIncomplete: true,
+      note: 'read returned very little while the page was still settling — it may be incomplete. Retry with `--stable`, or pass `--no-retry` to silence this.',
+    };
   }
   return text;
 });
@@ -1397,7 +1692,9 @@ register('box', async (ctx, args) => {
 register('snapshot', async (ctx, _args, opts) => {
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
-    const result = await bridgeSnapshot(bridge, {
+    const selector = (opts.selector as string | undefined) ?? null;
+    if (opts.stable) await waitForStability(ctx, { selector });
+    const take = () => bridgeSnapshot(bridge, {
       interactive: Boolean(opts.interactive),
       compact: Boolean(opts.compact),
       depth: opts.depth === undefined ? undefined : Number(opts.depth),
@@ -1405,6 +1702,15 @@ register('snapshot', async (ctx, _args, opts) => {
       cursorInteractive: Boolean(opts.cursorInteractive),
       dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
     });
+    let result = await take();
+    // Same suspicious-empty guard as `text`: almost no refs while the page is
+    // still settling usually means we snapshotted the nav shell.
+    let possiblyIncomplete = false;
+    if (!opts.stable && opts['no-retry'] !== true && looksSuspiciouslyEmpty(ctx, result.count, 3)) {
+      await waitForStability(ctx, { quietMs: 500, timeoutMs: 1500, selector });
+      result = await take();
+      if (result.count < 3) possiblyIncomplete = true;
+    }
     ctx.refs.clear();
     ctx.bridgeRefs = result.refs;
     let annotatedPath: string | null = null;
@@ -1412,7 +1718,15 @@ register('snapshot', async (ctx, _args, opts) => {
       annotatedPath = (opts.output as string) || `/tmp/ghax-annotated-${Date.now()}.png`;
       await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
     }
-    return { text: result.text, count: result.count, ...(annotatedPath ? { annotatedPath } : {}) };
+    return {
+      text: result.text,
+      count: result.count,
+      ...(annotatedPath ? { annotatedPath } : {}),
+      ...(possiblyIncomplete ? {
+        possiblyIncomplete: true,
+        note: 'snapshot found almost nothing while the page was still settling — it may be incomplete. Retry with `--stable`.',
+      } : {}),
+    };
   }
   const page = await activePage(ctx);
   const result = await takeSnapshot(page, {
@@ -2499,6 +2813,26 @@ register('is', async (ctx, args) => {
 });
 
 register('wait', async (ctx, args, opts) => {
+  // `--stable` works on BOTH transports: the observer runs in-page either way,
+  // only the result transport differs. Keeping one implementation avoids
+  // maintaining the subtlest heuristic in the codebase twice.
+  if (opts.stable) {
+    const stabilityOpts = {
+      quietMs: opts.quiet !== undefined ? Number(opts.quiet) : undefined,
+      timeoutMs: opts.timeout !== undefined ? Number(opts.timeout) : undefined,
+      minNodes: opts['min-nodes'] !== undefined ? Number(opts['min-nodes']) : undefined,
+      selector: typeof args[0] === 'string' && !/^\d+$/.test(String(args[0])) ? String(args[0]) : null,
+    };
+    if (ctx.bridgeMode) return await waitForStability(ctx, stabilityOpts);
+    const page = await activePage(ctx);
+    const expr = stabilityExpression({
+      quietMs: stabilityOpts.quietMs ?? 500,
+      timeoutMs: stabilityOpts.timeoutMs ?? 10_000,
+      minNodes: stabilityOpts.minNodes ?? 0,
+      selector: stabilityOpts.selector,
+    });
+    return await page.evaluate(expr) as StabilityResult;
+  }
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
     if (opts.networkidle) {
@@ -3718,6 +4052,9 @@ async function main() {
     refs: new Map(),
     bridgeRefs: new Map(),
     bridgeNetworkRequests: new Map(),
+    bridgeMainFrameId: null,
+    bridgeContexts: new Map(),
+    bridgeLastLoadAt: 0,
     instrumented: new WeakSet<Page>(),
     startedAt: Date.now(),
     stateDir: cfg.stateDir,

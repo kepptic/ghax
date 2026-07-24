@@ -245,6 +245,57 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('wait --stable reports a settled page as stable', async () => {
+  await run(['goto', 'https://example.com']);
+  const r = await run(['wait', '--stable', '--json']);
+  const s = parseJson<{ stable: boolean; reason: string; nodes: number }>(r.stdout);
+  assert(s.stable === true, `settled page should be stable, got ${JSON.stringify(s)}`);
+  assert(s.reason === 'quiet', `reason should be 'quiet', got ${s.reason}`);
+  assert(s.nodes > 0, 'should report a node count');
+});
+
+c('wait --stable reports an endlessly-mutating page as NOT stable (no hang)', async () => {
+  // The whole point of the deadline: a ticker/live-chat page must get a
+  // truthful "not stable, proceed anyway", never an infinite wait.
+  await run(['eval', 'window.__ghaxChurn = setInterval(() => document.body.appendChild(document.createElement("div")), 30); 1']);
+  try {
+    const started = Date.now();
+    const r = await run(['wait', '--stable', '--timeout', '1200', '--json']);
+    const elapsed = Date.now() - started;
+    const s = parseJson<{ stable: boolean; reason: string }>(r.stdout);
+    assert(s.stable === false, `churning page should not be stable: ${JSON.stringify(s)}`);
+    assert(s.reason === 'timeout', `reason should be 'timeout', got ${s.reason}`);
+    assert(elapsed < 12_000, `should honour the deadline, took ${elapsed}ms`);
+  } finally {
+    await run(['eval', 'clearInterval(window.__ghaxChurn); 1']);
+  }
+});
+
+c('wait --stable honours --min-nodes', async () => {
+  const r = await run(['wait', '--stable', '--timeout', '1200', '--min-nodes', '999999', '--json']);
+  const s = parseJson<{ stable: boolean; reason: string }>(r.stdout);
+  assert(s.stable === false, 'an unreachable --min-nodes must not report stable');
+});
+
+c('wait --stable treats aria-busy as not-ready', async () => {
+  await run(['eval', 'document.body.setAttribute("aria-busy", "true"); 1']);
+  try {
+    const r = await run(['wait', '--stable', '--timeout', '1000', '--json']);
+    const s = parseJson<{ stable: boolean; busy: number }>(r.stdout);
+    assert(s.stable === false, 'aria-busy=true must block stability');
+    assert(s.busy >= 1, `should report the busy count, got ${s.busy}`);
+  } finally {
+    await run(['eval', 'document.body.removeAttribute("aria-busy"); 1']);
+  }
+});
+
+c('goto --stable navigates and reports stability', async () => {
+  const r = await run(['goto', 'https://example.com', '--stable', '--json']);
+  const g = parseJson<{ url: string; stable: boolean }>(r.stdout);
+  assert(g.url.includes('example.com'), `unexpected url ${g.url}`);
+  assert(g.stable === true, 'example.com should settle');
+});
+
 c('tabs --filter matches by URL regex', async () => {
   // goto example.com first so we know a matching tab exists in the set.
   await run(['goto', 'https://example.com']);

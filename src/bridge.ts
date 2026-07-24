@@ -847,14 +847,39 @@ export function unwrapEvalResult(result: unknown): unknown {
   return r?.result?.value;
 }
 
-/** `Runtime.evaluate` with the same flags `eval`/`text` need. */
-export async function bridgeEvaluate(bridge: Bridge, expression: string): Promise<unknown> {
-  const result = await bridge.send('Runtime.evaluate', {
+/**
+ * `Runtime.evaluate` with the same flags `eval`/`text` need.
+ *
+ * `uniqueContextId` pins the evaluation to a specific live document. Without
+ * it, a read issued around a navigation can execute against the document
+ * Chromium is about to discard — one source of the intermittent
+ * "only got the nav shell" reads. Callers pass the main frame's default
+ * context (tracked in daemon.ts); omitting it keeps the old unpinned
+ * behaviour, which is the correct fallback when bookkeeping hasn't caught up.
+ *
+ * Note `uniqueContextId` and `contextId` are mutually exclusive in CDP, and
+ * the unique form is preferred because Chromium reuses numeric ids across
+ * navigations.
+ */
+export async function bridgeEvaluate(
+  bridge: Bridge,
+  expression: string,
+  opts: { uniqueContextId?: string | null; timeoutMs?: number } = {},
+): Promise<unknown> {
+  const params: Record<string, unknown> = {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  });
+  };
+  if (opts.uniqueContextId) params.uniqueContextId = opts.uniqueContextId;
+  const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs);
   return unwrapEvalResult(result);
+}
+
+/** True when CDP rejected an evaluate because the pinned context is gone. */
+export function isStaleContextError(err: unknown): boolean {
+  const msg = (err as { message?: string } | null)?.message ?? String(err);
+  return /cannot find context|context with specified id|execution context was destroyed|no execution context/i.test(msg);
 }
 
 /**

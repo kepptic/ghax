@@ -50,6 +50,9 @@ Snapshot & interact:
   wait <selector>                 # wait until selector appears (most common)
   wait <ms>                       # fixed delay in milliseconds
   wait --networkidle | --load     # wait for a navigation event
+  wait --stable [--quiet <ms>] [--timeout <ms>] [--min-nodes <n>] [<selector>]
+                                  #   wait for the DOM to stop changing (SPA hydration).
+                                  #   Also available as --stable on goto/text/snapshot.
   viewport <WxH>
   responsive [prefix] [--fullPage]
   diff <url1> <url2>
