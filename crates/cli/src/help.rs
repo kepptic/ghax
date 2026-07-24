@@ -20,11 +20,13 @@ Connection:
   restart
 
 Tab:
-  tabs
+  tabs [--browser <id|edge|chrome|label>]
+                                  # bridge: --browser lists another connected
+                                  #   browser's tabs without taking it over
   tab <id> [--quiet]              # --quiet = don't bringToFront
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
-  goto <url>
+  goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js>                       # auto-retries once past a nav-in-flight
                                   #   awaits Promises/async IIFEs automatically
@@ -50,6 +52,9 @@ Snapshot & interact:
   wait <selector>                 # wait until selector appears (most common)
   wait <ms>                       # fixed delay in milliseconds
   wait --networkidle | --load     # wait for a navigation event
+  wait --stable [--quiet <ms>] [--timeout <ms>] [--min-nodes <n>] [<selector>]
+                                  #   wait for the DOM to stop changing (SPA hydration).
+                                  #   Also available as --stable on goto/text/snapshot.
   viewport <WxH>
   responsive [prefix] [--fullPage]
   diff <url1> <url2>

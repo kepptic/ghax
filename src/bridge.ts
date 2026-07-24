@@ -412,13 +412,16 @@ export class Bridge extends EventEmitter {
     }
     if (msg && msg.type === 'pong') return;
 
-    // Everything below is session traffic — only the BOUND peer's socket may
-    // drive it. A parked peer that somehow sent CDP is ignored, not obeyed.
-    if (!peer || peer.instanceId !== this.boundId) return;
+    if (!peer) return;
+    const isBound = peer.instanceId === this.boundId;
 
+    // Control traffic is correlated by id and may come from ANY peer — a
+    // parked instance answers `list-tabs` so `ghax tabs --browser <x>` can
+    // enumerate it without stealing the session.
     if (msg.type === 'controlled') {
       peer.controlledTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
-      this.emit('controlled', peer.controlledTabId);
+      // Only the driver's tab changing is session-relevant (it clears refs).
+      if (isBound) this.emit('controlled', peer.controlledTabId);
       return;
     }
     if (msg.type === 'control-ack') {
@@ -436,6 +439,10 @@ export class Bridge extends EventEmitter {
       }
       return;
     }
+
+    // CDP replies and events are session traffic — only the BOUND peer drives.
+    // A parked peer that somehow sent CDP is ignored, not obeyed.
+    if (!isBound) return;
     if (msg.type === 'event') {
       this.emit('event', { method: msg.method, params: msg.params ?? {} } as BridgeEvent);
       return;
@@ -773,6 +780,43 @@ export class Bridge extends EventEmitter {
         ),
       );
     }
+    return this.dispatchControl(ws, target, timeoutMs);
+  }
+
+  /**
+   * Send a control message to a SPECIFIC instance, bound or parked.
+   *
+   * Only safe for control actions that don't require a debugger attachment —
+   * `list-tabs` is the motivating case (`ghax tabs --browser chrome`), since
+   * `chrome.tabs.query` needs no attachment. Do NOT route attach-requiring
+   * actions here: a parked peer deliberately holds no attachment.
+   */
+  sendControlToInstance(
+    selector: string,
+    target: ControlTarget,
+    timeoutMs = CONTROL_TIMEOUT_MS,
+  ): Promise<ControlAck> {
+    const peer = this.findPeer(selector);
+    if (!peer) {
+      const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
+      return Promise.reject(new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`));
+    }
+    if (peer.ws?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`bridge: instance ${this.describePeer(peer)} is not connected`));
+    }
+    return this.dispatchControl(peer.ws, target, timeoutMs);
+  }
+
+  private findPeer(selector: string): Peer | null {
+    const want = selector.trim().toLowerCase();
+    return [...this.peers.values()].find(
+      (p) => p.instanceId.toLowerCase().startsWith(want)
+        || p.browser.toLowerCase() === want
+        || p.label.toLowerCase() === want,
+    ) ?? null;
+  }
+
+  private dispatchControl(ws: WebSocket, target: ControlTarget, timeoutMs: number): Promise<ControlAck> {
     const id = this.controlNextId++;
     return new Promise<ControlAck>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -847,14 +891,39 @@ export function unwrapEvalResult(result: unknown): unknown {
   return r?.result?.value;
 }
 
-/** `Runtime.evaluate` with the same flags `eval`/`text` need. */
-export async function bridgeEvaluate(bridge: Bridge, expression: string): Promise<unknown> {
-  const result = await bridge.send('Runtime.evaluate', {
+/**
+ * `Runtime.evaluate` with the same flags `eval`/`text` need.
+ *
+ * `uniqueContextId` pins the evaluation to a specific live document. Without
+ * it, a read issued around a navigation can execute against the document
+ * Chromium is about to discard — one source of the intermittent
+ * "only got the nav shell" reads. Callers pass the main frame's default
+ * context (tracked in daemon.ts); omitting it keeps the old unpinned
+ * behaviour, which is the correct fallback when bookkeeping hasn't caught up.
+ *
+ * Note `uniqueContextId` and `contextId` are mutually exclusive in CDP, and
+ * the unique form is preferred because Chromium reuses numeric ids across
+ * navigations.
+ */
+export async function bridgeEvaluate(
+  bridge: Bridge,
+  expression: string,
+  opts: { uniqueContextId?: string | null; timeoutMs?: number } = {},
+): Promise<unknown> {
+  const params: Record<string, unknown> = {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  });
+  };
+  if (opts.uniqueContextId) params.uniqueContextId = opts.uniqueContextId;
+  const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs);
   return unwrapEvalResult(result);
+}
+
+/** True when CDP rejected an evaluate because the pinned context is gone. */
+export function isStaleContextError(err: unknown): boolean {
+  const msg = (err as { message?: string } | null)?.message ?? String(err);
+  return /cannot find context|context with specified id|execution context was destroyed|no execution context/i.test(msg);
 }
 
 /**

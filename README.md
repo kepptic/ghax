@@ -183,6 +183,19 @@ ghax bridge control --stop                  # release the tab (debugging banner 
 
 Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); reload the unpacked extension after updating ghax; the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act.
 
+**Several browsers, or several profiles.** Every install of the extension dials the same port, so loading it in Edge *and* Chrome (or in two profiles) means several service workers reaching one daemon. Exactly one is **bound** and drives; the rest are **parked** — socket open, but no debugger attachment and no CDP. Parked peers stay quiet by design: closing their socket would restart their reconnect loop, which is what used to make two installs evict each other indefinitely.
+
+```bash
+ghax bridge instances                    # who's connected, who's driving
+ghax bridge use chrome                   # rebind (by id, browser, or label)
+ghax tabs --browser chrome               # peek at a parked browser's tabs
+ghax attach --extension --browser edge   # only Edge may bind; others park
+```
+
+If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
+
+**Resilience.** If the service worker is evicted mid-session, the daemon holds the session open for a grace window instead of failing: commands issued during the gap queue and run on reconnect, each still honouring its own deadline. Read-only commands interrupted in flight are replayed; anything that could have mutated the page reports `BRIDGE_OUTCOME_UNKNOWN` — "the action MAY have landed, verify with `ghax snapshot`" — rather than risking a double-submit.
+
 ---
 
 ## Features
@@ -195,6 +208,7 @@ Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/ty
 - Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors, and Monaco-aware — routes into `monaco.editor.getEditors()`/`setValue()` when the target lives inside a `.monaco-editor` (Datto RMM, Splunk, Grafana, Postman, GitLab Web IDE).
 - `ghax select <@ref|selector> <value>` for dropdowns/comboboxes. Cascades native `<select>` → AntD `<Select>` (React fiber traversal to the controlled `onChange`, bypassing AntD's pointer-event quirks) → a real click-and-pick for everything else (react-select, MUI, Headless UI, `role=combobox`), including options rendered into a portal under `<body>`. Also takes `--index <n>` and `--by-value <val>`.
 - Real user gestures via CDP `Input.dispatch*`. Needed for APIs like `chrome.sidePanel.open()` that refuse synthetic clicks.
+- `ghax wait --stable` waits for the DOM to stop changing, so reads don't race SPA hydration and come back with only the nav shell. One in-page `MutationObserver` (not a poll loop); settles on childList/characterData quiet plus no `[aria-busy]` and two rAFs, while deliberately ignoring general attribute churn so a spinning CSS loader doesn't block forever. Also available as `--stable` on `goto`, `text`, and `snapshot`. On an endlessly-mutating page it returns a truthful `{stable:false, reason:"timeout"}` with node/text/busy diagnostics rather than hanging. `--min-nodes <n>` adds a content floor.
 
 ### MV3 extensions
 
