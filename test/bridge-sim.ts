@@ -59,6 +59,8 @@ class FakeExt {
   helloSends = 0;
   /** CDP methods received, in order — proves replay happened (or didn't). */
   received: string[] = [];
+  /** Control actions received, in order. */
+  controls: string[] = [];
   /** Methods to never answer, to simulate a command in flight at drop time. */
   swallow = new Set<string>();
   private pingTimer: NodeJS.Timeout | null = null;
@@ -138,6 +140,14 @@ class FakeExt {
     }
     if (msg.type === 'pong' || msg.type === 'ping') return;
     if (msg.type === 'control') {
+      this.controls.push(String(msg.action));
+      if (msg.action === 'list-tabs') {
+        this.send({
+          type: 'control-ack', id: msg.id, ok: true, tabId: 42,
+          result: [{ id: 42, title: `${this.instanceId} tab`, url: 'https://example.com', active: true }],
+        });
+        return;
+      }
       // Answer control immediately so the daemon's resume sequence completes.
       this.send({ type: 'control-ack', id: msg.id, ok: true, tabId: 42 });
       return;
@@ -428,6 +438,47 @@ async function main(): Promise<void> {
       await until(() => again.role === 'bound', 'same identity rebinds');
       assert(bridge.instances().length === 1, 'a resume must not create a second instance');
       assert(bridge.state === 'BOUND', `state ${bridge.state}`);
+    });
+  });
+
+  await test('a parked instance can be queried without stealing the session', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-a', 'edge');
+      const b = new FakeExt(port, 'inst-b', 'chrome');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+
+      // `ghax tabs --browser chrome` routes here. chrome.tabs.query needs no
+      // debugger attachment, so a parked peer can answer it.
+      const ack = await bridge.sendControlToInstance('chrome', { action: 'list-tabs' });
+      const tabs = ack.result as Array<{ title: string }>;
+      assert(Array.isArray(tabs) && tabs.length === 1, `expected 1 tab, got ${JSON.stringify(tabs)}`);
+      assert(tabs[0].title.includes('inst-b'), `should be the PARKED peer's tabs, got ${tabs[0].title}`);
+      assert(b.controls.includes('list-tabs'), 'parked peer should have received list-tabs');
+      // Crucially, querying must not change who is driving.
+      assert(a.role === 'bound' && b.role === 'parked', 'roles must be unchanged after a query');
+      assert(bridge.controlledTabId === 42, 'bound peer still owns the session');
+    });
+  });
+
+  await test('an unknown --browser selector errors with the known instances', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-a', 'edge');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      let caught: any;
+      try {
+        await bridge.sendControlToInstance('firefox', { action: 'list-tabs' });
+      } catch (e) {
+        caught = e;
+      }
+      assert(caught, 'should reject an unknown selector');
+      assert(
+        String(caught.message).includes('edge'),
+        `error should list known instances: ${caught?.message}`,
+      );
     });
   });
 

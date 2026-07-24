@@ -20,11 +20,13 @@ Connection:
   restart
 
 Tab:
-  tabs
+  tabs [--browser <id|edge|chrome|label>]
+                                  # bridge: --browser lists another connected
+                                  #   browser's tabs without taking it over
   tab <id> [--quiet]              # --quiet = don't bringToFront
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
-  goto <url>
+  goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js>                       # auto-retries once past a nav-in-flight
                                   #   awaits Promises/async IIFEs automatically

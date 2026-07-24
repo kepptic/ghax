@@ -894,8 +894,11 @@ function clearSnapshotRefs(ctx: Ctx): void {
   ctx.bridgeRefs.clear();
 }
 
-async function listBridgeTabs(ctx: Ctx): Promise<BridgeTab[]> {
-  const ack = await requireBridge(ctx).sendControl({ action: 'list-tabs' });
+async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null): Promise<BridgeTab[]> {
+  const bridge = requireBridge(ctx);
+  const ack = instanceSelector
+    ? await bridge.sendControlToInstance(instanceSelector, { action: 'list-tabs' })
+    : await bridge.sendControl({ action: 'list-tabs' });
   if (!Array.isArray(ack.result)) throw new Error('tabs: extension returned an invalid tab list');
   return (ack.result as unknown[]).flatMap((value) => {
     const tab = value as Partial<BridgeTab>;
@@ -1057,8 +1060,12 @@ register('tabs', async (ctx, _args, opts) => {
   const fields: Set<string> | null = fieldsArg
     ? new Set(fieldsArg.split(',').map((s) => s.trim()).filter(Boolean))
     : null;
+  // `--browser <id|brand|label>` enumerates a DIFFERENT instance's tabs
+  // (typically a parked one) without stealing the session from the bound
+  // instance. Safe because chrome.tabs.query needs no debugger attachment.
+  const browserSel = (opts.browser as string | undefined) ?? null;
   const all = ctx.bridgeMode
-    ? (await listBridgeTabs(ctx)).map((t) => ({ id: String(t.id), title: t.title, url: t.url, active: t.active }))
+    ? (await listBridgeTabs(ctx, browserSel)).map((t) => ({ id: String(t.id), title: t.title, url: t.url, active: t.active }))
     : await Promise.all(
         (await allPages(ctx)).map(async (p) => {
           const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);

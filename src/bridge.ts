@@ -412,13 +412,16 @@ export class Bridge extends EventEmitter {
     }
     if (msg && msg.type === 'pong') return;
 
-    // Everything below is session traffic — only the BOUND peer's socket may
-    // drive it. A parked peer that somehow sent CDP is ignored, not obeyed.
-    if (!peer || peer.instanceId !== this.boundId) return;
+    if (!peer) return;
+    const isBound = peer.instanceId === this.boundId;
 
+    // Control traffic is correlated by id and may come from ANY peer — a
+    // parked instance answers `list-tabs` so `ghax tabs --browser <x>` can
+    // enumerate it without stealing the session.
     if (msg.type === 'controlled') {
       peer.controlledTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
-      this.emit('controlled', peer.controlledTabId);
+      // Only the driver's tab changing is session-relevant (it clears refs).
+      if (isBound) this.emit('controlled', peer.controlledTabId);
       return;
     }
     if (msg.type === 'control-ack') {
@@ -436,6 +439,10 @@ export class Bridge extends EventEmitter {
       }
       return;
     }
+
+    // CDP replies and events are session traffic — only the BOUND peer drives.
+    // A parked peer that somehow sent CDP is ignored, not obeyed.
+    if (!isBound) return;
     if (msg.type === 'event') {
       this.emit('event', { method: msg.method, params: msg.params ?? {} } as BridgeEvent);
       return;
@@ -773,6 +780,43 @@ export class Bridge extends EventEmitter {
         ),
       );
     }
+    return this.dispatchControl(ws, target, timeoutMs);
+  }
+
+  /**
+   * Send a control message to a SPECIFIC instance, bound or parked.
+   *
+   * Only safe for control actions that don't require a debugger attachment —
+   * `list-tabs` is the motivating case (`ghax tabs --browser chrome`), since
+   * `chrome.tabs.query` needs no attachment. Do NOT route attach-requiring
+   * actions here: a parked peer deliberately holds no attachment.
+   */
+  sendControlToInstance(
+    selector: string,
+    target: ControlTarget,
+    timeoutMs = CONTROL_TIMEOUT_MS,
+  ): Promise<ControlAck> {
+    const peer = this.findPeer(selector);
+    if (!peer) {
+      const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
+      return Promise.reject(new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`));
+    }
+    if (peer.ws?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`bridge: instance ${this.describePeer(peer)} is not connected`));
+    }
+    return this.dispatchControl(peer.ws, target, timeoutMs);
+  }
+
+  private findPeer(selector: string): Peer | null {
+    const want = selector.trim().toLowerCase();
+    return [...this.peers.values()].find(
+      (p) => p.instanceId.toLowerCase().startsWith(want)
+        || p.browser.toLowerCase() === want
+        || p.label.toLowerCase() === want,
+    ) ?? null;
+  }
+
+  private dispatchControl(ws: WebSocket, target: ControlTarget, timeoutMs: number): Promise<ControlAck> {
     const id = this.controlNextId++;
     return new Promise<ControlAck>((resolve, reject) => {
       const timer = setTimeout(() => {

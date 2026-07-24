@@ -59,6 +59,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     sockets (via `role`), so a switch never disconnects either side.
   - `ghax attach --extension --browser edge|chrome|<label>` restricts which
     instance may bind; non-matching instances park even if they connect first.
+  - `ghax tabs --browser <id|brand|label>` enumerates a *parked* browser's tabs
+    without taking the session from the bound one (`chrome.tabs.query` needs no
+    debugger attachment, so a parked peer can answer it).
+  - The popup shows the role, explains *why* a browser is parked and how to
+    switch, and adds a label field (names the instance in `bridge instances` /
+    `bridge use`) plus a port field (the second-daemon escape hatch).
   - A livelock detector warns when bind ownership changes ≥3 times in 5
     minutes — the signature of a pre-identity extension still installed in
     another profile.
