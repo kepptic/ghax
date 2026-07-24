@@ -6,7 +6,49 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ghax version [--full]` — identity and provenance. Plain `version` prints the
+  CLI version (with the build's git sha); `--full` additionally reports the
+  daemon bundle that resolves right now (path, resolution tier, sha256 — without
+  triggering the self-heal download) and, when a daemon is live, the bundle
+  sha256 the running daemon is actually executing plus the connected bridge
+  extension. A mismatch between the resolved and running bundle is flagged
+  loudly — that mismatch is exactly what a `cargo clean` or a stale symlink
+  produces. First slice of the bridge-reliability plan
+  (docs/design/plan/08-bridge-reliability.md, Phase 0).
+
+### Changed
+- `scripts/install-link.sh` now **copies** the binary and daemon bundle into
+  `~/.local` by default instead of symlinking into `target/release` and `dist/`.
+  A `cargo clean` or disk cleanup can no longer decapitate the installed CLI.
+  Pass `--link` for the old in-place symlink behaviour (handy during active
+  development). Release installs (`install-release.sh`) already copied.
+- `ghax attach` now logs which daemon bundle path it resolved and via which tier
+  (`GHAX_DAEMON_BUNDLE` / binary-adjacent / XDG-install / repo-dist) — the
+  silent preference order was the stale-binary trap.
+
 ### Fixed
+- The daemon-runtime bootstrap (`scripts/bootstrap-daemon-runtime.sh`) now
+  installs `ws` alongside `playwright` and `source-map`. The extension bridge
+  added `ws` as a runtime external but the bootstrap was never updated, so
+  installed (non-repo) users hit `Cannot find package 'ws'` the first time they
+  ran `ghax attach --extension`. The presence check also repairs installs
+  bootstrapped before the bridge landed.
+- Extension bridge: an evicted socket sitting in `CLOSING` no longer lets the
+  service worker open a **second** socket while the daemon still holds the first
+  — the daemon logged that as "connection replaced" and it could self-sustain
+  churn on every `goto`/`screenshot` with no rival extension present. `connect()`
+  now treats `CLOSING` as occupied, and a socket-generation guard ensures only
+  the current socket's listeners can clear state or schedule a reconnect. A
+  second keepalive alarm phase-offset by 15s halves the worst-case wake gap
+  after a daemon restart (~30s → ~15s). Reload the ghax bridge extension in
+  `edge://extensions` to pick these up (bumped to v0.1.1).
+- Bridge-mode RPC errors now carry a machine-readable `code` and a `hint` with
+  the recovery verb, printed on its own line by the CLI: an unattachable
+  controlled tab (a `chrome://`/`edge://`/`chrome-extension://` page) names the
+  tab and points at `ghax bridge control --active` / `ghax tab <id>`; "no
+  extension connected" points at the popup / unpacked-load step.
+
 - Extension-bridge `goto` now escapes certificate interstitials and other
   unattachable browser pages with `chrome.tabs.update`, waits for the new page,
   and re-attaches `chrome.debugger` so later commands retain control.
@@ -63,6 +105,19 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `chrome-error://` transition detaches `chrome.debugger`, navigation
     falls back to `chrome.tabs.update`. The extension retains the selected
     tab and re-attaches automatically when it becomes attachable again.
+
+### Docs
+- `docs/design/plan/08-bridge-reliability.md` — bridge reliability plan
+  from a live-fire field report. Reframes `"connection replaced"` as a
+  rivalry/race bug rather than service-worker eviction (the two strings
+  come from different code paths, and WebSocket traffic has kept a
+  connected worker alive since Chrome 116), and specifies handshake v2
+  with minted per-profile identity, a bound/parked instance registry, a
+  BOUND→DEGRADED→EXPIRED resume state machine with a command queue, a
+  default-`never` retry classification, execution-context pinning, a
+  DOM-stability primitive, and `test/bridge-sim.ts` — a browser-free
+  simulated-extension suite for a transport that currently has zero test
+  coverage. Tracked in `planning/tasks.md` as TASK-001…006.
 
 ### Fixed
 - `ghax attach`'s no-CDP-found hint no longer tells you to relaunch your

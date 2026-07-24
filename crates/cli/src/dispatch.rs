@@ -20,6 +20,9 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
         Err(err) => {
             if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
                 eprintln!("ghax: {}", rpc_err.message);
+                if let Some(hint) = &rpc_err.hint {
+                    eprintln!("hint: {hint}");
+                }
                 return rpc_err.exit_code.unwrap_or(EXIT_CDP_ERROR);
             }
             let msg = err.to_string();
@@ -56,6 +59,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "ship" => return ship::cmd_ship(&args::parse(rest)),
         "update" => return update::cmd_update(&args::parse(rest)),
         "shell" => return crate::shell::cmd_shell(),
+        "version" => return crate::version::cmd_version(&args::parse(rest), cfg),
         _ => {}
     }
 

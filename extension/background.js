@@ -34,13 +34,23 @@ const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
 const PING_INTERVAL_MS = 15000;
 const NAVIGATION_TIMEOUT_MS = 8000;
-const KEEPALIVE_ALARM = 'ghax-bridge-keepalive';
-// Chrome clamps repeating alarms to a 30s (0.5 min) floor. 0.5 is the
-// smallest value that fires without a warning and reliably resurrects an
-// evicted worker — worst-case reconnect is one alarm period (~30s).
+// Chrome clamps repeating alarms to a 30s (0.5 min) floor, so a single alarm
+// leaves a worst-case ~30s wake gap after the daemon restarts and the socket
+// closes. TWO alarms phase-offset by 15s halve that to ~15s — the cheap half
+// of the keepalive story (no offscreen document, per plan §3.7). Both fire the
+// same handler; whichever lands first reconnects, the other no-ops.
+const KEEPALIVE_ALARM_A = 'ghax-bridge-keepalive';   // unchanged name: survives upgrade
+const KEEPALIVE_ALARM_B = 'ghax-bridge-keepalive-b';
+const KEEPALIVE_ALARMS = new Set([KEEPALIVE_ALARM_A, KEEPALIVE_ALARM_B]);
 const KEEPALIVE_PERIOD_MIN = 0.5;
 
 let ws = null;
+// Socket generation — bumped on every connect(). Every socket's event
+// listeners capture their generation and act ONLY if they're still current.
+// This is what stops a superseded socket's late `close` from scheduling a
+// reconnect (or a stale `open` from re-pinging) after a newer socket has
+// already taken over. See docs/design/plan/08-bridge-reliability.md §1b.
+let socketGen = 0;
 let reconnectDelay = RECONNECT_BASE_MS;
 let reconnectTimer = null;
 let pingTimer = null;
@@ -111,8 +121,17 @@ function stopPing() {
 }
 
 async function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  // Treat CLOSING as occupied, not free. A socket the daemon just evicted sits
+  // in CLOSING until its close event fires; the OLD guard (OPEN/CONNECTING
+  // only) let connect() open a SECOND socket in that window while the daemon
+  // still held the first — which the daemon logs as "connection replaced" and
+  // which self-sustains churn with no rival present. Wait for `close`; its
+  // handler schedules the reconnect. See plan §1b.
+  if (ws && (ws.readyState === WebSocket.OPEN
+          || ws.readyState === WebSocket.CONNECTING
+          || ws.readyState === WebSocket.CLOSING)) return;
   const port = await getPort();
+  const gen = ++socketGen;
   let socket;
   try {
     socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -123,6 +142,7 @@ async function connect() {
   ws = socket;
 
   socket.addEventListener('open', async () => {
+    if (gen !== socketGen) return; // superseded before we even opened
     reconnectDelay = RECONNECT_BASE_MS;
     // A respawned worker persisted its controlled tab — re-attach proactively
     // so control survives eviction even if the daemon doesn't re-assert.
@@ -153,10 +173,15 @@ async function connect() {
   });
 
   socket.addEventListener('message', (ev) => {
+    if (gen !== socketGen) return; // a newer socket owns the bridge now
     void handleMessage(String(ev.data));
   });
 
   socket.addEventListener('close', () => {
+    // Only the current generation may clear `ws`, stop pinging, or schedule a
+    // reconnect. A superseded socket closing is a no-op — otherwise its late
+    // close would race a healthy newer socket back into the reconnect loop.
+    if (gen !== socketGen) return;
     if (ws === socket) ws = null;
     stopPing();
     setStatus();
@@ -483,15 +508,24 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Keepalive alarm — resurrects an evicted SW and reconnects if the socket
 // is gone. Registered at top level so it re-arms on every SW spawn.
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== KEEPALIVE_ALARM) return;
-  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+  if (!KEEPALIVE_ALARMS.has(alarm.name)) return;
+  // Reconnect only when the socket is truly gone. A CLOSING socket is handled
+  // by its own close listener (which schedules the reconnect); poking connect()
+  // here would be a no-op anyway given the CLOSING guard, but not calling it
+  // keeps the intent — and the ownership — in one place.
+  if (!ws || ws.readyState === WebSocket.CLOSED) {
     void connect();
   }
 });
 
 function ensureAlarm() {
   // create() with the same name replaces any existing schedule — idempotent.
-  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
+  // Alarm B is phase-offset by ~15s so the two together fire every ~15s.
+  chrome.alarms.create(KEEPALIVE_ALARM_A, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
+  chrome.alarms.create(KEEPALIVE_ALARM_B, {
+    delayInMinutes: 0.25,
+    periodInMinutes: KEEPALIVE_PERIOD_MIN,
+  });
 }
 
 // Messages from popup.js.

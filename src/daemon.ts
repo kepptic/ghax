@@ -62,6 +62,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import type { AddressInfo } from 'net';
 
 const IDLE_MS = 30 * 60 * 1000;
@@ -165,7 +166,19 @@ function register(name: string, fn: Handler) {
     if (ctx.bridgeMode && !BRIDGE_SUPPORTED_COMMANDS.has(name)) {
       throw new Error(`${name}: not supported over the extension bridge yet`);
     }
-    return fn(ctx, args, opts);
+    if (!ctx.bridgeMode) return fn(ctx, args, opts);
+    // In bridge mode, decorate recognized failures (unattachable tab, no
+    // extension) with a code + recovery hint so the operator gets the next
+    // step, not a raw CDP string. Unrecognized errors pass through unchanged.
+    try {
+      return await fn(ctx, args, opts);
+    } catch (err) {
+      const wrapped = bridgeError(err, {
+        tabId: ctx.bridge?.controlledTabId ?? null,
+      });
+      if (wrapped.code === 'BRIDGE_ERROR') throw err; // nothing to add
+      throw wrapped;
+    }
   });
 }
 
@@ -2562,6 +2575,48 @@ class DaemonError extends Error {
   }
 }
 
+/**
+ * A bridge-mode error that carries a machine-readable `code` and a
+ * human-facing `hint` (the recovery verb / next step), surfaced by the CLI
+ * on its own line. Phase 0 of the bridge-reliability plan
+ * (docs/design/plan/08-bridge-reliability.md §2.7) — the codes that need the
+ * instance state machine land in Phase 1; these are the ones expressible
+ * today (no extension connected, unattachable controlled tab).
+ */
+class BridgeError extends Error {
+  constructor(message: string, public code: string, public hint?: string) {
+    super(message);
+  }
+}
+
+/**
+ * Wrap a raw chrome.debugger / bridge failure with a code + recovery hint.
+ * Recognizes the two failure shapes that reach an operator today: an
+ * unattachable controlled tab (chrome://, edge://, a chrome-extension:// page,
+ * or a cert interstitial) and "no extension connected".
+ */
+function bridgeError(raw: unknown, ctx?: { tabId?: number | null; url?: string; title?: string }): BridgeError {
+  const message = (raw as { message?: string } | null)?.message ?? String(raw);
+  if (/cannot (?:access|attach to)|not attachable|chrome-extension:\/\/|chrome:\/\/|edge:\/\//i.test(message)) {
+    const where = ctx?.tabId != null
+      ? `controlled tab ${ctx.tabId}${ctx.title ? ` (${JSON.stringify(ctx.title.slice(0, 40))})` : ''}`
+      : 'the controlled tab';
+    return new BridgeError(
+      message,
+      'BRIDGE_TAB_UNATTACHABLE',
+      `${where} is not attachable (browser-internal page). Run \`ghax bridge control --active\` or \`ghax tab <id>\` to point the bridge at a normal tab.`,
+    );
+  }
+  if (/no extension connected|extension is not initialized|bridge is not initialized/i.test(message)) {
+    return new BridgeError(
+      message,
+      'BRIDGE_NOT_CONNECTED',
+      'Load extension/ unpacked in edge://extensions, then click "Control this tab" in the ghax bridge popup (or run `ghax bridge control --active`).',
+    );
+  }
+  return new BridgeError(message, 'BRIDGE_ERROR');
+}
+
 // evalInTarget (below) throws DaemonError on exceptionDetails so silent
 // swallowing can't mask thrown expressions — ext.storage previously
 // returned {ok:true} on a thrown expr. Callers that want the old
@@ -3686,6 +3741,29 @@ async function main() {
       });
       return;
     }
+    // `ghax version --full` reads this to answer "which daemon bundle is the
+    // RUNNING daemon actually executing" — the exact question the stale-binary
+    // trap turns into a two-hour debugging session. The daemon hashes its own
+    // entry file (process.argv[1]); the CLI compares it against the bundle that
+    // resolves now and flags a mismatch.
+    if (url === '/version' && req.method === 'GET') {
+      const bundlePath = process.argv[1] ?? '';
+      let bundleSha256 = '';
+      try {
+        bundleSha256 = crypto.createHash('sha256').update(fs.readFileSync(bundlePath)).digest('hex');
+      } catch {
+        // Bundle unreadable from here (unusual) — report empty, don't crash.
+      }
+      json(res, 200, {
+        ok: true,
+        bundlePath,
+        bundleSha256,
+        bridgeMode,
+        controlledTabId: ctx.bridge?.controlledTabId ?? null,
+        extensionInfo: ctx.bridge?.extensionInfo ?? null,
+      });
+      return;
+    }
     if (url === '/shutdown' && req.method === 'POST') {
       json(res, 200, { ok: true });
       setTimeout(() => shutdown('shutdown-request'), 20);
@@ -3787,7 +3865,15 @@ async function main() {
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
         const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
-        json(res, 500, { ok: false, error: err.message || String(err), ...(exitCode !== undefined ? { exitCode } : {}) });
+        const code = typeof err?.code === 'string' ? err.code : undefined;
+        const hint = typeof err?.hint === 'string' ? err.hint : undefined;
+        json(res, 500, {
+          ok: false,
+          error: err.message || String(err),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          ...(code !== undefined ? { code } : {}),
+          ...(hint !== undefined ? { hint } : {}),
+        });
       }
       return;
     }

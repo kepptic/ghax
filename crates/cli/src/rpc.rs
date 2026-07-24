@@ -18,6 +18,9 @@ struct Request<'a> {
 pub struct RpcError {
     pub message: String,
     pub exit_code: Option<i32>,
+    /// Recovery guidance from the daemon (bridge-mode typed errors). Printed on
+    /// its own line by the dispatch error handler. See docs/design/plan/08 §2.7.
+    pub hint: Option<String>,
 }
 
 impl std::fmt::Display for RpcError {
@@ -65,7 +68,8 @@ fn call_once(port: u16, cmd: &str, args: &Value, opts: &Value) -> Result<Value> 
             .map(str::to_string)
             .unwrap_or_else(|| format!("RPC {cmd} failed"));
         let exit_code = envelope.get("exitCode").and_then(|v| v.as_i64()).map(|n| n as i32);
-        return Err(anyhow!(RpcError { message, exit_code }));
+        let hint = envelope.get("hint").and_then(|v| v.as_str()).map(str::to_string);
+        return Err(anyhow!(RpcError { message, exit_code, hint }));
     }
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
 }

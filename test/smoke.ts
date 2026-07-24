@@ -215,6 +215,30 @@ c('status --json has expected shape', async () => {
   );
 });
 
+c('version prints the CLI version', async () => {
+  const r = await run(['version']);
+  assert(/^ghax \d+\.\d+\.\d+/.test(r.stdout.trim()), `unexpected version output: ${r.stdout}`);
+});
+
+c('version --full --json reports resolved + running bundle and mismatch flag', async () => {
+  const r = await run(['version', '--full', '--json']);
+  const v = parseJson<{
+    cli: { version: string; gitSha: string };
+    resolvedBundle: { path: string | null; tier: string; sha256: string };
+    daemon: { bundleSha256?: string; bundlePath?: string } | null;
+    bundleMismatch: boolean;
+  }>(r.stdout);
+  assert(typeof v.cli?.version === 'string', 'version --full missing cli.version');
+  assert(typeof v.resolvedBundle?.tier === 'string', 'version --full missing resolvedBundle.tier');
+  // A daemon is attached in this suite, so it must report its running bundle.
+  assert(v.daemon !== null, 'version --full saw no running daemon while attached');
+  assert(
+    typeof v.daemon?.bundleSha256 === 'string' && v.daemon.bundleSha256.length === 64,
+    `daemon bundleSha256 not a sha256: ${JSON.stringify(v.daemon?.bundleSha256)}`,
+  );
+  assert(typeof v.bundleMismatch === 'boolean', 'version --full missing bundleMismatch');
+});
+
 c('tabs returns a non-empty list', async () => {
   const r = await run(['tabs', '--json']);
   const tabs = parseJson<Array<{ id: string; url: string }>>(r.stdout);

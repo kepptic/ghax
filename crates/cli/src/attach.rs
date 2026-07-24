@@ -497,16 +497,20 @@ pub(crate) fn stable_share_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".local").join("share").join("ghax"))
 }
 
-fn resolve_daemon_bundle() -> Result<PathBuf> {
+/// Non-healing resolution of tiers 1–4. Returns the bundle path AND a short
+/// label of which tier resolved it — used both by `resolve_daemon_bundle`
+/// (which then logs the tier and falls through to self-heal on `None`) and by
+/// `ghax version --full` (which must NOT trigger a download). The inner
+/// `Result` distinguishes a hard error (e.g. a checkout with a missing
+/// `dist/` build) from "not found here, try the next tier" (`Ok(None)`).
+pub(crate) fn locate_daemon_bundle() -> Result<Option<(PathBuf, &'static str)>> {
     // 1. Explicit env override.
     if let Ok(val) = std::env::var("GHAX_DAEMON_BUNDLE") {
         let p = PathBuf::from(&val);
         if p.exists() {
-            return Ok(p);
+            return Ok(Some((p, "GHAX_DAEMON_BUNDLE")));
         }
-        return Err(anyhow::anyhow!(
-            "GHAX_DAEMON_BUNDLE={val} does not exist"
-        ));
+        return Err(anyhow::anyhow!("GHAX_DAEMON_BUNDLE={val} does not exist"));
     }
 
     // 2. Adjacent to the running binary.
@@ -514,7 +518,7 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
         if let Some(dir) = exe.parent() {
             let adjacent = dir.join("ghax-daemon.mjs");
             if adjacent.exists() {
-                return Ok(adjacent);
+                return Ok(Some((adjacent, "binary-adjacent")));
             }
         }
     }
@@ -523,7 +527,7 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
     if let Some(share) = stable_share_dir() {
         let bundle = share.join("ghax-daemon.mjs");
         if bundle.exists() {
-            return Ok(bundle);
+            return Ok(Some((bundle, "XDG-install")));
         }
     }
 
@@ -539,7 +543,7 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
                     if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
                         let bundle = dir.join("dist").join("ghax-daemon.mjs");
                         if bundle.exists() {
-                            return Ok(bundle);
+                            return Ok(Some((bundle, "repo-dist")));
                         }
                         return Err(anyhow::anyhow!(
                             "Found @ghax/cli at {} but dist/ghax-daemon.mjs is missing. Run `bun run build` first.",
@@ -553,6 +557,18 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
                 None => break,
             }
         }
+    }
+
+    Ok(None)
+}
+
+fn resolve_daemon_bundle() -> Result<PathBuf> {
+    if let Some((bundle, tier)) = locate_daemon_bundle()? {
+        // Surface WHICH bundle path resolved (and via which tier) — the silent
+        // preference order is the stale-binary trap. One line to stderr at
+        // spawn time, so `ghax attach` says what it's about to run.
+        eprintln!("ghax: daemon bundle → {} [{tier}]", bundle.display());
+        return Ok(bundle);
     }
 
     // 5. Self-heal — fetch it from GitHub Releases. Opt out with
