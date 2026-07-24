@@ -116,6 +116,22 @@ If `ghax bridge instances` warns that ownership is *flapping*, an
 older build of this extension is still loaded in another profile — reload it
 there (or disable the copies you don't drive).
 
+## Pairing (optional hardening)
+
+The bridge WebSocket listens on `127.0.0.1` only, but by default any local
+process could connect and drive your browser. To require a code:
+
+```bash
+ghax attach --extension --pair          # prints a 6-digit code
+# → "⚷  Pairing required. In the ghax bridge popup, enter this code: 314159"
+```
+
+Open the popup, type the code into the **Pairing code** field, and this
+browser connects. A wrong or missing code is rejected and the extension goes
+*dormant* (a slow retry every few minutes, not a fast reconnect loop) until
+you enter the right one. `--pair <code>` uses a code you choose instead of a
+minted one. Leave `--pair` off and nothing changes.
+
 ## Bridge-capable commands
 
 - Tabs/windows: `status`, `tabs`, `tab`, `find`, `new-window`.

@@ -103,6 +103,9 @@ class FakeExt {
     }
   }
 
+  /** Set to send a pairToken in hello (for the pairing tests). */
+  pairToken: string | null = null;
+
   sendHello(): void {
     this.helloSends++;
     this.send({
@@ -113,6 +116,7 @@ class FakeExt {
       browser: this.browser,
       label: this.label,
       controlledTabId: 42,
+      ...(this.pairToken ? { pairToken: this.pairToken } : {}),
     });
   }
 
@@ -177,12 +181,16 @@ class FakeExt {
 }
 
 let nextPort = 19400;
-async function withBridge(fn: (b: Bridge, port: number, logs: string[]) => Promise<void>): Promise<void> {
+async function withBridge(
+  fn: (b: Bridge, port: number, logs: string[]) => Promise<void>,
+  extraOpts: { pairCode?: string } = {},
+): Promise<void> {
   const port = nextPort++;
   const logs: string[] = [];
   const bridge = new Bridge(port, (m) => logs.push(m), {
     graceMs: GRACE_MS,
     livenessMs: LIVENESS_MS,
+    ...extraOpts,
   });
   try {
     await fn(bridge, port, logs);
@@ -479,6 +487,47 @@ async function main(): Promise<void> {
         String(caught.message).includes('edge'),
         `error should list known instances: ${caught?.message}`,
       );
+    });
+  });
+
+  await test('pairing: a correct code binds, a wrong code is rejected (not bound)', async () => {
+    await withBridge(async (bridge, port) => {
+      const wrong = new FakeExt(port, 'inst-wrong');
+      wrong.pairToken = '000000';
+      await wrong.connect();
+      await until(() => wrong.rejected !== null, 'wrong code to be rejected');
+      assert(!bridge.connected, 'a wrong code must not bind');
+      assert(String(wrong.rejected).includes('pairing'), `reject should mention pairing: ${wrong.rejected}`);
+
+      const right = new FakeExt(port, 'inst-right');
+      right.pairToken = '424242';
+      await right.connect();
+      await until(() => bridge.connected, 'correct code to bind');
+      assert(right.role === 'bound', `correct code should bind, got ${right.role}`);
+    }, { pairCode: '424242' });
+  });
+
+  await test('pairing: a missing code is rejected when pairing is required', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-a'); // no pairToken
+      await ext.connect();
+      await until(() => ext.rejected !== null, 'missing code to be rejected');
+      assert(!bridge.connected, 'no code must not bind when pairing is required');
+    }, { pairCode: '424242' });
+  });
+
+  await test('waitForResume resolves immediately when already bound, rejects when unbound', async () => {
+    await withBridge(async (bridge, port) => {
+      // Unbound: history-nav reconcile relies on this rejecting, not hanging.
+      let rejected = false;
+      await bridge.waitForResume().catch(() => { rejected = true; });
+      assert(rejected, 'waitForResume must reject when nothing is bound');
+
+      const ext = new FakeExt(port, 'inst-a');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      // Bound: resolves without waiting — the reconcile fast-path.
+      await bridge.waitForResume();
     });
   });
 

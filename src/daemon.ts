@@ -1285,35 +1285,70 @@ register('goto', async (ctx, args, opts) => {
 // run). `commit` resolves as soon as the history navigation commits, which
 // happens for both fresh loads and bfcache restores. The explicit timeout is
 // a backstop so no pathological navigation can ever wedge the daemon.
-register('back', async (ctx) => {
-  if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
-    const history = await bridge.send('Page.getNavigationHistory') as {
+interface HistoryNavResult {
+  url: string;
+  outcome?: 'succeeded' | 'unknown' | 'concurrent-navigation';
+  note?: string;
+}
+
+/**
+ * Bridge-mode history navigation (`back`/`forward`) with reconnect
+ * RECONCILIATION rather than blind replay.
+ *
+ * These verbs are unsafe to auto-replay: re-running re-reads `currentIndex`
+ * and can step a second entry (`daemon.ts` — the classic off-by-one). But
+ * "report outcome unknown" is needlessly pessimistic when the browser can
+ * simply be *asked* where it ended up. So we capture the source and target
+ * entry ids up front, and if the connection drops mid-navigation we wait for
+ * resume and compare actual history:
+ *   current == target → the navigation committed → **succeeded**
+ *   current == source → it never committed → **unknown** (caller may retry)
+ *   neither           → something else navigated → **concurrent-navigation**
+ * A fixed target id, never `currentIndex`, so the reconcile itself can't
+ * double-step.
+ */
+async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNavResult> {
+  const bridge = requireBridge(ctx);
+  const history = await bridge.send('Page.getNavigationHistory') as {
+    currentIndex?: number; entries?: Array<{ id: number; url: string }>;
+  };
+  const index = history.currentIndex ?? 0;
+  const sourceId = history.entries?.[index]?.id ?? null;
+  const target = history.entries?.[index + direction];
+  clearSnapshotRefs(ctx);
+  if (!target) {
+    // No entry that way — a no-op, honestly reported.
+    return { url: String(await bridgeEvaluate(bridge, 'location.href').catch(() => '')), outcome: 'succeeded' };
+  }
+  try {
+    await bridge.send('Page.navigateToHistoryEntry', { entryId: target.id });
+    return { url: target.url, outcome: 'succeeded' };
+  } catch (err) {
+    if (!(err instanceof BridgeInterrupted)) throw err;
+    // Dropped mid-navigation. Wait for the session back, then reconcile.
+    await bridge.waitForResume();
+    const after = await bridge.send('Page.getNavigationHistory') as {
       currentIndex?: number; entries?: Array<{ id: number; url: string }>;
     };
-    const index = history.currentIndex ?? 0;
-    const entry = history.entries?.[index - 1];
-    if (entry) await bridge.send('Page.navigateToHistoryEntry', { entryId: entry.id });
-    clearSnapshotRefs(ctx);
-    return { url: entry?.url ?? String(await bridgeEvaluate(bridge, 'location.href')) };
+    const nowId = after.entries?.[after.currentIndex ?? 0]?.id ?? null;
+    const nowUrl = after.entries?.[after.currentIndex ?? 0]?.url ?? '';
+    if (nowId === target.id) return { url: target.url, outcome: 'succeeded' };
+    if (nowId === sourceId) {
+      return { url: nowUrl, outcome: 'unknown', note: 'navigation did not commit before the connection dropped; safe to retry.' };
+    }
+    return { url: nowUrl, outcome: 'concurrent-navigation', note: 'the page navigated elsewhere while the connection was dropped.' };
   }
+}
+
+register('back', async (ctx) => {
+  if (ctx.bridgeMode) return await bridgeHistoryNav(ctx, -1);
   const page = await activePage(ctx);
   await page.goBack({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
 });
 
 register('forward', async (ctx) => {
-  if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
-    const history = await bridge.send('Page.getNavigationHistory') as {
-      currentIndex?: number; entries?: Array<{ id: number; url: string }>;
-    };
-    const index = history.currentIndex ?? 0;
-    const entry = history.entries?.[index + 1];
-    if (entry) await bridge.send('Page.navigateToHistoryEntry', { entryId: entry.id });
-    clearSnapshotRefs(ctx);
-    return { url: entry?.url ?? String(await bridgeEvaluate(bridge, 'location.href')) };
-  }
+  if (ctx.bridgeMode) return await bridgeHistoryNav(ctx, 1);
   const page = await activePage(ctx);
   await page.goForward({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
   return { url: page.url() };
@@ -3994,7 +4029,11 @@ async function main() {
   let bridge: Bridge | null = null;
 
   if (bridgeMode) {
-    bridge = new Bridge(bridgePort, log);
+    // Opt-in pairing code (GHAX_BRIDGE_PAIR_CODE). Closes the localhost
+    // "any local process can drive the browser" gap; off unless requested.
+    const pairCode = process.env.GHAX_BRIDGE_PAIR_CODE || null;
+    bridge = new Bridge(bridgePort, log, pairCode ? { pairCode } : {});
+    if (pairCode) log(`bridge: pairing required — extensions must supply the code`);
     log(`bridge: listening on ws://127.0.0.1:${bridgePort} — waiting for extension`);
     bridge.on('hello', (info: { agent?: string; version?: string }) => {
       log(`bridge: extension connected (${info.agent ?? 'unknown'} v${info.version ?? '?'})`);

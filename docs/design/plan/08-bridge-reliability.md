@@ -580,11 +580,33 @@ ships in Phase 1; what remains here is surface polish.
     line formatting, popup label + port field, `ghax tabs --browser`
     against a parked instance.
 
-**Phase 4 / deferred.** Pairing auth token (the
-[`07`](./07-extension-bridge.md) TODO — security, not reliability; the
-`pairToken` field is reserved in hello now). `--frame` selection. OOPIF
-sessions. `ghax tabs --browser <parked>`. Screenshot chunking and the
-offscreen document only if evidence ever demands them.
+**Phase 4. [SHIPPED — the finishable parts.]**
+- **Pairing auth token** — the [`07`](./07-extension-bridge.md) TODO.
+  **Shipped** as opt-in `--pair`: localhost-only, off by default,
+  constant-time check at `hello`, wrong/missing code → `hello-reject` →
+  DORMANT. This also became the natural driver for the DORMANT sim
+  assertion. Note this is NOT the network-exposed `ghax pair` deferred in
+  CLAUDE.md (bearer token on a network daemon) — that stays deferred; this
+  is the localhost hardening doc 07 explicitly asked for.
+- **`back`/`forward` reconcile** — **shipped**: capture source+target entry
+  ids, and on a mid-nav drop compare `Page.getNavigationHistory` to report
+  succeeded / unknown / concurrent-navigation instead of a blanket unknown.
+- **`ghax tabs --browser <parked>`** — **shipped** in Phase 3.
+- **Live-bridge test** — **shipped** as `test/bridge-live.ts`
+  (`GHAX_SMOKE_BRIDGE=1`), run green against a real Edge + the loaded ext.
+
+**Still deferred, deliberately:**
+- **`--frame` selection / OOPIF sessions** (`Target.setAutoAttach` +
+  `sessionId` routing). A genuinely separate feature — cross-origin iframes
+  are unreachable over `chrome.debugger`'s top-frame session entirely, and
+  this never appeared in the original field report (it surfaced only because
+  report item #5 was mis-diagnosed). Large enough to warrant its own design.
+- **Screenshot chunking** — `Page.captureScreenshot` is in the `safe` retry
+  class, so an interrupted screenshot already auto-recovers; chunking buys
+  wire complexity for a failure mode that no longer bites.
+- **Offscreen-document keepalive** — the evidence still doesn't support the
+  hole it would close (see §3.7). Revisit only if telemetry shows idle
+  evictions while connected.
 
 ---
 
