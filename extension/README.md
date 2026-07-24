@@ -45,14 +45,23 @@ browser-level CDP endpoint, including the `ext` family, return an explicit
 MV3 service workers are evicted after ~30s idle. The bridge keeps itself
 alive and self-healing so you don't have to babysit it:
 
-- A `chrome.alarms` keepalive (the `"alarms"` permission) resurrects an
-  evicted worker and reconnects within one alarm period (~30s).
+- Two `chrome.alarms` keepalives (the `"alarms"` permission), phase-offset
+  by 15s, resurrect an evicted worker. Chrome clamps repeating alarms to a
+  30s floor, so a single alarm left a 30s worst-case gap; two halve it.
 - While connected it sends `{type:"ping"}` every ~15s; the daemon replies
   `{type:"pong"}`. Active traffic extends the worker's lifetime.
 - The controlled tab id is persisted in `chrome.storage.local`, so a
   respawned worker re-attaches to it, and the daemon re-asserts the desired
-  control target on every reconnect. Net effect: leave it idle, come back,
-    and page commands still work — no user action needed.
+  control target on every reconnect.
+- If the worker dies mid-session, the daemon holds the session open for a
+  **grace window** (20s) rather than failing outright: commands issued during
+  the gap queue and run on reconnect. Read-only commands interrupted in
+  flight are replayed; anything that could have mutated the page reports
+  "the action MAY have landed — verify with `ghax snapshot`" instead of
+  risking a double-submit.
+
+Net effect: leave it idle, come back, and page commands still work — no user
+action needed.
 
 ## How it fits together
 
@@ -65,14 +74,47 @@ ghax CLI (Rust)  --HTTP RPC-->  ghax daemon (Node)  --WebSocket-->  this extensi
   `GHAX_BRIDGE_PORT`, or set `bridgePort` in this extension's
   `chrome.storage.local` if you need a different port on the extension
   side too).
-- The extension's background service worker connects to it, sends
-  `{"type":"hello",...}`, then relays every `{id, method, params}` message
-  as a `chrome.debugger.sendCommand` call against whichever tab the popup
-  told it to control, replying `{id, result}` / `{id, error}`. CDP events
-  (e.g. `Page.loadEventFired`) are relayed back as `{"type":"event",...}`.
-- Only one extension connection is accepted at a time — reloading the
-  extension (or opening the popup and clicking Control this tab again)
-  replaces the old one; the daemon logs the replacement.
+- The extension's background service worker connects to it and sends
+  `{"type":"hello", instanceId, browser, label, ...}`. The daemon answers
+  with `{"type":"hello-ack", role}` — see **Multiple browsers** below — and
+  only once it's granted the `bound` role does the extension attach
+  `chrome.debugger`. It then relays every `{id, method, params}` message as
+  a `chrome.debugger.sendCommand` call against the controlled tab, replying
+  `{id, result}` / `{id, error}`. CDP events (e.g. `Page.loadEventFired`)
+  come back as `{"type":"event",...}`.
+
+## Multiple browsers (or multiple profiles)
+
+Every install of this extension dials the same `127.0.0.1:9223`. Because
+MV3 extensions are per-profile, loading this directory in Edge *and* Chrome
+— or in two Edge profiles — means several service workers competing for one
+daemon.
+
+The daemon keeps a **registry** rather than one anonymous socket:
+
+- Exactly one instance is **bound** — it drives the tab.
+- Every other healthy instance is **parked**: its socket stays open and
+  pinging, it stays listed, but it holds no `chrome.debugger` attachment and
+  receives no CDP.
+
+Parking is what keeps things quiet. If the daemon closed the losing socket
+instead, this extension's reconnect loop would immediately dial back in, and
+two installs would evict each other indefinitely.
+
+Each install mints a `instanceId` (a UUID in `chrome.storage.local`) the
+first time it runs. `chrome.runtime.id` can't serve here — it's derived from
+the unpacked path, so every profile loading this same directory reports an
+identical id.
+
+```bash
+ghax bridge instances                 # who's connected, who's driving
+ghax bridge use chrome                # rebind (by id, browser, or label)
+ghax attach --extension --browser edge  # only Edge may bind; others park
+```
+
+If `ghax bridge instances` warns that ownership is *flapping*, an
+older build of this extension is still loaded in another profile — reload it
+there (or disable the copies you don't drive).
 
 ## Bridge-capable commands
 

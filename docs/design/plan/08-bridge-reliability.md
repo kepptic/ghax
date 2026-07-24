@@ -316,21 +316,25 @@ with its decision **and reason**:
 Identity answers *who may drive*; the state machine answers *what happens
 when the driver blinks*. No duplication.
 
-**Per-peer state partitioning is mandatory, not optional.** Bridge refs,
-network requests, and console buffers are currently *global* daemon maps
+**Per-peer state partitioning — deferred to Phase 3, deliberately.** Bridge
+refs, network requests, and console buffers are *global* daemon maps
 (`daemon.ts:120-127`), cleared globally on any control change
-(`daemon.ts:3600-3607`). The moment the daemon holds N peers, that state
-must move into the peer record — otherwise a parked peer's stale refs and
-a bound peer's live ones share one namespace. Shape:
+(`daemon.ts:3600-3607`). The Codex consult called partitioning mandatory
+"the moment the daemon holds N peers". On implementation that proved
+stronger than needed for Phase 1: **a parked peer holds no debugger
+attachment and receives no CDP**, so it generates no refs, no network
+events, and no console entries. The global maps only ever contain the bound
+peer's data, and `use()` clears them on rebind via the existing
+`controlled` event. Partitioning becomes genuinely required in Phase 3,
+when `ghax tabs --browser <parked>` starts querying a non-bound instance.
+Recorded here so the deferral is a decision, not an oversight. Target shape
+when it lands:
 
 ```
 BridgeServer { peers: Map<instanceId, BridgePeer>, selectedPeerId }
 BridgePeer   { socket/session state, desired + controlled tab, heartbeat,
                pending requests, document epoch, refs/network/console }
 ```
-
-This is the single largest implementation cost in Phase 1 and the reason
-its estimate is 4-5 days rather than 2.
 
 ### 2.5 Execution-context pinning
 
@@ -509,16 +513,24 @@ actually bit the user, and it removes a whole class of stale-binary ghosts.
 4. The `CLOSING` guard fix + staggered second alarm (§3.1, §3.5).
 5. `bridgeError()` helper + hint table + Rust hint printing.
 
-**Phase 1 — identity + state machine (~4-5 days; the root-cause fix).**
+**Phase 1 — identity + state machine (the root-cause fix). [SHIPPED]**
 Multi-instance identity and arbitration belong here, **not** in a
 deferred UX phase — they are the root-cause fix, not polish.
 6. Hello v2, `hello-ack`/`hello-reject`/`role`, instanceId minting,
-   `chrome.storage.session` resume token, DORMANT reject path.
-7. Instance registry, bound/parked roles + arbitration rule, persisted
-   `bridgeBoundInstance`, livelock detector, liveness timeout, DEGRADED
-   queue, grace window, resume sequence, retry classes annotated at every
-   bridge call site.
-8. `test/bridge-sim.ts` — **release gate**, see §5.
+   `chrome.storage.session` resume token, DORMANT reject path. **[SHIPPED]**
+7. Instance registry, bound/parked roles + arbitration rule, livelock
+   detector, liveness timeout, DEGRADED queue, grace window, resume
+   sequence, retry classes at the operation layer. **[SHIPPED]**
+8. `test/bridge-sim.ts` — **release gate**, see §5. **[SHIPPED — 13 checks]**
+
+*Deviations from plan, all recorded above:* per-peer state partitioning
+deferred to Phase 3 with justification (§2.4); `bridgeBoundInstance`
+persistence to `.ghax/ghax.json` deferred — the in-memory registry plus
+`--browser` covers the arbitration cases, and persisting a bound instance
+across daemon restarts is only meaningful once profiles are long-lived
+enough to matter. `ghax bridge instances`/`use` shipped **early** (they were
+Phase 3 in the plan) because they're how a human confirms the registry is
+behaving — shipping arbitration without them would be untestable by hand.
 
 **Phase 2 — read correctness (~2 days).**
 9. Execution-context pinning (§2.5) — small; the events already flow.

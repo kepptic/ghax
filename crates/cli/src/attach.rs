@@ -904,6 +904,7 @@ fn build_daemon_cmd_bridge(
     cfg: &Config,
     bridge_port: u16,
     control_active: bool,
+    bind_filter: Option<&str>,
     bundle: &std::path::Path,
     stderr_file: std::fs::File,
 ) -> std::process::Command {
@@ -919,6 +920,11 @@ fn build_daemon_cmd_bridge(
         .env("GHAX_BROWSER_KIND", "chrome");
     if control_active {
         cmd.env("GHAX_BRIDGE_CONTROL", "active");
+    }
+    // Restrict which extension instance may bind, so a second browser (or a
+    // forgotten install in another profile) parks instead of racing.
+    if let Some(filter) = bind_filter {
+        cmd.env("GHAX_BRIDGE_BROWSER", filter);
     }
     detach_session(&mut cmd);
     cmd
@@ -978,11 +984,16 @@ fn spawn_daemon(
 /// makes the daemon drive the browser's active tab as soon as the extension
 /// connects. See `build_daemon_cmd_bridge` and daemon.ts's bridge-mode
 /// branch in `main()`.
-fn spawn_daemon_bridge(cfg: &Config, bridge_port: u16, control_active: bool) -> Result<DaemonState> {
+fn spawn_daemon_bridge(
+    cfg: &Config,
+    bridge_port: u16,
+    control_active: bool,
+    bind_filter: Option<&str>,
+) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        build_daemon_cmd_bridge(cfg, bridge_port, control_active, &bundle, stderr_file)
+        build_daemon_cmd_bridge(cfg, bridge_port, control_active, bind_filter, &bundle, stderr_file)
     })
 }
 
@@ -1420,6 +1431,9 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         parsed.flags.get("control-active"),
         Some(serde_json::Value::Bool(true))
     );
+    // In bridge mode --browser is a BIND FILTER, not a launch target: only a
+    // matching extension instance may drive; others park.
+    let bind_filter = parsed.flags.get("browser").and_then(|v| v.as_str());
 
     match resolve_extension_dir() {
         Some(dir) => println!("ghax bridge (experimental): load unpacked from {}", dir.display()),
@@ -1441,7 +1455,7 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         "Starting daemon in bridge mode — waiting for the extension on ws://127.0.0.1:{bridge_port} (up to 60s)..."
     );
 
-    let state = spawn_daemon_bridge(cfg, bridge_port, control_active)?;
+    let state = spawn_daemon_bridge(cfg, bridge_port, control_active, bind_filter)?;
 
     match wait_for_extension(state.port, Duration::from_secs(60), control_active) {
         Ok((info, controlled_tab)) => {
