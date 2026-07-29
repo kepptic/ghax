@@ -987,10 +987,19 @@ export async function bridgeEvaluate(
   return unwrapEvalResult(result);
 }
 
-/** True when CDP rejected an evaluate because the pinned context is gone. */
+/**
+ * True when CDP rejected an evaluate because the pinned context is gone.
+ *
+ * `uniqueContextId not found` is the one Chrome actually returns when we pin
+ * via `uniqueContextId` — which is every bridge eval. It was missing here, so
+ * the self-heal in `bridgeEval` never fired for its most common real-world
+ * trigger: a command issued in the window between a cross-origin `goto` and
+ * the daemon's context bookkeeping catching up. Verified live against
+ * concord.rmm.datto.com → ww14.autotask.net.
+ */
 export function isStaleContextError(err: unknown): boolean {
   const msg = (err as { message?: string } | null)?.message ?? String(err);
-  return /cannot find context|context with specified id|execution context was destroyed|no execution context/i.test(msg);
+  return /cannot find context|context with specified id|uniquecontextid not found|execution context was destroyed|no execution context/i.test(msg);
 }
 
 /**

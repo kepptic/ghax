@@ -20,7 +20,7 @@
  */
 
 import { WebSocket } from 'ws';
-import { Bridge, BridgeInterrupted } from '../src/bridge';
+import { Bridge, BridgeInterrupted, isStaleContextError } from '../src/bridge';
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
@@ -213,6 +213,25 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('bridge simulator — no browser required\n');
+
+  // Regression: the self-heal in bridgeEval is gated on this predicate, so a
+  // string it fails to match is a silent post-navigation failure for the user.
+  // `uniqueContextId not found` is what Chrome returns for the pin bridge
+  // evals actually use, and it was missing — see isStaleContextError.
+  await test('isStaleContextError matches every real stale-pin string', async () => {
+    for (const msg of [
+      'uniqueContextId not found',
+      'Cannot find context with specified id',
+      'Execution context was destroyed.',
+      'No execution context with given id found',
+    ]) {
+      assert(isStaleContextError(new Error(msg)), `should match: ${msg}`);
+    }
+    // Must not swallow unrelated failures into a retry.
+    for (const msg of ['SyntaxError: Unexpected token', 'Target closed']) {
+      assert(!isStaleContextError(new Error(msg)), `should NOT match: ${msg}`);
+    }
+  });
 
   await test('a single extension binds on hello', async () => {
     await withBridge(async (bridge, port) => {
