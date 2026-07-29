@@ -139,6 +139,30 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   silent preference order was the stale-binary trap.
 
 ### Fixed
+- **Bridge: post-navigation reads no longer fail with `uniqueContextId not
+  found`.** `bridgeEval` has always carried a self-heal — clear the context
+  map, re-`Runtime.enable`, re-resolve, retry — for exactly this case, but its
+  guard `isStaleContextError()` didn't match the string Chrome actually
+  returns when the pin it was given goes stale. Since every bridge eval pins
+  via `uniqueContextId`, the self-heal was dead for its most common real
+  trigger: a command issued in the gap between a cross-origin `goto` and the
+  daemon's context bookkeeping catching up. Measured against
+  `concord.rmm.datto.com` ⇄ `ww14.autotask.net` with zero settle time: 1/10
+  rounds failed before, 0/20 after. This is the bug behind agent reports of
+  "navigation drops control, so re-target after every `goto`" — control was
+  never lost (the controlled tab id is stable throughout); only the pinned
+  context was, and re-targeting happened to clear it as a side effect.
+
+  Still open, same family: `chrome.debugger` transiently returns `Cannot
+  access a chrome-extension:// URL of different extension` (and occasionally
+  `Detached while handling command.`) for a moment after a cross-origin
+  navigation — ~25% of zero-settle rounds, with the controlled tab and URL
+  both correct. An immediate retry almost always succeeds, but the generic
+  relay path in `extension/background.js` doesn't retry, and blindly retrying
+  it there would replay non-idempotent verbs (`click`, `fill`). Needs the
+  retry-classification work in `design/plan/08`, not a regex patch — note
+  `isTemporarilyUnattachable()` also fails to match `chrome-extension://`
+  because its pattern expects `chrome://` exactly.
 - The daemon-runtime bootstrap (`scripts/bootstrap-daemon-runtime.sh`) now
   installs `ws` alongside `playwright` and `source-map`. The extension bridge
   added `ws` as a runtime external but the bootstrap was never updated, so
