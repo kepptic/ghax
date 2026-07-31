@@ -9,7 +9,8 @@
  * Wire format (see src/bridge.ts for the daemon side):
  *   -> daemon, on connect:   {"type":"hello","agent":"ghax-ext","version":"...","controlledTabId":N|null}
  *   <- daemon, a CDP cmd:    {"id":<n>,"method":"Page.navigate","params":{...}}
- *   -> daemon, its reply:    {"id":<n>,"result":{...}} | {"id":<n>,"error":{"message":"..."}}
+ *   -> daemon, its reply:    {"id":<n>,"result":{...}}
+ *                            {"id":<n>,"error":{"message":"...","phase":"attach"|"dispatch"|"dispatch-detached"}}
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
  *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop","tabId?":N}
@@ -29,11 +30,24 @@
  * src/bridge.ts). onStartup/onInstalled also kick a connect.
  */
 
+import { isTemporarilyUnattachable, isDetachedMidCommand } from './errors.js';
+
 const DEFAULT_PORT = 9223;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
 const PING_INTERVAL_MS = 15000;
 const NAVIGATION_TIMEOUT_MS = 8000;
+/**
+ * How long a command may keep retrying a transient attach refusal.
+ *
+ * Deliberately SHORT. Measured recovery from a genuine mid-navigation refusal
+ * is sub-second and almost always succeeds on the first retry. The failure
+ * mode this must not indulge is the *permanent* refusal — a page containing
+ * another extension's frame is never going to become attachable, and a long
+ * budget just adds latency to a guaranteed failure (2s per command, measured
+ * on the authenticated Autotask app before this was tuned down).
+ */
+const ATTACH_RETRY_BUDGET_MS = 400;
 // Chrome clamps repeating alarms to a 30s (0.5 min) floor, so a single alarm
 // leaves a worst-case ~30s wake gap after the daemon restarts and the socket
 // closes. TWO alarms phase-offset by 15s halve that to ~15s — the cheap half
@@ -337,8 +351,54 @@ async function attachTo(tabId) {
   attached = true;
 }
 
-function isTemporarilyUnattachable(err) {
-  return /cannot attach to this target|cannot (?:access|attach to) (?:a )?(?:chrome|edge):\/\/|no tab with given id|target closed/i.test(err?.message ?? String(err));
+/**
+ * Attach if needed, dispatch one CDP command, and absorb transient refusals.
+ *
+ * Safe for every verb, including click/fill, and that is the whole point: a
+ * refusal is Chrome rejecting the request outright, so the command provably
+ * never executed and retrying cannot double an action. It's the same reasoning
+ * docs/design/plan/08 §2.5 uses to justify the unconditional evaluate retry
+ * after a stale context pin. This is NOT the retry a mid-dispatch *detach*
+ * would need — that one may have landed, and goes to the retry-class table via
+ * `isDetachedMidCommand` / `phase: "dispatch-detached"`.
+ *
+ * Bounded, because "the tab is parked on a chrome:// page" is a real state that
+ * must still surface as an error rather than hang.
+ */
+async function relayCommand(method, params, budgetMs = ATTACH_RETRY_BUDGET_MS) {
+  const deadline = Date.now() + budgetMs;
+  let delay = 25;
+  for (;;) {
+    let phase = 'attach';
+    try {
+      await ensureAttached();
+      phase = 'dispatch';
+      return await chrome.debugger.sendCommand({ tabId: controlledTabId }, method, params);
+    } catch (err) {
+      if (!isTemporarilyUnattachable(err) || Date.now() >= deadline) {
+        // Report which half actually failed, not which half we assumed.
+        throw Object.assign(err instanceof Error ? err : new Error(String(err)), { ghaxPhase: phase });
+      }
+      // A REAL detach/attach cycle, not just `attached = false`. Clearing the
+      // flag alone is a no-op whenever Chrome still holds the session:
+      // attachTo() swallows "already attached", so the next pass reuses the
+      // very session that was just refused and fails identically. That is why
+      // `ghax bridge control` recovers a stuck bridge and a retry did not —
+      // switchControlTo() detaches first. Measured on the Autotask login page,
+      // where one `snapshot` leaves every later command refused until a real
+      // re-attach.
+      //
+      // Covers the refusal landing at DISPATCH as well as at attach: Chrome
+      // detaches during navigation but `chrome.debugger.onDetach` is async, so
+      // `attached` can still be true and sendCommand is what gets refused.
+      attached = false;
+      if (controlledTabId != null) {
+        await chrome.debugger.detach({ tabId: controlledTabId }).catch(() => undefined);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, 200);
+    }
+  }
 }
 
 function cancelReattach() {
@@ -534,17 +594,36 @@ async function handleMessage(raw) {
 
   // Everything else is a CDP command to relay: {id, method, params}.
   if (typeof msg.id !== 'number' || typeof msg.method !== 'string') return;
+  // Which half of the relay failed. The daemon needs this to tell "never ran"
+  // from "may have run": only the former is safe to retry for a mutating verb.
+  let phase = 'attach';
   try {
     let result;
     if (msg.method === 'Page.navigate') {
+      phase = 'dispatch';
       result = await navigateControlledTab(msg.params ?? {});
     } else {
-      await ensureAttached();
-      result = await chrome.debugger.sendCommand({ tabId: controlledTabId }, msg.method, msg.params ?? {});
+      // Transient refusals are absorbed inside relayCommand, so a mid-
+      // navigation blip never reaches the user — and never replays an action
+      // that ran, because a refusal means Chrome rejected the command outright.
+      phase = 'dispatch';
+      result = await relayCommand(msg.method, msg.params ?? {});
     }
     send({ id: msg.id, result: result ?? {} });
   } catch (err) {
-    send({ id: msg.id, error: { message: err?.message ?? String(err) } });
+    // relayCommand knows which half actually failed; fall back to the coarse
+    // outer guess for paths that don't go through it (e.g. Page.navigate).
+    const actual = err?.ghaxPhase ?? phase;
+    // A dispatch-phase detach is the unsafe case: the command was already on
+    // the wire. Report it as such rather than letting it read like a refusal.
+    const detached = actual === 'dispatch' && isDetachedMidCommand(err);
+    send({
+      id: msg.id,
+      error: {
+        message: err?.message ?? String(err),
+        phase: detached ? 'dispatch-detached' : actual,
+      },
+    });
   }
 }
 

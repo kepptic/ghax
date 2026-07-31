@@ -63,6 +63,8 @@ class FakeExt {
   controls: string[] = [];
   /** Methods to never answer, to simulate a command in flight at drop time. */
   swallow = new Set<string>();
+  /** Methods to answer with an error reply, keyed by the `phase` to report. */
+  failWithPhase = new Map<string, string>();
   private pingTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -159,6 +161,11 @@ class FakeExt {
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       this.received.push(msg.method);
       if (this.swallow.has(msg.method)) return; // in flight forever
+      const phase = this.failWithPhase.get(msg.method);
+      if (phase) {
+        this.send({ id: msg.id, error: { message: 'Detached while handling command.', phase } });
+        return;
+      }
       this.send({ id: msg.id, result: { echoed: msg.method } });
     }
   }
@@ -231,6 +238,87 @@ async function main(): Promise<void> {
     for (const msg of ['SyntaxError: Unexpected token', 'Target closed']) {
       assert(!isStaleContextError(new Error(msg)), `should NOT match: ${msg}`);
     }
+  });
+
+  // The extension's own predicates. Imported dynamically because
+  // extension/errors.js is plain browser JS outside the tsconfig `include`.
+  await test('extension predicates classify real chrome.debugger strings', async () => {
+    const errors = await import(
+      new URL('../extension/errors.js', import.meta.url).href
+    ) as {
+      isTemporarilyUnattachable: (e: unknown) => boolean;
+      isDetachedMidCommand: (e: unknown) => boolean;
+    };
+
+    // Transient — absorbed by a pre-dispatch attach retry. The last two are
+    // the ones the original `(?:chrome|edge):\/\/` pattern missed.
+    for (const msg of [
+      'Cannot attach to this target.',
+      'Cannot access a chrome:// URL',
+      'Cannot access a chrome-extension:// URL of different extension',
+      'Cannot access a chrome-error:// URL',
+      'No tab with given id 42',
+    ]) {
+      assert(errors.isTemporarilyUnattachable(new Error(msg)), `should be transient: ${msg}`);
+    }
+    // A real page must never look unattachable, or every failure retries.
+    for (const msg of ['SyntaxError: Unexpected token', 'Cannot access https://example.com']) {
+      assert(!errors.isTemporarilyUnattachable(new Error(msg)), `should NOT be transient: ${msg}`);
+    }
+
+    // Mid-dispatch detach is the UNSAFE case — it must not be confused for a
+    // transient refusal, or a click could be replayed after it already landed.
+    assert(errors.isDetachedMidCommand(new Error('Detached while handling command.')), 'detach not classified');
+    assert(
+      !errors.isTemporarilyUnattachable(new Error('Detached while handling command.')),
+      'a mid-dispatch detach must NOT be treated as a safe pre-dispatch retry',
+    );
+
+    // The permanent case. It LOOKS like the transient one and is not: a page
+    // holding another extension's frame never becomes attachable, so this must
+    // stay distinguishable for the daemon to advise correctly (bridgeError).
+    const permanent = 'Cannot access a chrome-extension:// URL of different extension';
+    assert(
+      /chrome-extension:\/\/ URL of different extension/i.test(permanent),
+      'the permanent-refusal string must stay distinct from "Cannot access chrome:// and edge:// URLs"',
+    );
+    assert(
+      !/chrome-extension:\/\/ URL of different extension/i.test('Cannot access chrome:// and edge:// URLs'),
+      'the browser-internal-page string must NOT match the extension-frame case',
+    );
+  });
+
+  // The `phase` field is only worth carrying if it changes what happens: a
+  // dispatch-phase detach must arrive as BridgeInterrupted so daemon.ts's
+  // retry-class table sees it, while an attach-phase failure must stay a
+  // plain error (the command never ran — nothing ambiguous to report).
+  await test('dispatch-detached maps to BridgeInterrupted, attach does not', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-a');
+      await ext.connect();
+      await until(() => bridge.connected, 'bridge to connect');
+
+      ext.failWithPhase.set('Input.dispatchMouseEvent', 'dispatch-detached');
+      let caught: unknown = null;
+      try {
+        await bridge.send('Input.dispatchMouseEvent', {});
+      } catch (err) { caught = err; }
+      assert(
+        caught instanceof BridgeInterrupted,
+        `dispatch-detached should be BridgeInterrupted, got ${caught}`,
+      );
+
+      ext.failWithPhase.set('DOM.getBoxModel', 'attach');
+      caught = null;
+      try {
+        await bridge.send('DOM.getBoxModel', {});
+      } catch (err) { caught = err; }
+      assert(caught instanceof Error, 'attach phase should still reject');
+      assert(
+        !(caught instanceof BridgeInterrupted),
+        'an attach-phase failure must NOT claim the action may have landed',
+      );
+    });
   });
 
   await test('a single extension binds on hello', async () => {
