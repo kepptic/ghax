@@ -17,7 +17,12 @@
  *   daemon -> extension, a CDP command to relay via chrome.debugger.sendCommand:
  *     {"id":<n>,"method":"Page.navigate","params":{...}}
  *   extension -> daemon, the command's reply:
- *     {"id":<n>,"result":{...}} | {"id":<n>,"error":{"message":"..."}}
+ *     {"id":<n>,"result":{...}}
+ *     {"id":<n>,"error":{"message":"...","phase":"attach"|"dispatch"|"dispatch-detached"}}
+ *       `phase` says which half of the relay failed, which is what decides
+ *       whether a retry is safe. "attach" = the command provably never ran;
+ *       "dispatch-detached" = it was already on the wire and MAY have landed
+ *       (mapped to BridgeInterrupted below). Older extensions omit it.
  *   extension -> daemon, a relayed chrome.debugger.onEvent:
  *     {"type":"event","method":"Page.loadEventFired","params":{...}}
  *
@@ -474,8 +479,21 @@ export class Bridge extends EventEmitter {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error.message || 'bridge command failed'));
-      else p.resolve(msg.result);
+      if (msg.error) {
+        // `phase` (extension/background.js) says which half of the relay
+        // failed. `dispatch-detached` means chrome.debugger dropped while the
+        // command was already on the wire — so the action MAY have landed.
+        // That is exactly BridgeInterrupted's contract, and routing it there
+        // hands it to the retry-class table in daemon.ts `register()`: a
+        // `safe` verb replays in full, anything else surfaces
+        // BRIDGE_OUTCOME_UNKNOWN with the "verify with `ghax snapshot`" hint.
+        //
+        // Attach-phase failures deliberately do NOT come here: the extension
+        // absorbs the transient ones before dispatch, and a genuinely
+        // unattachable tab is a plain error, not an ambiguous outcome.
+        if (msg.error.phase === 'dispatch-detached') p.reject(new BridgeInterrupted(p.method));
+        else p.reject(new Error(msg.error.message || 'bridge command failed'));
+      } else p.resolve(msg.result);
       return;
     }
   }

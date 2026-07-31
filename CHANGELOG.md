@@ -153,16 +153,66 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   never lost (the controlled tab id is stable throughout); only the pinned
   context was, and re-targeting happened to clear it as a side effect.
 
-  Still open, same family: `chrome.debugger` transiently returns `Cannot
-  access a chrome-extension:// URL of different extension` (and occasionally
-  `Detached while handling command.`) for a moment after a cross-origin
-  navigation — ~25% of zero-settle rounds, with the controlled tab and URL
-  both correct. An immediate retry almost always succeeds, but the generic
-  relay path in `extension/background.js` doesn't retry, and blindly retrying
-  it there would replay non-idempotent verbs (`click`, `fill`). Needs the
-  retry-classification work in `design/plan/08`, not a regex patch — note
-  `isTemporarilyUnattachable()` also fails to match `chrome-extension://`
-  because its pattern expects `chrome://` exactly.
+- **Bridge: a page holding another extension's frame now says so.** `Cannot
+  access a chrome-extension:// URL of different extension` was being reported
+  with the generic "browser-internal page — point the bridge at a normal tab"
+  hint, which is wrong and unactionable: the tab *is* a normal page. Chrome
+  uses a distinct string for this case, so `bridgeError()` now splits it out as
+  `BRIDGE_TAB_EXTENSION_FRAME` and says what actually helps — disable the
+  injecting extension for that site, or use the CDP transport.
+
+  **This is not transient and no retry fixes it.** Measured on the
+  authenticated Autotask Onyx app: every command refused, surviving full page
+  settling and repeated real detach/attach cycles, while `example.com`, Hudu,
+  and Datto on the same tab are fine. An earlier attempt to absorb it with a
+  2s retry only added 2s of latency per command to a guaranteed failure; the
+  budget is now 400ms, sized for the genuine sub-second mid-navigation refusal
+  (which does exist, and which the retry does fix) rather than for a permanent
+  condition.
+- **Bridge: transient mid-navigation attach refusals are absorbed.** Two fixes,
+  both in `extension/`:
+  - `isTemporarilyUnattachable()` now matches schemes with a suffix
+    (`chrome-extension://`, `chrome-error://`), not just `chrome://`. The
+    `chrome-error://` case is the cert interstitial this predicate was written
+    for in the first place — it only ever worked because Chrome *also* says
+    "Cannot attach to this target" for some of those.
+  - A CDP command now goes through `relayCommand()`, which waits out a
+    transient refusal (bounded, 400ms) at **either** attach or dispatch. Both
+    halves matter: Chrome detaches during navigation but
+    `chrome.debugger.onDetach` is async, so `attached` can still be true,
+    `ensureAttached()` short-circuits, and `sendCommand` is what gets refused —
+    which is why guarding only the attach call fixed single-command `eval`
+    (5/20 → 0/20 on the login page) and did nothing for `text`/`snapshot`.
+    The retry performs a real `chrome.debugger.detach` first, because clearing
+    the `attached` flag alone is a no-op while Chrome still holds the session
+    (`attachTo()` swallows "already attached"), so the next pass would reuse
+    the session that was just refused.
+
+    Safe for **every** verb including `click`/`fill`: a refusal is Chrome
+    rejecting the command outright, so it provably never ran — the same
+    argument `docs/design/plan/08` §2.5 uses for the unconditional evaluate
+    retry. It is *not* a post-dispatch retry, which would need the retry-class
+    table.
+
+  Error replies now carry `phase` (`attach` | `dispatch` | `dispatch-detached`)
+  so the daemon can tell "never ran" from "may have landed". A
+  `dispatch-detached` reply — `chrome.debugger` dropping while the command was
+  already on the wire — is mapped to `BridgeInterrupted`, which routes it into
+  the existing retry-class table in `daemon.ts` `register()`: a `safe` verb
+  replays in full, anything else surfaces `BRIDGE_OUTCOME_UNKNOWN` with the
+  "verify with `ghax snapshot`" hint. Previously it was an opaque string.
+
+  `extension/errors.js` is new — the predicates split out of `background.js`,
+  which touches `chrome.*` at module scope and so could never be imported by a
+  test. Both predicates are now covered in `test/bridge-sim.ts`, including that
+  a mid-dispatch detach must **not** be classified as a safe pre-dispatch
+  retry.
+
+  **Reload the ghax bridge extension in `edge://extensions` to pick this up**
+  (manifest bumped 0.1.1 → 0.2.0). The version had been frozen at 0.1.1 across
+  every functional change since the bridge landed, so a stale unpacked copy was
+  indistinguishable from a current one in the extensions page — the handshake
+  already reports it, and now it moves.
 - The daemon-runtime bootstrap (`scripts/bootstrap-daemon-runtime.sh`) now
   installs `ws` alongside `playwright` and `source-map`. The extension bridge
   added `ws` as a runtime external but the bootstrap was never updated, so

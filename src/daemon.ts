@@ -3044,6 +3044,22 @@ class BridgeError extends Error {
  */
 function bridgeError(raw: unknown, ctx?: { tabId?: number | null; url?: string; title?: string }): BridgeError {
   const message = (raw as { message?: string } | null)?.message ?? String(raw);
+  // Chrome uses a DISTINCT string when the blocker is another extension's
+  // frame inside an otherwise-normal page, vs the tab itself being a
+  // browser-internal page ("Cannot access chrome:// and edge:// URLs"). They
+  // need different advice: switching tabs fixes the second and does nothing
+  // for the first. Observed on the authenticated Autotask Onyx app, where
+  // every command is refused while example.com/Hudu/Datto on the same tab are
+  // fine — retrying cannot help, because the frame does not go away.
+  if (/chrome-extension:\/\/ URL of different extension/i.test(message)) {
+    return new BridgeError(
+      message,
+      'BRIDGE_TAB_EXTENSION_FRAME',
+      'another extension owns a frame in this page, and chrome.debugger refuses to attach to the whole tab. '
+      + 'This is not transient — retrying will not clear it. Disable the injecting extension for this site, '
+      + 'or drive the page over the CDP transport instead (`ghax attach --launch`, scratch profile).',
+    );
+  }
   if (/cannot (?:access|attach to)|not attachable|chrome-extension:\/\/|chrome:\/\/|edge:\/\//i.test(message)) {
     const where = ctx?.tabId != null
       ? `controlled tab ${ctx.tabId}${ctx.title ? ` (${JSON.stringify(ctx.title.slice(0, 40))})` : ''}`
