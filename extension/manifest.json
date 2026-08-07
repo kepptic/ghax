@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ghax bridge",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Relays CDP commands from the ghax daemon to this browser via chrome.debugger — the walking-skeleton fix for --remote-debugging-port being ignored on Edge 150+/Chrome 136+.",
   "permissions": ["debugger", "tabs", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],

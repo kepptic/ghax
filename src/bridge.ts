@@ -72,7 +72,14 @@ export interface BridgeTab {
   id: number;
   title: string;
   url: string;
+  /** True for THIS daemon's controlled tab — never another agent's. */
   active: boolean;
+  /**
+   * Bridge port of the agent driving this tab, or null when it's free. Two
+   * agents on one browser each see the other's territory here, which is the
+   * difference between "that tab is taken" and an unexplained refusal.
+   */
+  controlledBy: number | null;
 }
 
 export interface BridgeRef {
@@ -104,11 +111,28 @@ const LIVENESS_MS = envMs('GHAX_BRIDGE_LIVENESS_MS', 25_000);
 /** DEGRADED → EXPIRED. Covers the ≤8s extension reconnect backoff + attach. */
 const GRACE_MS = envMs('GHAX_BRIDGE_GRACE_MS', 20_000);
 
+/**
+ * How many consecutive ports one browser's extension will look for daemons on,
+ * starting at the configured base (9223). MUST match `PORT_RANGE` in
+ * extension/background.js: the extension dials this window, so a daemon that
+ * auto-picked a port above it would never be found. Ten is enough for any
+ * plausible number of agents sharing one browser and keeps the extension's
+ * steady-state dial rate around one per second.
+ */
+export const BRIDGE_PORT_RANGE = 10;
+
 export interface BridgeOptions {
   /** DEGRADED → EXPIRED window. Defaults to GHAX_BRIDGE_GRACE_MS or 20s. */
   graceMs?: number;
   /** Silence before a bound socket is terminated. Default 25s. */
   livenessMs?: number;
+  /**
+   * An already-listening server to adopt instead of binding one. Set by
+   * `Bridge.create`, which is the only way to learn the ACTUAL port when the
+   * requested one was busy — `new WebSocketServer({port})` binds
+   * asynchronously, so a constructor cannot report a bind failure.
+   */
+  server?: WebSocketServer;
   /**
    * Opt-in pairing code. When set, a `hello` must carry a matching
    * `pairToken` or it's rejected (`hello-reject` → the extension goes
@@ -157,6 +181,31 @@ export class BridgeInterrupted extends Error {
   constructor(public readonly method: string) {
     super(`bridge: connection lost while '${method}' was in flight`);
   }
+}
+
+/**
+ * Bind one WebSocketServer, resolving only once it's actually listening.
+ *
+ * `new WebSocketServer({port})` returns before the bind completes and reports
+ * EADDRINUSE asynchronously on 'error', so port-scanning needs this promise
+ * form — a synchronous constructor can only log a failure it has already
+ * pretended to survive.
+ */
+function listenOn(port: number): Promise<WebSocketServer> {
+  return new Promise((resolve, reject) => {
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    const onError = (err: Error) => {
+      wss.off('listening', onListening);
+      try { wss.close(); } catch { /* ignore */ }
+      reject(err);
+    };
+    const onListening = () => {
+      wss.off('error', onError);
+      resolve(wss);
+    };
+    wss.once('error', onError);
+    wss.once('listening', onListening);
+  });
 }
 
 /** Constant-time string compare, so the pairing check can't be timed. */
@@ -221,9 +270,12 @@ export class Bridge extends EventEmitter {
   // control messages carry `type:"control-ack"` so they never collide with
   // a `{id,result}` CDP reply in the numeric-id `pending` map.
   private controlNextId = 1;
+  // The dispatching socket is stored with the resolver: control ids are minted
+  // per-daemon, not per-peer, so correlating on the id alone lets ANY connected
+  // peer answer a request it never received.
   private controlPending = new Map<
     number,
-    { resolve: (v: ControlAck) => void; reject: (e: Error) => void }
+    { ws: WebSocket; resolve: (v: ControlAck) => void; reject: (e: Error) => void }
   >();
   // ─── Instance registry (plan §2.4) ───────────────────────────
   // Exactly one peer is `bound`; every other healthy peer is `parked` —
@@ -258,12 +310,28 @@ export class Bridge extends EventEmitter {
   private readonly pairCode: string | null;
   // Timestamps of failed pairing attempts in a rolling window, used to throttle
   // brute force. A CORRECT code is never counted and never delayed, so the
-  // legit extension is unaffected; only wrong/missing codes accrue delay. This
-  // throttles parallel attempts too, since the counter is global.
+  // legit extension is unaffected; only wrong/missing codes accrue delay. The
+  // counter is PER-DAEMON — each Bridge lives in its own process — so an
+  // attacker spreading guesses across N daemons in the scan window gets N times
+  // the free allowance. Impractical anyway against 10^8 codes; sharing the
+  // counter across processes is out of scope.
   private pairFailures: number[] = [];
 
+  readonly port: number;
+
+  /**
+   * This daemon process's identity, minted fresh on every construction.
+   *
+   * The extension keys its persisted control target on this, not on the bridge
+   * port: with ports auto-assigned from a pool, a port identifies a SLOT and
+   * the next agent to land on it is a different agent. Never persisted and
+   * never derived from the port, so a new daemon cannot present the previous
+   * one's id and inherit the tab it was driving.
+   */
+  readonly daemonId = crypto.randomUUID();
+
   constructor(
-    public readonly port: number,
+    port: number,
     log: (msg: string) => void = () => undefined,
     opts: BridgeOptions = {},
   ) {
@@ -272,7 +340,8 @@ export class Bridge extends EventEmitter {
     this.graceMs = opts.graceMs ?? GRACE_MS;
     this.livenessMs = opts.livenessMs ?? LIVENESS_MS;
     this.pairCode = opts.pairCode && opts.pairCode.trim() ? opts.pairCode.trim() : null;
-    this.wss = new WebSocketServer({ host: '127.0.0.1', port });
+    this.wss = opts.server ?? new WebSocketServer({ host: '127.0.0.1', port });
+    this.port = port;
     this.wss.on('connection', (ws) => this.handleConnection(ws));
     this.wss.on('error', (err) => this.log(`bridge: server error: ${String(err)}`));
     this.livenessTimer = setInterval(
@@ -280,6 +349,49 @@ export class Bridge extends EventEmitter {
       Math.max(50, Math.floor(this.livenessMs / 5)),
     );
     this.livenessTimer.unref?.();
+  }
+
+  /**
+   * Bind a bridge, walking up from `port` when the requested one is taken.
+   *
+   * This is what lets a SECOND agent attach: every daemon in bridge mode used
+   * to demand 9223, so agent B's daemon could never get an extension
+   * connection. The extension scans the same window (BRIDGE_PORT_RANGE), so an
+   * auto-picked port needs no configuration on the browser side.
+   *
+   * `scan: false` (an explicitly requested port) binds or fails — silently
+   * landing somewhere else would defeat the point of asking.
+   */
+  static async create(
+    port: number,
+    log: (msg: string) => void = () => undefined,
+    opts: BridgeOptions & { scan?: boolean } = {},
+  ): Promise<Bridge> {
+    const range = opts.scan === false ? 1 : BRIDGE_PORT_RANGE;
+    let lastErr: unknown = null;
+    for (let candidate = port; candidate < port + range; candidate++) {
+      try {
+        const server = await listenOn(candidate);
+        if (candidate !== port) {
+          log(`bridge: port ${port} in use — bound ${candidate} instead`);
+        }
+        const { scan: _scan, ...rest } = opts;
+        return new Bridge(candidate, log, { ...rest, server });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== 'EADDRINUSE') throw err;
+        lastErr = err;
+      }
+    }
+    if (range === 1) {
+      throw new Error(
+        `bridge: port ${port} is already in use (another ghax daemon?) — omit --bridge-port to auto-pick a free one`,
+      );
+    }
+    throw new Error(
+      `bridge: no free port in ${port}-${port + range - 1} (${range} ghax daemons already running?). `
+      + `Stop one with \`ghax detach\`, or move the range with --bridge-port and the popup's base-port field. `
+      + `Last error: ${String(lastErr)}`,
+    );
   }
 
   /** True when a bound extension is connected and handshaken. */
@@ -453,8 +565,14 @@ export class Bridge extends EventEmitter {
       return;
     }
     if (msg.type === 'control-ack') {
-      const p = typeof msg.id === 'number' ? this.controlPending.get(msg.id) : undefined;
-      if (typeof msg.id === 'number') this.controlPending.delete(msg.id);
+      const id = typeof msg.id === 'number' ? msg.id : null;
+      const p = id === null ? undefined : this.controlPending.get(id);
+      // Only the socket a request was dispatched to may answer it. Correlating
+      // on the bare id let any peer — a parked one, or anything that got a
+      // socket — resolve the BOUND peer's pending control request with its own
+      // payload, e.g. handing `list-tabs` a different browser's tabs.
+      if (p && p.ws !== ws) return;
+      if (id !== null) this.controlPending.delete(id);
       if (msg.ok && typeof msg.tabId === 'number') peer.controlledTabId = msg.tabId;
       else if (msg.ok && msg.tabId === null) peer.controlledTabId = null;
       if (p) {
@@ -508,9 +626,11 @@ export class Bridge extends EventEmitter {
   /**
    * Throttled pairing rejection. Brute-forcing an 8-digit code (10^8) needs
    * ~10^8 attempts; an escalating delay past a small free allowance makes that
-   * infeasible even in parallel, since the failure counter is global. The
-   * delay is applied to the FAILURE path only — a correct code is checked
-   * first and never reaches here — so the legit extension is never penalized.
+   * infeasible. The counter is per-daemon (one Bridge per process), so N
+   * daemons running at once multiply the free allowance by N — still nowhere
+   * near 10^8. The delay is applied to the FAILURE path only — a correct code
+   * is checked first and never reaches here — so the legit extension is never
+   * penalized.
    */
   private rejectPairing(ws: WebSocket, kind: 'wrong' | 'missing'): void {
     const now = Date.now();
@@ -595,8 +715,14 @@ export class Bridge extends EventEmitter {
 
     const isResume = this.boundId === instanceId;
     const noBoundPeer = this.boundId === null;
-    const boundGone = !noBoundPeer && !isResume
-      && (this._state === 'EXPIRED' || this.boundPeer?.ws == null);
+    // A rival may take the session only once the incumbent is genuinely gone,
+    // and the GRACE TIMER is what decides that: EXPIRED, or nothing bound yet.
+    // DEGRADED must not qualify — the bound peer's `ws` is null for the whole
+    // grace window (handleClose nulls it), so admitting that condition meant a
+    // routine MV3 service-worker respawn was an open door: any other install
+    // reconnecting first took the session and demoted the returning incumbent
+    // to parked, mid-drive. Takeover inside the window stays explicit: `use()`.
+    const boundGone = !noBoundPeer && !isResume && this._state === 'EXPIRED';
     const matchesFilter = !this.bindFilter
       || browser.toLowerCase() === this.bindFilter
       || label.toLowerCase() === this.bindFilter;
@@ -610,8 +736,12 @@ export class Bridge extends EventEmitter {
       role = 'parked';
     }
 
+    // A takeover reads exactly like a first bind in the log otherwise, which is
+    // how "the session moved" hid behind "an extension connected".
     const reason = role === 'bound'
-      ? (isResume ? 'resume' : 'first-bind')
+      ? (isResume
+        ? 'resume'
+        : (noBoundPeer ? 'first-bind' : `takeover — ${this.describePeer(this.boundPeer)} never came back`))
       : (matchesFilter
         ? `${this.describePeer(this.boundPeer)} is bound`
         : `does not match --browser ${this.bindFilter}`);
@@ -621,7 +751,9 @@ export class Bridge extends EventEmitter {
 
     if (role === 'parked') {
       peer.role = 'parked';
-      this.rawSend(ws, { type: 'hello-ack', role: 'parked', graceMs: this.graceMs });
+      this.rawSend(ws, {
+        type: 'hello-ack', role: 'parked', daemonId: this.daemonId, graceMs: this.graceMs,
+      });
       this.emit('instances');
       return;
     }
@@ -645,6 +777,10 @@ export class Bridge extends EventEmitter {
     this.rawSend(ws, {
       type: 'hello-ack',
       role: 'bound',
+      // Identity of the DAEMON, not the port: the extension hands back any tab
+      // it was driving for a different daemon before it starts driving for this
+      // one. See the `daemonId` field.
+      daemonId: this.daemonId,
       sessionToken: this.sessionToken,
       graceMs: this.graceMs,
     });
@@ -815,13 +951,20 @@ export class Bridge extends EventEmitter {
     const previous = this.boundPeer;
     if (previous?.ws) {
       previous.role = 'parked';
-      this.rawSend(previous.ws, { type: 'role', role: 'parked' });
+      this.rawSend(previous.ws, { type: 'role', role: 'parked', daemonId: this.daemonId });
     }
     // Drop session state tied to the old instance. Tab ids are per-browser,
     // so refs MUST die here — the 'controlled' emit reuses the existing
     // ref-clearing path (CLAUDE.md invariant 3) for free.
     for (const p of this.pending.values()) p.reject(new BridgeInterrupted(p.method));
     this.pending.clear();
+    // Control requests belong to the instance they were dispatched to just as
+    // much as CDP does: a late ack arriving after the session moved would
+    // answer for a browser that is no longer the one being driven.
+    for (const p of this.controlPending.values()) {
+      p.reject(new Error('bridge: rebound to a different instance'));
+    }
+    this.controlPending.clear();
     for (const q of this.queue.splice(0)) q.reject(new Error('bridge: rebound to a different instance'));
     this.desiredControl = null;
 
@@ -830,7 +973,9 @@ export class Bridge extends EventEmitter {
     this._state = 'BOUND';
     this.sessionToken = crypto.randomBytes(16).toString('hex');
     this.noteBindChange();
-    this.rawSend(target.ws, { type: 'role', role: 'bound', sessionToken: this.sessionToken });
+    this.rawSend(target.ws, {
+      type: 'role', role: 'bound', daemonId: this.daemonId, sessionToken: this.sessionToken,
+    });
     this.log(`bridge: bound → ${this.describePeer(target)}`);
     this.emit('controlled', target.controlledTabId);
     this.emit('instances');
@@ -909,6 +1054,7 @@ export class Bridge extends EventEmitter {
         reject(new Error(`bridge: control(${target.action}) timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.controlPending.set(id, {
+        ws,
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);

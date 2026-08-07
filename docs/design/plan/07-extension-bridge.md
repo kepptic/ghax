@@ -192,9 +192,21 @@ strategy cascade, QA/perf/profile/download workflows, and all `ext` commands.
 Those remain available through `ghax attach --launch` and fail explicitly over
 the extension bridge.
 
+**Update (2026-08-06):** `upload` is now ported — `DOM.setFileInputFiles`
+takes a `backendNodeId` directly, so it reuses the exact ref-resolution path
+`click`/`fill` already established above instead of needing new CDP surface.
+See `register('upload', ...)` in `src/daemon.ts` and `BRIDGE_SUPPORTED_COMMANDS`.
+cookies/storage remain genuinely un-ported (browser-context, not page-context).
+
 Remaining product work is handshake authentication and packaging (signed
 `.crx` / store listing versus unpacked team use). Authentication is deliberately
 outside this parity change.
+
+**Multi-agent (2026-08-07):** the "one controlled tab at a time" framing above
+is now per-*connection*, not per-extension. The extension holds one connection
+per daemon (port scan) and one debugger attachment per connection, with a shared
+tab-ownership registry — see
+[09-bridge-multi-agent.md](./09-bridge-multi-agent.md).
 
 ## Alternatives considered and rejected
 

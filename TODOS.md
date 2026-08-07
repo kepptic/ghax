@@ -10,6 +10,82 @@ belong here — either flesh it out or close it.
 
 ## Open
 
+### Bridge robustness: five deferred findings from the multi-agent review (P2)
+
+Found by adversarial review of the multi-agent bridge (2026-08-07,
+design/plan/09). All are pre-existing or low-severity; the blocking ones
+were fixed in that change. Each is independent — pick one off at a time.
+
+1. **Anonymous sockets never time out.** `src/bridge.ts` `handleConnection`
+   registers listeners and returns; a socket that never sends `hello` has no
+   `Peer`, so `checkLiveness` (which starts `const peer = this.boundPeer`)
+   never sees it. 25 silent sockets stayed open past 3× the liveness window
+   in a probe, invisible to `ghax bridge instances` and every log line. Also
+   reachable innocently: the extension opens the socket, then awaits four
+   `chrome.storage` reads before sending `hello`, so an eviction in that
+   window orphans it. Fix: arm a ~10s no-hello timer in `handleConnection`
+   that `terminate()`s, plus a hard connection cap.
+
+2. **A closed tab can produce an endless reattach loop.** `extension/errors.js`
+   classifies `no tab with given id` as *temporarily* unattachable — correct
+   for `relayCommand`, wrong for `scheduleReattach`, which reschedules itself
+   forever (4s cap, no attempt budget, never clears `controlledTabId`).
+   Reached when a tab closes while this connection is not its registered
+   owner, since `chrome.tabs.onRemoved` only notifies `ownerOf(tabId)`. Fix:
+   `chrome.tabs.get` first in the reattach path and `persistTab(null)` when
+   the tab is gone.
+
+3. **`DEAD_DIAL_THRESHOLD` fires at ~7.5s, not the "tens of seconds" its
+   comment and design/plan/09 both claim.** `failedDials` only counts dials
+   that never reach OPEN, and the backoff restarts from `RECONNECT_BASE_MS`
+   after the last successful open: 500+1000+2000+4000 ≈ 7.5s. Any daemon
+   restart slower than that drops the tab to a rival — the exact scenario the
+   constant exists to prevent. Fix: raise the threshold (~8 gets a real ~30s)
+   or correct the comment and the doc.
+
+4. **`releaseControl()` leaves persistence claiming the tab.** It drops the
+   `tabOwners` entry but keeps `controlledTabId` and never re-saves, so when
+   a rival claims the tab its `persistTab` rebuilds the map from live
+   connections and storage ends up with BOTH ports naming it. After a worker
+   respawn `ensureConnections` walks ports ascending, so the lower port —
+   the connection whose daemon was declared dead — wins. Fix: have
+   persistence record ownership rather than desire, or clear the entry on
+   release.
+
+5. **`peers` is never pruned** (`src/bridge.ts`) — one `Peer` per distinct
+   `instanceId`, including synthetic `legacy-N` ids, removed never. Ghosts
+   accumulate in `ghax bridge instances`; unbounded if (1) is exploited.
+
+Also noted, decide when touching this area: `bridgeStatus` in
+`chrome.storage.local` is written on every failed dial (≈1.25 LevelDB
+writes/sec with no daemon running) and has **no reader** — the popup uses
+`chrome.runtime.sendMessage({action:'status'})`. Either delete the key or
+stop writing it on dial failures.
+
+### Bridge pairing: challenge–response handshake (P1)
+
+**What:** Stop sending the pairing code itself in the extension's `hello`.
+Daemon includes a random nonce in a pre-hello frame (or the extension
+requests one); the extension answers `HMAC-SHA256(code, nonce)`; the daemon
+verifies against its stored code. The code never travels the wire.
+
+**Why:** Since the multi-agent port scan (2026-08-07, design/plan/09), the
+extension sends its `hello` — pairing token included — to whatever answers
+on any of ports 9223–9232, persistently. A rogue local process listening on
+any scanned port captures the token and can impersonate the browser to a
+genuinely paired daemon. Localhost-only and opt-in, so shipped with a
+documented note (see the Security section of design/plan/09), but it
+quietly weakens the exact threat model pairing was added for.
+
+**Context to restart cold:** pairing gate lives in `src/bridge.ts`
+(`handleHello`, `rejectPairing`, `timingSafeEqualStr`); the extension side
+is the `hello` construction in `extension/background.js` `connect()`'s open
+handler (`ghaxPairToken` from `chrome.storage.local`). Keep the brute-force
+throttle and the dormancy-on-reject behavior; only the proof mechanism
+changes. Needs a protocol-version dance so a new extension still pairs with
+an old daemon (fall back to bare token only if the daemon never offers a
+nonce). Add sim coverage in `test/bridge-sim.ts`.
+
 ### Split `src/daemon.ts` by domain
 
 

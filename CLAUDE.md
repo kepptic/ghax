@@ -194,6 +194,30 @@ GHAX_STATE_FILE=/tmp/ghax-conduit.json ghax new-window https://conduit-dash.dagt
 Each agent has its own daemon + window. They share the browser process
 (same profile, same auth) but can't see each other's active-tab pointer.
 
+### Multi-agent over the bridge (the user's REAL session)
+
+```bash
+# Agent A
+GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach --extension --control-active
+
+# Agent B — port 9223 is taken, so this daemon auto-picks 9224 and prints it
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://target.example
+```
+
+Same shape as above, over `chrome.debugger` instead of CDP. Two rules that
+don't apply on the CDP transport:
+
+- **One tab, one agent.** `ghax tab <id>` / `bridge control --tab-id` /
+  `control --active` on a tab another agent drives is REFUSED, naming the
+  owning bridge port. Read `controlledBy` in `ghax tabs` before pointing at
+  a tab, or just use `new-window`.
+- **The extension must be reloaded** in `edge://extensions` after a ghax
+  update — a pre-v0.3 extension dials only the base port, so agent B's
+  daemon waits forever for a connection it will never get.
+
+See `design/plan/09-bridge-multi-agent.md`.
+
 ## Build, test, verify
 
 Every change must pass:

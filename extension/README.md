@@ -50,9 +50,13 @@ alive and self-healing so you don't have to babysit it:
   30s floor, so a single alarm left a 30s worst-case gap; two halve it.
 - While connected it sends `{type:"ping"}` every ~15s; the daemon replies
   `{type:"pong"}`. Active traffic extends the worker's lifetime.
-- The controlled tab id is persisted in `chrome.storage.local`, so a
-  respawned worker re-attaches to it, and the daemon re-asserts the desired
-  control target on every reconnect.
+- Each connection's controlled tab id is persisted in `chrome.storage.local`
+  (`controlledTabs`, keyed by daemon port and stamped with the daemon's id),
+  so a respawned worker re-attaches to them, and each daemon re-asserts its
+  desired control target on every reconnect. A port is a pool slot, so an
+  entry stamped with a *different* daemon id is discarded rather than
+  restored — the next agent to bind that port never inherits the previous
+  agent's tab.
 - If the worker dies mid-session, the daemon holds the session open for a
   **grace window** (20s) rather than failing outright: commands issued during
   the gap queue and run on reconnect. Read-only commands interrupted in
@@ -67,13 +71,16 @@ action needed.
 
 ```
 ghax CLI (Rust)  --HTTP RPC-->  ghax daemon (Node)  --WebSocket-->  this extension  --chrome.debugger-->  your real tab
-                                  (src/bridge.ts)         :9223         (background.js)
+                                  (src/bridge.ts)      :9223-9232       (background.js)
 ```
 
-- The daemon opens a WebSocket server on `127.0.0.1:9223` (override via
-  `GHAX_BRIDGE_PORT`, or set `bridgePort` in this extension's
-  `chrome.storage.local` if you need a different port on the extension
-  side too).
+- The daemon opens a WebSocket server on the first free port from
+  `127.0.0.1:9223` up to `:9232` (base overridable via `GHAX_BRIDGE_PORT` /
+  `ghax attach --extension --bridge-port`, which pins it exactly instead of
+  scanning). This extension dials all ten, so several daemons — one per agent
+  — can drive this browser at once. Set `bridgePort` in this extension's
+  `chrome.storage.local` (the popup's base-port field) to move the whole
+  window.
 - The extension's background service worker connects to it and sends
   `{"type":"hello", instanceId, browser, label, ...}`. The daemon answers
   with `{"type":"hello-ack", role}` — see **Multiple browsers** below — and
@@ -83,12 +90,31 @@ ghax CLI (Rust)  --HTTP RPC-->  ghax daemon (Node)  --WebSocket-->  this extensi
   `{id, result}` / `{id, error}`. CDP events (e.g. `Page.loadEventFired`)
   come back as `{"type":"event",...}`.
 
+## Multiple agents (one browser, one daemon each)
+
+Several agents can drive this browser at the same time, each on its own tab.
+Each agent runs its own daemon (its own `GHAX_STATE_FILE`); the daemons take
+adjacent ports in the scan window, and this extension holds one connection
+and one `chrome.debugger` attachment per daemon.
+
+```bash
+GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach --extension --control-active
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension   # takes :9224
+```
+
+The popup shows one row per daemon, each with its own **Control this tab** /
+**Stop**. A tab may be driven by exactly one agent: pointing a second one at
+it is refused, naming the bridge port to go stop it on. `ghax tabs` reports
+`controlledBy` (the owning agent's port, or `null`) so an agent can pick a
+free tab up front. Design notes:
+`docs/design/plan/09-bridge-multi-agent.md`.
+
 ## Multiple browsers (or multiple profiles)
 
-Every install of this extension dials the same `127.0.0.1:9223`. Because
-MV3 extensions are per-profile, loading this directory in Edge *and* Chrome
-— or in two Edge profiles — means several service workers competing for one
-daemon.
+Because MV3 extensions are per-profile, loading this directory in Edge *and*
+Chrome — or in two Edge profiles — means several service workers competing
+for one daemon. (This is the other axis from multi-agent above: several
+browsers per daemon, rather than several daemons per browser.)
 
 The daemon keeps a **registry** rather than one anonymous socket:
 

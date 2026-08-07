@@ -172,7 +172,7 @@ const handlers = new Map<string, Handler>();
 const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'status', 'tabs', 'tab', 'find', 'newWindow',
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
-  'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type',
+  'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
@@ -908,6 +908,8 @@ async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null):
       title: typeof tab.title === 'string' ? tab.title : '',
       url: typeof tab.url === 'string' ? tab.url : '',
       active: Boolean(tab.active),
+      // Absent from pre-v0.3 extensions, which knew of only one agent.
+      controlledBy: typeof tab.controlledBy === 'number' ? tab.controlledBy : null,
     }];
   });
 }
@@ -1054,8 +1056,9 @@ register('tabs', async (ctx, _args, opts) => {
     }
   }
   // --fields accepts a csv list of keys to keep. Valid keys: id, title,
-  // url, active. Invalid keys are ignored silently so a typo can't kill
-  // the whole command mid-session. Omitted → return every field.
+  // url, active (plus controlledBy in bridge mode). Invalid keys are ignored
+  // silently so a typo can't kill the whole command mid-session. Omitted →
+  // return every field.
   const fieldsArg = (opts.fields as string | undefined) ?? null;
   const fields: Set<string> | null = fieldsArg
     ? new Set(fieldsArg.split(',').map((s) => s.trim()).filter(Boolean))
@@ -1065,7 +1068,13 @@ register('tabs', async (ctx, _args, opts) => {
   // instance. Safe because chrome.tabs.query needs no debugger attachment.
   const browserSel = (opts.browser as string | undefined) ?? null;
   const all = ctx.bridgeMode
-    ? (await listBridgeTabs(ctx, browserSel)).map((t) => ({ id: String(t.id), title: t.title, url: t.url, active: t.active }))
+    ? (await listBridgeTabs(ctx, browserSel)).map((t) => ({
+        id: String(t.id), title: t.title, url: t.url, active: t.active,
+        // Which agent owns each tab. `active` only ever means "mine", so
+        // without this a second agent's tab is indistinguishable from a free
+        // one until the control attempt is refused.
+        controlledBy: t.controlledBy,
+      }))
     : await Promise.all(
         (await allPages(ctx)).map(async (p) => {
           const [id, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
@@ -2411,14 +2420,47 @@ register('press', async (ctx, args) => {
 // Wraps Playwright's locator.setInputFiles so operators don't have to
 // hand-roll the DOM.setFileInputFiles CDP call every time. Accepts a
 // single path or a comma-separated list for multi-file inputs.
-// Paths are resolved relative to the daemon's cwd (captured at attach).
+// Non-bridge mode: Playwright resolves relative paths against the daemon's
+// cwd (captured at attach) for you.
+//
+// Bridge mode: same DOM.setFileInputFiles CDP call, just dispatched via
+// chrome.debugger instead of Playwright's local connectOverCDP transport.
+// `resolveBridgeTarget` already hands back the backendNodeId that
+// bridgeBox/bridgeCallOn use for click/fill, and DOM.setFileInputFiles
+// accepts backendNodeId directly — no objectId resolution needed. The one
+// real difference from the non-bridge path: there is no Playwright to
+// resolve a relative path for you, and `path.resolve()` on the daemon side
+// would silently resolve against the DAEMON's cwd (captured when `ghax
+// attach` ran) rather than the directory the user typed `ghax upload`
+// from — either erroring, or worse, silently uploading a same-named file
+// that happens to exist in the attach directory. So bridge mode requires
+// an absolute path and rejects anything else with an actionable error
+// instead of guessing.
 register('upload', async (ctx, args) => {
   const target = String(args[0] ?? '');
   const pathArg = String(args[1] ?? '');
   if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
+  const paths = pathArg.split(',').map((p) => p.trim()).filter(Boolean);
+  if (ctx.bridgeMode) {
+    const ref = await resolveBridgeTarget(ctx, target);
+    for (const p of paths) {
+      if (!path.isAbsolute(p)) {
+        throw new Error(
+          `upload: bridge mode requires an absolute path, got "${p}". ` +
+            `The daemon's working directory (${process.cwd()}) is not necessarily where you ran ` +
+            `\`ghax upload\` from, so relative paths can't be resolved safely — pass an absolute path instead.`
+        );
+      }
+      if (!fs.existsSync(p)) throw new Error(`upload: file not found: ${p}`);
+    }
+    await requireBridge(ctx).send('DOM.setFileInputFiles', {
+      backendNodeId: ref.backendNodeId,
+      files: paths,
+    });
+    return { ok: true, count: paths.length };
+  }
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
-  const paths = pathArg.split(',').map((p) => p.trim()).filter(Boolean);
   await loc.setInputFiles(paths.length === 1 ? paths[0] : paths);
   return { ok: true, count: paths.length };
 });
@@ -4010,7 +4052,13 @@ async function main() {
   // `connectOverCDP` at all, so GHAX_CDP_HTTP_URL/GHAX_CDP_BROWSER_URL are
   // only mandatory on the normal path.
   const bridgeMode = process.env.GHAX_BRIDGE === '1';
-  const bridgePort = Number(process.env.GHAX_BRIDGE_PORT) || 9223;
+  // The BASE of the scan window. Unless the user asked for a specific port,
+  // the bridge walks up from here until it finds a free one — that's what lets
+  // a second agent's daemon coexist with the first (see bridge.ts
+  // `Bridge.create` and docs/design/plan/09-bridge-multi-agent.md).
+  const bridgePortBase = Number(process.env.GHAX_BRIDGE_PORT) || 9223;
+  const bridgePortExplicit = process.env.GHAX_BRIDGE_PORT_EXPLICIT === '1';
+  let bridgePort = bridgePortBase;
   if (!bridgeMode && (!cdpHttpUrl || !cdpBrowserUrl)) {
     console.error('ghax daemon: missing GHAX_CDP_HTTP_URL / GHAX_CDP_BROWSER_URL env');
     process.exit(4);
@@ -4025,7 +4073,7 @@ async function main() {
       // best-effort
     }
   };
-  log(bridgeMode ? `daemon starting in bridge mode, wsPort=${bridgePort}` : `daemon starting, cdpHttp=${cdpHttpUrl}`);
+  log(bridgeMode ? `daemon starting in bridge mode, wsPort=${bridgePortBase}${bridgePortExplicit ? '' : '+'}` : `daemon starting, cdpHttp=${cdpHttpUrl}`);
 
   // Defense-in-depth: a stray async throw (e.g. inside a CDP event handler,
   // where there's no promise for the caller to await) must not silently kill
@@ -4048,16 +4096,32 @@ async function main() {
     // Opt-in pairing code (GHAX_BRIDGE_PAIR_CODE). Closes the localhost
     // "any local process can drive the browser" gap; off unless requested.
     const pairCode = process.env.GHAX_BRIDGE_PAIR_CODE || null;
-    bridge = new Bridge(bridgePort, log, pairCode ? { pairCode } : {});
+    let started: Bridge;
+    try {
+      started = await Bridge.create(bridgePortBase, log, {
+        ...(pairCode ? { pairCode } : {}),
+        // An explicitly requested port must not silently land elsewhere.
+        scan: !bridgePortExplicit,
+      });
+    } catch (err) {
+      // No usable port means no bridge at all — exiting with the reason on
+      // stderr is what surfaces it through the CLI's spawn-failure path.
+      const message = (err as { message?: string } | null)?.message ?? String(err);
+      log(`bridge: ${message}`);
+      console.error(`ghax daemon: ${message}`);
+      process.exit(5);
+    }
+    bridge = started;
+    bridgePort = started.port;
     if (pairCode) log(`bridge: pairing required — extensions must supply the code`);
     log(`bridge: listening on ws://127.0.0.1:${bridgePort} — waiting for extension`);
-    bridge.on('hello', (info: { agent?: string; version?: string }) => {
+    started.on('hello', (info: { agent?: string; version?: string }) => {
       log(`bridge: extension connected (${info.agent ?? 'unknown'} v${info.version ?? '?'})`);
     });
-    bridge.on('controlled', (tabId: number | null) => {
+    started.on('controlled', (tabId: number | null) => {
       log(`bridge: controlled tab = ${tabId ?? 'none'}`);
     });
-    bridge.on('disconnect', () => {
+    started.on('disconnect', () => {
       log('bridge: extension disconnected — waiting for reconnect');
     });
     // `ghax attach --extension --control-active` sets this so the extension
@@ -4065,7 +4129,7 @@ async function main() {
     // click. Stored (not sent) here; the Bridge's `hello` handler sends it
     // once the extension is live, and re-asserts it on every reconnect.
     if (process.env.GHAX_BRIDGE_CONTROL === 'active') {
-      bridge.setDesiredControl({ action: 'control-active' });
+      started.setDesiredControl({ action: 'control-active' });
       log('bridge: will control the active tab on connect (--control-active)');
     }
     // `ghax attach --extension --browser edge|chrome|<label>` restricts which
@@ -4073,7 +4137,7 @@ async function main() {
     // another profile) parks instead of racing for the session.
     const bindFilter = process.env.GHAX_BRIDGE_BROWSER;
     if (bindFilter && bindFilter.trim()) {
-      bridge.setBindFilter(bindFilter);
+      started.setBindFilter(bindFilter);
       log(`bridge: only '${bindFilter}' may bind — other instances will park`);
     }
   } else {
@@ -4213,6 +4277,9 @@ async function main() {
       json(res, 200, {
         ok: true,
         bridgeMode,
+        // The port actually bound, which may not be the one requested when
+        // another agent's daemon already holds it.
+        bridgePort: ctx.bridge?.port ?? null,
         connected: ctx.bridge?.connected ?? false,
         controlledTabId: ctx.bridge?.controlledTabId ?? null,
         extensionInfo: ctx.bridge?.extensionInfo ?? null,
