@@ -903,6 +903,7 @@ fn build_daemon_cmd(
 fn build_daemon_cmd_bridge(
     cfg: &Config,
     bridge_port: u16,
+    port_explicit: bool,
     control_active: bool,
     bind_filter: Option<&str>,
     pair_code: Option<&str>,
@@ -919,6 +920,12 @@ fn build_daemon_cmd_bridge(
         .env("GHAX_BRIDGE", "1")
         .env("GHAX_BRIDGE_PORT", bridge_port.to_string())
         .env("GHAX_BROWSER_KIND", "chrome");
+    // Without --bridge-port the daemon walks up from the base until it finds a
+    // free port, which is how a second agent's daemon gets a bridge at all. An
+    // explicit port is a request, not a hint: it binds or it fails.
+    if port_explicit {
+        cmd.env("GHAX_BRIDGE_PORT_EXPLICIT", "1");
+    }
     if control_active {
         cmd.env("GHAX_BRIDGE_CONTROL", "active");
     }
@@ -991,6 +998,7 @@ fn spawn_daemon(
 fn spawn_daemon_bridge(
     cfg: &Config,
     bridge_port: u16,
+    port_explicit: bool,
     control_active: bool,
     bind_filter: Option<&str>,
     pair_code: Option<&str>,
@@ -998,7 +1006,10 @@ fn spawn_daemon_bridge(
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        build_daemon_cmd_bridge(cfg, bridge_port, control_active, bind_filter, pair_code, &bundle, stderr_file)
+        build_daemon_cmd_bridge(
+            cfg, bridge_port, port_explicit, control_active, bind_filter, pair_code, &bundle,
+            stderr_file,
+        )
     })
 }
 
@@ -1447,12 +1458,13 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
-    let bridge_port: u16 = parsed
+    let requested_port = parsed
         .flags
         .get("bridge-port")
         .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(9223);
+        .and_then(|s| s.parse::<u16>().ok());
+    let port_explicit = requested_port.is_some();
+    let bridge_port: u16 = requested_port.unwrap_or(9223);
     let control_active = matches!(
         parsed.flags.get("control-active"),
         Some(serde_json::Value::Bool(true))
@@ -1490,13 +1502,30 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     if let Some(code) = &pair_code {
         println!("  ⚷  Pairing required. In the ghax bridge popup, enter this code: {code}");
     }
-    println!(
-        "Starting daemon in bridge mode — waiting for the extension on ws://127.0.0.1:{bridge_port} (up to 60s)..."
-    );
+    println!("Starting daemon in bridge mode (up to 60s)...");
 
-    let state = spawn_daemon_bridge(cfg, bridge_port, control_active, bind_filter, pair_code.as_deref())?;
+    let state = spawn_daemon_bridge(
+        cfg,
+        bridge_port,
+        port_explicit,
+        control_active,
+        bind_filter,
+        pair_code.as_deref(),
+    )?;
 
-    match wait_for_extension(state.port, Duration::from_secs(60), control_active) {
+    // The daemon may have auto-picked a higher port because another agent's
+    // daemon already holds the base one. Report where it ACTUALLY landed — the
+    // extension scans the whole window, so this needs no action, but a user
+    // debugging two sessions has to be able to tell them apart.
+    let actual_port = bridge_port_from_state(&state).unwrap_or(bridge_port);
+    if actual_port != bridge_port {
+        println!(
+            "  Port {bridge_port} was busy (another ghax daemon?) — this one took {actual_port}."
+        );
+    }
+    println!("Waiting for the extension on ws://127.0.0.1:{actual_port}...");
+
+    match wait_for_extension(state.port, actual_port, Duration::from_secs(60), control_active) {
         Ok((info, controlled_tab)) => {
             let label = match info {
                 Some((agent, version)) => format!(" ({agent} v{version})"),
@@ -1507,7 +1536,7 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 None => String::new(),
             };
             println!(
-                "ghax bridge: extension connected{label}{tab_note} — pid {}, port {}",
+                "ghax bridge: extension connected{label}{tab_note} — pid {}, port {}, bridge port {actual_port}",
                 state.pid, state.port
             );
             Ok(EXIT_OK)
@@ -1519,12 +1548,29 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 }
 
+/// The bridge WebSocket port the daemon actually bound, parsed out of the
+/// state file's `browserUrl` (`bridge://127.0.0.1:9224`). The daemon may not
+/// have got the port that was asked for — another agent's daemon holds it —
+/// so this is the only authoritative source.
+fn bridge_port_from_state(state: &DaemonState) -> Option<u16> {
+    state
+        .browser_url
+        .strip_prefix("bridge://")?
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Poll `GET /bridge-status` on the daemon until the extension's `hello`
 /// handshake lands (and, when `require_control` is set, until it reports a
 /// controlled tab), or `timeout` elapses. Returns the extension's
-/// `(agent, version)` plus the controlled tab id (if any).
+/// `(agent, version)` plus the controlled tab id (if any). `port` is the
+/// daemon's RPC port; `bridge_port` only appears in the timeout message, which
+/// has to name the WebSocket the extension failed to reach.
 fn wait_for_extension(
     port: u16,
+    bridge_port: u16,
     timeout: Duration,
     require_control: bool,
 ) -> Result<(Option<(String, String)>, Option<i64>)> {
@@ -1568,7 +1614,7 @@ fn wait_for_extension(
                 ""
             };
             return Err(anyhow::anyhow!(
-                "timed out after 60s waiting for the ghax bridge extension on :{port}.\n  \
+                "timed out after 60s waiting for the ghax bridge extension on :{bridge_port}.\n  \
                  Check: extension loaded unpacked (developer mode on), and — without --control-active — \
                  that you clicked \"Control this tab\" in its popup. The daemon is still running — \
                  `ghax detach` to stop it, or retry once the extension is loaded.{extra}"
@@ -1694,4 +1740,38 @@ unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
 #[allow(dead_code)]
 unsafe fn libc_kill(_pid: i32, _sig: i32) -> i32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_browser_url(browser_url: &str) -> DaemonState {
+        DaemonState {
+            pid: 1234,
+            port: 9222,
+            browser_url: browser_url.to_string(),
+            browser_kind: String::new(),
+            attached_at: String::new(),
+            cwd: String::new(),
+        }
+    }
+
+    #[test]
+    fn bridge_port_from_state_parses_the_bridge_url() {
+        let state = state_with_browser_url("bridge://127.0.0.1:9224");
+        assert_eq!(bridge_port_from_state(&state), Some(9224));
+    }
+
+    #[test]
+    fn bridge_port_from_state_rejects_a_non_bridge_url() {
+        let state = state_with_browser_url("http://127.0.0.1:9222");
+        assert_eq!(bridge_port_from_state(&state), None);
+    }
+
+    #[test]
+    fn bridge_port_from_state_rejects_an_unparseable_port() {
+        let state = state_with_browser_url("bridge://host:notaport");
+        assert_eq!(bridge_port_from_state(&state), None);
+    }
 }
