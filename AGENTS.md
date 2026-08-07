@@ -14,7 +14,7 @@ If you just arrived and need to install: see [llms.txt](./llms.txt) for the inst
 
 1. **CLI is Rust. Daemon is Node.** The CLI calls the daemon via HTTP RPC on 127.0.0.1. Do not add browser-automation calls to the Rust side. Do not add daemon bundling to the Rust side. The split is load-bearing.
 
-2. **Single daemon per state file.** `.ghax/ghax.json` at the git root stores `{pid, port, browserKind, browserUrl, cwd}`. Never spawn a second daemon pointing at the same state file. For parallel agents, use `GHAX_STATE_FILE=/tmp/ghax-<name>.json`.
+2. **Single daemon per state file.** `.ghax/ghax.json` at the git root stores `{pid, port, browserKind, browserUrl, cwd}`. Never spawn a second daemon pointing at the same state file. For parallel agents, use `GHAX_STATE_FILE=/tmp/ghax-<name>.json`. This holds on the bridge too — each agent's daemon auto-picks a bridge port in 9223–9232 and the extension multiplexes between them, one tab per agent (`docs/design/plan/09-bridge-multi-agent.md`).
 
 3. **Refs survive only until the next snapshot, only on the tab they were taken on.** `ghax click @e3` looks up `@e3` against the daemon's last snapshot ref map. If the DOM changed, re-snapshot first. The `tab` and `new-window` handlers clear the ref map when the active page changes.
 

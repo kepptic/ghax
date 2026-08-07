@@ -7,6 +7,77 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Multi-agent bridge — several agents driving one real browser, each on its
+  own tab.** Two things made this impossible before, and both are fixed.
+  (1) `extension/background.js` was a singleton — one socket, one
+  `controlledTabId` — so every relayed CDP command dispatched to the same tab
+  no matter which session asked ("tab id is always the same"). It is now a
+  multiplexer: one `BridgeConnection` per daemon, one `chrome.debugger`
+  attachment per connection, and a shared tab-ownership registry so two agents
+  can't claim one tab. (2) Every bridge daemon demanded port 9223, so a second
+  agent's daemon (own `GHAX_STATE_FILE`) could never get an extension
+  connection; `Bridge.create` now walks ports 9223–9232 and the port it
+  actually bound flows into the state file, the daemon log, and what
+  `ghax attach --extension` prints. Recipe:
+  `GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach --extension` in one agent,
+  the same with a different state file in the next.
+  - `ghax tabs` gains **`controlledBy`** in bridge mode — the owning agent's
+    bridge port, or `null` when the tab is free. `active` keeps its old
+    meaning ("mine"), so another agent's tab never reads as available.
+  - Pointing an agent at a tab another one drives is refused with the port to
+    go stop it on, rather than two sessions silently sharing a page. This
+    matters doubly because `chrome.debugger.attach` reports "already attached"
+    as a success the extension deliberately swallows.
+  - Ownership survives a service-worker eviction, a daemon restart, and the
+    grace window; it is released on explicit stop, tab close, a pairing
+    rejection, and a daemon unreachable across several scan rounds.
+  - **A tab belongs to a daemon, not to a port.** Ports are pool slots, so
+    persisting the control target per port would hand the next agent to land
+    on a freed one whatever tab (and live `chrome.debugger` attachment) the
+    previous agent left behind — nothing detaches when a daemon exits. Each
+    `Bridge` mints a `daemonId` and sends it in `hello-ack`; the extension
+    stores it alongside the tab, hands the tab back the moment a port's daemon
+    id changes, and restores a persisted entry only for a matching id (an
+    entry with no id at all is an unknown daemon, and is discarded). It also
+    reports its controlled tab on every disposition, so a connection whose
+    attachment outlived the socket can no longer leave the daemon believing
+    the tab is free.
+  - **A switch that can't attach is a no-op.** `switchControlTo` claimed and
+    persisted the new tab before the attach that can still refuse
+    permanently, so a failed switch left the extension moved and the daemon —
+    which sees only `ok:false` — still on the old tab. The two then disagree
+    about which document is under control, and a stale `@e3` resolves against
+    the new page (CLAUDE.md invariant 3) with nothing to show it moved.
+    Ownership now rolls back before the error propagates.
+  - **A detach only ever tears down a tab this connection owns.**
+    `chrome.debugger` sessions are per (extension, tab) and all connections in
+    the worker share one, so the unguarded detaches in `stopControl` and the
+    transient-refusal retry could rip another agent's session out mid-command
+    — reachable because releasing a tab deliberately keeps it recorded as the
+    one this agent wants.
+  - An explicit `--bridge-port` no longer scans: it binds or fails with
+    "omit --bridge-port to auto-pick a free one".
+  - **Reload the extension in `edge://extensions` after updating** (bumped to
+    v0.3.0). A pre-v0.3 extension still works for one agent — it dials only
+    the base port — but a second agent's daemon will wait for a connection it
+    never makes. A new extension against an old single-port daemon works
+    unchanged: the base port is just one of the ten it scans.
+  - **Only the base port may read silence as consent.** A connection that got
+    no answer to its handshake used to self-promote to `bound` after a second,
+    the compatibility path for pre-v2 daemons. With nine additional — and
+    normally free — scanned ports, any local process could accept a socket,
+    say nothing, and be handed CDP over the user's real authenticated session
+    without ever presenting a pairing code. The fallback now applies only on
+    the configured base port (the only port a pre-v2 daemon ever listened on),
+    and a connection with no role can no longer attach or claim a tab at all.
+  - `test/bridge-multi-sim.ts` (`npm run test:bridge-multi-sim`) — the
+    browser-free counterpart to the bridge simulator, covering port
+    allocation, ownership conflicts, release, `controlledBy`, per-tab
+    event routing, the base-port-only legacy fallback, daemon-identity
+    rebinding on a reused port, rollback of a failed switch, the grace
+    window's protection of the incumbent, and control-ack correlation.
+    Design notes:
+    `docs/design/plan/09-bridge-multi-agent.md`.
 - **Opt-in bridge pairing** (`ghax attach --extension --pair`). The bridge
   WebSocket is localhost-only, but any local process could previously drive
   the browser through it. `--pair` mints an 8-digit code from the OS CSPRNG
@@ -139,6 +210,24 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   silent preference order was the stale-binary trap.
 
 ### Fixed
+- **Bridge: the grace window now actually protects the driver.** A rival
+  instance's `hello` was accepted whenever the bound peer's socket was gone —
+  which is true for the whole DEGRADED window, since that is precisely what
+  DEGRADED means. So any other install that reconnected during a routine MV3
+  service-worker respawn took the session, and the returning incumbent came
+  back demoted to `parked`, detached from the tab it had been driving. Binding
+  a *different* instance now requires UNBOUND or EXPIRED: the grace timer is
+  what decides the incumbent is gone, rivals park (non-destructive), and
+  takeover stays explicit via `ghax bridge use`. The daemon log also names a
+  takeover as one instead of reporting it as `first-bind`.
+- **Bridge: a control reply is only accepted from the socket it was sent to.**
+  `control-ack` was correlated by id alone, and ids are minted per daemon
+  rather than per peer — so a parked (or merely noisy) peer answering id 1
+  resolved the BOUND peer's pending request with its own payload, e.g. handing
+  `ghax tabs` a different browser's tabs. The dispatching socket is now stored
+  with the resolver and an ack arriving anywhere else is ignored;
+  `ghax bridge use` also rejects in-flight control requests, which previously
+  stayed dangling for a late ack after the session had already moved.
 - **Bridge: post-navigation reads no longer fail with `uniqueContextId not
   found`.** `bridgeEval` has always carried a self-heal — clear the context
   map, re-`Runtime.enable`, re-resolve, retry — for exactly this case, but its

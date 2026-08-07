@@ -181,9 +181,9 @@ ghax bridge control --tab-id <n>            # or point it at a specific tab (see
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
-Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); reload the unpacked extension after updating ghax; the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act.
+Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); reload the unpacked extension after updating ghax; the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
 
-**Several browsers, or several profiles.** Every install of the extension dials the same port, so loading it in Edge *and* Chrome (or in two profiles) means several service workers reaching one daemon. Exactly one is **bound** and drives; the rest are **parked** — socket open, but no debugger attachment and no CDP. Parked peers stay quiet by design: closing their socket would restart their reconnect loop, which is what used to make two installs evict each other indefinitely.
+**Several browsers, or several profiles — one daemon.** Loading the extension in Edge *and* Chrome (or in two profiles) means several service workers reaching one daemon. Exactly one is **bound** and drives; the rest are **parked** — socket open, but no debugger attachment and no CDP. Parked peers stay quiet by design: closing their socket would restart their reconnect loop, which is what used to make two installs evict each other indefinitely.
 
 ```bash
 ghax bridge instances                    # who's connected, who's driving
@@ -193,6 +193,19 @@ ghax attach --extension --browser edge   # only Edge may bind; others park
 ```
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
+
+**Several agents, one browser.** The other axis: two agents driving *different tabs of the same real session*. Each agent gets its own daemon (its own `GHAX_STATE_FILE`, per the isolation rule below), the daemons auto-pick adjacent bridge ports, and the extension holds one connection and one debugger attachment per daemon. No browser-side configuration — the extension scans the port window the daemons allocate from.
+
+```bash
+# Agent A
+GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach --extension --control-active
+
+# Agent B — 9223 is taken, so this daemon takes 9224 and says so
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://target.example
+```
+
+One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's bridge port, or `null` when free), and pointing an agent at a tab another one already drives is refused with the port to go stop it on, rather than two sessions quietly sharing a page. Design notes: [`09-bridge-multi-agent.md`](docs/design/plan/09-bridge-multi-agent.md).
 
 **Resilience.** If the service worker is evicted mid-session, the daemon holds the session open for a grace window instead of failing: commands issued during the gap queue and run on reconnect, each still honouring its own deadline. Read-only commands interrupted in flight are replayed; anything that could have mutated the page reports `BRIDGE_OUTCOME_UNKNOWN` — "the action MAY have landed, verify with `ghax snapshot`" — rather than risking a double-submit.
 
@@ -269,6 +282,8 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
 ```
 
 Same browser process, separate windows and separate daemon state. Neither agent sees the other's active-tab pointer.
+
+The same recipe works over the bridge — swap `ghax attach` for `ghax attach --extension`. The daemons auto-pick adjacent bridge ports and the extension multiplexes between them; a tab may only be driven by one agent at a time. See [Real session via the ghax bridge](#real-session-via-the-ghax-bridge-experimental-v05).
 
 ---
 
