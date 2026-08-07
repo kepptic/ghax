@@ -663,6 +663,13 @@ async function main(): Promise<void> {
     await withBridge(async (bridge, port, logs) => {
       // Legacy clients get a fresh synthetic id each hello, so alternating
       // them is exactly the pre-identity fight the detector exists to name.
+      //
+      // Each cycle waits out the GRACE WINDOW, because that is now the only
+      // thing that can hand the session to a different instance: a rival
+      // arriving while the incumbent is merely DEGRADED parks instead of
+      // taking over (see `boundGone` in handleHello). Ownership flapping is
+      // therefore slower than it used to be — and still exactly what the
+      // detector is looking for.
       for (let i = 0; i < 4; i++) {
         const ws = new WebSocket(`ws://127.0.0.1:${port}`);
         await new Promise<void>((r, j) => {
@@ -672,7 +679,8 @@ async function main(): Promise<void> {
         ws.send(JSON.stringify({ type: 'hello', agent: 'ghax-ext', version: '0.1.0' }));
         await sleep(60);
         ws.terminate();
-        await sleep(60);
+        await until(() => bridge.state === 'DEGRADED', 'the incumbent to drop', 2000);
+        await until(() => bridge.state === 'EXPIRED', 'the grace window to expire', 2000);
       }
       await until(
         () => bridge.livelockSuspected,
