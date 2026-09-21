@@ -7,6 +7,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ghax --version` now carries provenance.** `ghax --version`, `-V` and
+  `ghax version` print `ghax X.Y.Z (<git short sha> <build date>)`; `--json`
+  output gains `buildDate` next to `gitSha`. `build.rs` stamps the date at
+  compile time (honours `SOURCE_DATE_EPOCH` for reproducible builds) and now
+  re-runs when the current branch ref moves, not only when `.git/HEAD`
+  changes — so a rebuilt binary can no longer report the previous commit.
 - **Multi-agent bridge — several agents driving one real browser, each on its
   own tab.** Two things made this impossible before, and both are fixed.
   (1) `extension/background.js` was a singleton — one socket, one

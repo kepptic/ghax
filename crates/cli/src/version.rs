@@ -28,15 +28,36 @@ const GIT_SHA: &str = match option_env!("GHAX_GIT_SHA") {
     None => "unknown",
 };
 
+/// Build-time date (UTC, YYYY-MM-DD), injected by build.rs; "unknown" only
+/// if build.rs itself didn't run (it doesn't depend on git, so in practice
+/// this always resolves).
+const BUILD_DATE: &str = match option_env!("GHAX_BUILD_DATE") {
+    Some(s) => s,
+    None => "unknown",
+};
+
+/// `ghax X.Y.Z (<git short sha> <build date>)` — the single source of truth
+/// for plain `ghax version`, `ghax --version`/`-V`, and the first line of
+/// `--full`. Centralizing this closes the stale-binary trap: previously
+/// `ghax --version` printed only `CARGO_PKG_VERSION`, which is identical
+/// before and after a rebuild that changed nothing but the commit — you
+/// couldn't tell a fresh binary from a week-old one without `--full`.
+pub fn banner() -> String {
+    format!("ghax {} ({GIT_SHA} {BUILD_DATE})", env!("CARGO_PKG_VERSION"))
+}
+
 pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     let cli_version = env!("CARGO_PKG_VERSION");
     let full = matches!(parsed.flags.get("full"), Some(Value::Bool(true)));
 
     if !full {
         if parsed.json() {
-            output::print(&json!({ "version": cli_version, "gitSha": GIT_SHA }), true);
+            output::print(
+                &json!({ "version": cli_version, "gitSha": GIT_SHA, "buildDate": BUILD_DATE }),
+                true,
+            );
         } else {
-            println!("ghax {cli_version}");
+            println!("{}", banner());
         }
         return Ok(EXIT_OK);
     }
@@ -68,7 +89,7 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     if parsed.json() {
         output::print(
             &json!({
-                "cli": { "version": cli_version, "gitSha": GIT_SHA },
+                "cli": { "version": cli_version, "gitSha": GIT_SHA, "buildDate": BUILD_DATE },
                 "resolvedBundle": {
                     "path": resolved_path,
                     "tier": resolved_tier,
@@ -82,7 +103,7 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         return Ok(EXIT_OK);
     }
 
-    println!("ghax {cli_version}  (git {GIT_SHA})");
+    println!("{}", banner());
     println!();
     println!("daemon bundle (resolves now):");
     println!("  path   {}", resolved_path.as_deref().unwrap_or("<none found>"));

@@ -32,7 +32,7 @@ fn main() -> ExitCode {
         return ExitCode::from(dispatch::EXIT_OK as u8);
     }
     if matches!(argv[0].as_str(), "--version" | "-V") {
-        println!("ghax {}", env!("CARGO_PKG_VERSION"));
+        println!("{}", version::banner());
         return ExitCode::from(dispatch::EXIT_OK as u8);
     }
     let verb = argv[0].clone();

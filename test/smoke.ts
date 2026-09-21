@@ -215,20 +215,35 @@ c('status --json has expected shape', async () => {
   );
 });
 
-c('version prints the CLI version', async () => {
+// Banner shape: `ghax X.Y.Z (<7+ hex sha> <YYYY-MM-DD>)`. Either field may
+// legitimately be "unknown" (a source tarball built with no .git), so the
+// regex accepts that as an alternative in each slot.
+const BANNER_RE = /^ghax \d+\.\d+\.\d+ \((?:[0-9a-f]{7,}|unknown) (?:\d{4}-\d{2}-\d{2}|unknown)\)$/;
+
+c('version prints the CLI version banner (version + git sha + build date)', async () => {
   const r = await run(['version']);
-  assert(/^ghax \d+\.\d+\.\d+/.test(r.stdout.trim()), `unexpected version output: ${r.stdout}`);
+  assert(BANNER_RE.test(r.stdout.trim()), `unexpected version output: ${r.stdout}`);
+});
+
+c('--version flag prints the identical banner as the version subcommand', async () => {
+  const [viaFlag, viaSubcommand] = await Promise.all([run(['--version']), run(['version'])]);
+  assert(BANNER_RE.test(viaFlag.stdout.trim()), `unexpected --version output: ${viaFlag.stdout}`);
+  assert(
+    viaFlag.stdout.trim() === viaSubcommand.stdout.trim(),
+    `--version (${JSON.stringify(viaFlag.stdout.trim())}) diverged from version (${JSON.stringify(viaSubcommand.stdout.trim())})`,
+  );
 });
 
 c('version --full --json reports resolved + running bundle and mismatch flag', async () => {
   const r = await run(['version', '--full', '--json']);
   const v = parseJson<{
-    cli: { version: string; gitSha: string };
+    cli: { version: string; gitSha: string; buildDate: string };
     resolvedBundle: { path: string | null; tier: string; sha256: string };
     daemon: { bundleSha256?: string; bundlePath?: string } | null;
     bundleMismatch: boolean;
   }>(r.stdout);
   assert(typeof v.cli?.version === 'string', 'version --full missing cli.version');
+  assert(typeof v.cli?.buildDate === 'string', 'version --full missing cli.buildDate');
   assert(typeof v.resolvedBundle?.tier === 'string', 'version --full missing resolvedBundle.tier');
   // A daemon is attached in this suite, so it must report its running bundle.
   assert(v.daemon !== null, 'version --full saw no running daemon while attached');
