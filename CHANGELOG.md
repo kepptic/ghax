@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.7.1] - 2026-09-21
 ### Fixed
 - `auto-release.yml` now derives the tag it pushes from
   `git describe --tags --exact-match HEAD` after a successful
@@ -1194,7 +1197,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/kepptic/ghax/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kepptic/ghax/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kepptic/ghax/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/kepptic/ghax/compare/v0.4.4...v0.5.0
