@@ -94,8 +94,12 @@ jobs:
 
       # Cross-repo adoption: when this workflow runs via `uses:` from
       # another repo, scripts/bump-version.sh isn't in that repo's tree.
-      # Pull ghax's copy alongside it; unused (but harmless) when this
-      # runs inside ghax itself, since the repo-local copy wins below.
+      # Pull ghax's copy alongside it; unused when this runs inside ghax
+      # itself, since the repo-local copy wins below — but the checkout
+      # still happens either way, so exclude the extra directory from
+      # `git status` next (bump-version.sh refuses to run on a dirty
+      # tree, and an untracked checkout inside the working tree would
+      # otherwise look exactly like one).
       - name: Checkout ghax release tools
         uses: actions/checkout@v4
         with:
@@ -105,6 +109,9 @@ jobs:
           # repo); falls back to main if it's ever unset.
           ref: ${{ github.workflow_sha || 'main' }}
           path: .ghax-release-tools
+
+      - name: Hide release-tools checkout from git status
+        run: echo '/.ghax-release-tools/' >> .git/info/exclude
 
       - name: Configure git identity
         run: |
