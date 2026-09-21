@@ -14,6 +14,7 @@
     "build:all": "npm run build:rust && npm run build",
     "typecheck": "tsc --noEmit",
     "test:smoke": "tsx test/smoke.ts",
+    "test:release": "bash test/release-bump.sh",
     "test:bridge-sim": "tsx test/bridge-sim.ts",
     "test:bridge-multi-sim": "tsx test/bridge-multi-sim.ts",
     "test:bridge-live": "tsx test/bridge-live.ts",

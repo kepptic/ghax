@@ -257,6 +257,14 @@ suite against the Rust binary — useful for verifying parity.
    updated.
 6. If the change is architectural: `ARCHITECTURE.md` updated, and maybe
    a note in `design/plan/04-roadmap.md`.
+7. **Every merge to `main` that passes CI can cut a release** —
+   `auto-release.yml` classifies your commits since the last tag (see
+   `docs/release-automation.md`). So #3 above isn't just hygiene: an
+   empty `[Unreleased]` blocks the release entirely (refuses rather than
+   shipping headline-less notes), and your commit's Conventional-Commits
+   type (`feat`/`fix`/`docs`/...) *is* the version-bump decision. Get the
+   type right, or add a `Release-As: X.Y.Z` trailer / `[skip release]` in
+   the subject to override it.
 
 ## What's intentionally NOT here
 

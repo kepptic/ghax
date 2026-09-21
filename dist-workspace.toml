@@ -39,9 +39,12 @@ hosting = "github"
 # Whether to install an updater program
 install-updater = false
 # Allow the release.yml workflow to be hand-edited without dist plan failing.
-# The workflow header, trigger scoping (tags only, no pull_request), and
-# runtime comments were manually adjusted per Phase 4A constraints.
-# If you need to regenerate CI from scratch: dist generate --allow-dirty
+# The workflow header, trigger scoping (tags + workflow_dispatch, no
+# pull_request), and runtime comments were manually adjusted per Phase 4A
+# constraints, and it's now also dispatched by auto-release.yml (see
+# docs/release-automation.md). Regenerating from scratch with
+# `dist generate` would silently drop those customisations — don't run it
+# without diffing the result against release.yml first.
 allow-dirty = ["ci"]
 # Ship the Node daemon bundle alongside the Rust binary in every release archive.
 # The daemon is a Node ESM bundle (dist/ghax-daemon.mjs) that ghax spawns locally.

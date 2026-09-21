@@ -1,0 +1,196 @@
+name: auto-release
+# Cuts a release automatically whenever CI goes green on main — no human
+# runs scripts/release.sh. Computes the next version from Conventional
+# Commits since the last tag (see scripts/bump-version.sh), rolls
+# CHANGELOG.md, commits `release: vX.Y.Z`, tags it, pushes, and dispatches
+# the binary-publishing workflow (release.yml in this repo).
+#
+# Reusable: any Kepptic repo can adopt this by copying scripts/bump-version.sh
+# and calling this workflow with `uses: kepptic/ghax/.github/workflows/auto-release.yml@<ref>`.
+# See docs/release-automation.md for the adoption guide, config knobs, and
+# the GITHUB_TOKEN-cascade caveat this workflow works around (below).
+
+on:
+  # Primary trigger inside ghax: fires after every `ci` run.
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  # Manual trigger inside ghax (e.g. force a release without waiting for CI,
+  # or force a specific bump level).
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "auto | patch | minor | major | X.Y.Z"
+        required: false
+        default: auto
+  # Reusable-workflow entry point for other repos.
+  workflow_call:
+    inputs:
+      bump:
+        description: "auto | patch | minor | major | X.Y.Z"
+        required: false
+        type: string
+        default: auto
+      tag-prefix:
+        description: "Git tag prefix"
+        required: false
+        type: string
+        default: v
+      changelog-policy:
+        description: "require | ignore"
+        required: false
+        type: string
+        default: require
+      version-files:
+        description: "Space-separated list of version files to bump (empty = auto-detect)"
+        required: false
+        type: string
+        default: ""
+      release-workflow:
+        description: "Workflow file to dispatch after tagging (empty = don't dispatch anything)"
+        required: false
+        type: string
+        default: release.yml
+
+permissions:
+  contents: write
+  actions: write
+
+# Never run two release cuts concurrently — a second run racing the first
+# could tag/push mid-bump and corrupt the changelog roll or double-cut a
+# version. Queue, don't cancel: a queued run just becomes a no-op via the
+# loop guard in bump-version.sh once the first run's commit lands.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # For workflow_run events, only proceed when the *ci* run that
+    # completed was on main and green — `github.event.workflow_run` is
+    # unset for workflow_dispatch/workflow_call, so this condition is
+    # written to fall through (proceed) for those trigger types rather
+    # than evaluate the unset fields as failure.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    env:
+      BUMP: ${{ inputs.bump || 'auto' }}
+      TAG_PREFIX: ${{ inputs['tag-prefix'] || 'v' }}
+      CHANGELOG_POLICY: ${{ inputs['changelog-policy'] || 'require' }}
+      VERSION_FILES: ${{ inputs['version-files'] || '' }}
+      RELEASE_WORKFLOW: ${{ inputs['release-workflow'] || 'release.yml' }}
+    steps:
+      # workflow_run's own head_sha can already be behind main by the time
+      # this job starts (another push landed); always release off main's
+      # current tip, not a possibly-stale event payload.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
+
+      # Cross-repo adoption: when this workflow runs via `uses:` from
+      # another repo, scripts/bump-version.sh isn't in that repo's tree.
+      # Pull ghax's copy alongside it; unused (but harmless) when this
+      # runs inside ghax itself, since the repo-local copy wins below.
+      - name: Checkout ghax release tools
+        uses: actions/checkout@v4
+        with:
+          repository: kepptic/ghax
+          # github.workflow_sha is the commit SHA of *this* workflow file as
+          # it was invoked (exact for a reusable `uses:` call from another
+          # repo); falls back to main if it's ever unset.
+          ref: ${{ github.workflow_sha || 'main' }}
+          path: .ghax-release-tools
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run bump-version
+        id: bump
+        run: |
+          SCRIPT="scripts/bump-version.sh"
+          [ -f "$SCRIPT" ] || SCRIPT=".ghax-release-tools/scripts/bump-version.sh"
+          echo "auto-release: using $SCRIPT"
+
+          ARGS=(--bump "$BUMP" --tag-prefix "$TAG_PREFIX" --changelog-policy "$CHANGELOG_POLICY")
+          if [ -n "$VERSION_FILES" ]; then
+            for f in $VERSION_FILES; do
+              ARGS+=(--version-file "$f")
+            done
+          fi
+
+          set +e
+          OUTPUT="$(bash "$SCRIPT" "${ARGS[@]}")"
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "auto-release: bump-version.sh exited $STATUS" >&2
+            exit "$STATUS"
+          fi
+
+          VERSION="$(echo "$OUTPUT" | tail -1)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION" = "none" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG_PREFIX}${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Summary (nothing to release)
+        if: steps.bump.outputs.release != 'true'
+        run: |
+          {
+            echo "### auto-release"
+            echo ""
+            echo "Nothing release-worthy since the last tag — no version was cut."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push commit and tag
+        if: steps.bump.outputs.release == 'true'
+        run: |
+          git push origin HEAD:main
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      # GITHUB_TOKEN-cascade rule: a push/tag made with GITHUB_TOKEN does
+      # NOT trigger other workflows (GitHub's anti-recursion guard), but a
+      # workflow_dispatch invoked via GITHUB_TOKEN DOES run. So the publish
+      # workflow (release.yml, which normally triggers on tag push) has to
+      # be started explicitly here rather than relying on the tag push above.
+      - name: Dispatch release workflow
+        if: steps.bump.outputs.release == 'true' && env.RELEASE_WORKFLOW != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run "$RELEASE_WORKFLOW" --ref "${{ steps.bump.outputs.tag }}"
+
+      - name: Summary (released)
+        if: steps.bump.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### auto-release"
+            echo ""
+            echo "- Version: \`${{ steps.bump.outputs.version }}\`"
+            echo "- Tag: \`${{ steps.bump.outputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$RELEASE_WORKFLOW" ]; then
+            sleep 5
+            URL="$(gh run list --workflow "$RELEASE_WORKFLOW" --branch "${{ steps.bump.outputs.tag }}" --limit 1 --json url --jq '.[0].url' 2>/dev/null || true)"
+            if [ -n "$URL" ]; then
+              echo "- Dispatched: $URL" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- Dispatched: \`$RELEASE_WORKFLOW\` (run not yet visible — check the Actions tab)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "- release-workflow dispatch skipped (release-workflow input is empty)" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -60,6 +60,19 @@ on:
     # creates GitHub Releases and publishes installers.
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  # Added for auto-release.yml. GitHub's anti-recursion rule: a tag pushed
+  # with GITHUB_TOKEN (as auto-release.yml does) does NOT trigger the `push`
+  # trigger above on this or any other workflow — but a workflow_dispatch
+  # invoked via GITHUB_TOKEN DOES run. So auto-release.yml pushes the tag,
+  # then explicitly runs `gh workflow run release.yml --ref vX.Y.Z`. No
+  # inputs needed: dispatched with --ref set to the tag, `github.ref_name`
+  # is already that tag, so the `plan` job below (which reads
+  # `github.ref_name`) works completely unchanged for either trigger.
+  # A human running `npm run release` still gets the tag-push trigger for
+  # free (their `git push` isn't GITHUB_TOKEN-authored) — release.sh
+  # dispatches too, for uniform run-tracking, but backs off to the
+  # tag-triggered run if it shows up first (see scripts/release.sh).
+  workflow_dispatch:
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do

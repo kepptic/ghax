@@ -6,7 +6,29 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- **Releases are cut automatically on every merge to `main`.**
+  `.github/workflows/auto-release.yml` runs after `ci` goes green,
+  classifies the Conventional Commits since the last tag into a semver
+  bump (`feat` → minor, `fix`/`perf`/`refactor`/`revert`/`build`/`deps` →
+  patch, `type!:`/`BREAKING CHANGE:` → major, docs/chore/ci/test/style-only
+  → no release), rolls `CHANGELOG.md`, commits `release: vX.Y.Z`, tags it,
+  pushes, and dispatches `release.yml` to build and publish the binaries —
+  no human runs a script. Override with a `Release-As: X.Y.Z` commit
+  trailer or `[skip release]` in the merge subject.
+  - The version-bump + changelog-roll logic now lives in
+    `scripts/bump-version.sh`, a repo-agnostic core (Conventional-Commits
+    classification, Keep-a-Changelog rolling, multi-file version bumping)
+    usable standalone or as CI does. `scripts/release.sh` (`npm run
+    release [auto|patch|minor|major|X.Y.Z]`) is now a thin wrapper over it
+    for manual/offline releases, and gained `--dry-run`.
+  - `release.yml` gained a `workflow_dispatch` trigger so `auto-release.yml`
+    can start it explicitly — a GITHUB_TOKEN-authored tag push doesn't
+    trigger other workflows' tag triggers, only `workflow_dispatch` does.
+  - Packaged for reuse: any Kepptic repo can adopt this by copying
+    `scripts/bump-version.sh` + `auto-release.yml`, or calling
+    `kepptic/ghax`'s copy directly as a reusable workflow. See
+    `docs/release-automation.md`.
 
 ## [0.5.0] - 2026-09-21
 ### Added

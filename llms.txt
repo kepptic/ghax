@@ -37,7 +37,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Verify the install:
 
 ```bash
-ghax --version               # should print "ghax 0.5.x (<sha> <date>)"
+ghax --version               # should print "ghax X.Y.Z (<sha> <date>)"
 ghax --help                  # should print the full command surface
 ```
 

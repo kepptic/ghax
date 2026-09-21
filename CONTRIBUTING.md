@@ -82,38 +82,61 @@ git config core.hooksPath .githooks
 
 ## Cutting a release
 
-Before releasing, make sure `CHANGELOG.md` has a populated `## [Unreleased]`
-section — the release script refuses to run if it's empty, and the release
-workflow auto-injects the version section into the GitHub Release body so
-every tag ships with real notes.
+**Releases are automatic.** Every merge to `main` that goes green on CI is a
+release candidate: `.github/workflows/auto-release.yml` looks at the
+Conventional Commits since the last tag, decides whether they add up to a
+release and at what level, and if so rolls the changelog, bumps the
+version, tags it, and kicks off the binary build — with no human running a
+script. See [`docs/release-automation.md`](./docs/release-automation.md)
+for the full design and how to adopt this in another repo.
+
+What decides the outcome of your merge:
+
+| Commit types since the last tag | Result |
+|---|---|
+| any `type!:` subject, or a `BREAKING CHANGE:` footer | major (or minor, while still `0.x`) |
+| `feat` | minor |
+| `fix`, `perf`, `refactor`, `revert`, `build`, `deps` | patch |
+| only `docs`, `chore`, `ci`, `test`, `style`, `release` | no release |
+
+So a correct Conventional Commit type on your commit (and a `CHANGELOG.md`
+`## [Unreleased]` entry — see "Before committing" in `CLAUDE.md`) *are* the
+release decision. Get those right and you don't need to think about
+releasing at all.
+
+**Overrides**, via commit trailer or subject:
+- `Release-As: X.Y.Z` in any commit body since the last tag — cuts exactly
+  that version regardless of what else is in the range.
+- `[skip release]` in HEAD's subject — this merge cuts nothing, even if it
+  would otherwise qualify.
+- `.github/workflows/auto-release.yml` also accepts `workflow_dispatch` (Actions
+  tab → Run workflow) with a `bump` input (`auto`/`patch`/`minor`/`major`/`X.Y.Z`),
+  for forcing a release without waiting on a merge.
+
+**Manual / offline releases** still work, e.g. for a release cut from your
+machine when CI is down, or to preview one:
 
 ```bash
-npm run release patch    # 0.4.2 → 0.4.3 (default)
-npm run release minor    # 0.4.2 → 0.5.0
-npm run release major    # 0.4.2 → 1.0.0
-npm run release 0.4.3    # explicit version
+npm run release              # auto (same classification as CI)
+npm run release patch        # 0.5.1 → 0.5.2
+npm run release minor        # 0.5.1 → 0.6.0
+npm run release major        # 0.5.1 → 1.0.0
+npm run release 0.5.3        # explicit version
+npm run release -- --dry-run # preview only — no writes, no push
 ```
 
-Steps the script takes:
-1. Refuses to run if the working tree is dirty or you're not on `main`.
-2. **Rolls the changelog:** renames `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
-   inserts a fresh empty `[Unreleased]` at top, and updates the link footer.
-   Refuses if `[Unreleased]` has no bullets / sections.
-3. Bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, commits
-   (Cargo.toml + Cargo.lock + CHANGELOG.md together), tags `v<version>`.
-4. Pushes the commit + tag.
-5. Polls the GitHub Actions release workflow with `gh run watch --exit-status`.
-   `cargo-dist` reads the new `## [X.Y.Z]` section and stitches it into the
-   release body alongside the install scripts + download table.
-6. **Only on green:** downloads the published archive, verifies its SHA-256,
-   installs the binary to `~/.cargo/bin/ghax`, drops the daemon bundle into
-   `~/.local/share/ghax/`, and bootstraps the daemon's `node_modules/`.
-7. **On red:** stops with a pointer to `gh run view --log-failed`. Nothing
-   gets installed locally — you keep running the previous version until you
-   fix the build.
+`scripts/release.sh` is a thin wrapper: it keeps the pre-flight checks
+(clean tree, on `main`), then delegates the actual version-bump +
+changelog-roll + commit + tag work to `scripts/bump-version.sh` — the same
+script `auto-release.yml` runs in CI — before pushing, dispatching (or
+picking up) the `release.yml` binary-build workflow, and polling it with
+`gh run watch --exit-status`. On green, it downloads the published archive,
+verifies its SHA-256, and installs it to `~/.cargo/bin/ghax`. On red, it
+stops with a pointer to `gh run view --log-failed` and installs nothing —
+you keep running the previous version until the build is fixed.
 
-To pull the latest published release without cutting a new one (e.g. another
-machine, or after a manual hotfix release):
+To pull the latest published release without cutting a new one (e.g.
+another machine, or after someone else's release):
 
 ```bash
 npm run install-release            # latest non-prerelease

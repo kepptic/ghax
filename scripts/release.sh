@@ -1,32 +1,55 @@
 #!/usr/bin/env bash
-# release — bump version, tag, push, wait for the GitHub Actions release
-# workflow to go green, then install the published artifact on this machine.
+# release — manual/offline entry point for cutting a ghax release. Thin
+# wrapper around scripts/bump-version.sh: same sanity checks as before,
+# but the version-bump + changelog-roll + commit + tag logic now lives in
+# bump-version.sh so it's shared with .github/workflows/auto-release.yml
+# (which cuts releases automatically on every merge to main — see
+# docs/release-automation.md). Use this script when you want to cut a
+# release right now from your machine instead of waiting for CI, or to
+# preview one with --dry-run.
 #
 # Usage:
-#   bun run release patch       # 0.4.2 → 0.4.3
-#   bun run release minor       # 0.4.2 → 0.5.0
-#   bun run release major       # 0.4.2 → 1.0.0
-#   bun run release 0.4.3       # explicit version
-#   bun run release             # default: patch
+#   npm run release                 # auto (derive bump from commits since last tag)
+#   npm run release patch           # 0.5.0 → 0.5.1
+#   npm run release minor           # 0.5.0 → 0.6.0
+#   npm run release major           # 0.5.0 → 1.0.0
+#   npm run release 0.5.3           # explicit version
+#   npm run release -- --dry-run    # preview only, no writes/push
 #
 # Refuses to run if:
 #   - working tree is dirty
 #   - current branch isn't main (or trunk)
+#   - there's nothing release-worthy since the last tag (auto mode)
 #   - the bumped tag already exists
 #
-# After tagging, polls `gh run watch` (which exits when the workflow finishes)
-# then runs scripts/install-release.sh against the new tag. End state: the
-# binary you just shipped is the binary you're running locally.
+# After tagging, pushes, dispatches (or picks up) the `release.yml`
+# workflow, polls it with `gh run watch`, then on green runs
+# scripts/install-release.sh against the new tag. End state: the binary
+# you're running locally is the binary users will get.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-BUMP="${1:-patch}"
+BUMP="auto"
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help)
+      awk 'NR>1 && /^set -euo/{exit} NR>1{print}' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) BUMP="$arg" ;;
+  esac
+done
+
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
 # ── 0. Sanity ─────────────────────────────────────────────────────
+# Runs even under --dry-run: a preview that hides "you're on the wrong
+# branch with local changes" isn't a useful preview.
 if [ -n "$(git status --porcelain)" ]; then
   echo "release: working tree is dirty — commit or stash first" >&2
   git status --short >&2
@@ -38,111 +61,58 @@ if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "trunk" ]; then
 fi
 git pull --ff-only origin "$BRANCH"
 
-# ── 1. Compute new version ────────────────────────────────────────
-CURRENT="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-echo "release: current version = $CURRENT"
+# ── 1. Bump version, roll changelog, commit, tag (all local) ───────
+BUMP_ARGS=(--bump "$BUMP" --version-file Cargo.toml)
+[ "$DRY_RUN" = 1 ] && BUMP_ARGS+=(--dry-run)
 
-case "$BUMP" in
-  patch|minor|major)
-    NEW="$(node -e '
-      const [maj, min, pat] = process.argv[1].split(".").map(Number);
-      const bump = process.argv[2];
-      if (bump === "patch") console.log(`${maj}.${min}.${pat + 1}`);
-      else if (bump === "minor") console.log(`${maj}.${min + 1}.0`);
-      else console.log(`${maj + 1}.0.0`);
-    ' "$CURRENT" "$BUMP")"
-    ;;
-  *)
-    NEW="$BUMP"
-    ;;
-esac
+NEW="$(bash "$REPO_ROOT/scripts/bump-version.sh" "${BUMP_ARGS[@]}" | tail -1)"
+
+if [ "$NEW" = "none" ]; then
+  echo "release: nothing release-worthy since the last tag — nothing to do" >&2
+  exit 0
+fi
+
 TAG="v$NEW"
-echo "release: new version    = $NEW (tag $TAG)"
 
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-  echo "release: tag $TAG already exists locally — refuse to overwrite" >&2
-  exit 1
-fi
-if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
-  echo "release: tag $TAG already published on GitHub — refuse to overwrite" >&2
-  exit 1
+if [ "$DRY_RUN" = 1 ]; then
+  echo ""
+  echo "release: [dry-run] would cut $TAG — no files were written, nothing pushed." >&2
+  exit 0
 fi
 
-# ── 2a. Roll CHANGELOG [Unreleased] → [NEW] ───────────────────────
-# cargo-dist auto-injects the matching `## [X.Y.Z]` section into the
-# GitHub Release body, so every tag ships with real notes.
-CHANGELOG="$REPO_ROOT/CHANGELOG.md"
-if [ ! -f "$CHANGELOG" ]; then
-  echo "release: CHANGELOG.md not found — refuse to release without notes" >&2
-  exit 1
-fi
+echo "release: cut $TAG locally — pushing"
 
-# Extract the body of `## [Unreleased]` (lines between it and the next
-# `## [...]` heading). Reject if empty — we don't ship headline-less
-# releases. Bullet-only blank lines and the trailing section separator
-# don't count as content.
-UNRELEASED_BODY="$(awk '
-  /^## \[Unreleased\]/ { in_block = 1; next }
-  in_block && /^## \[/ { exit }
-  in_block { print }
-' "$CHANGELOG")"
-if ! printf '%s' "$UNRELEASED_BODY" | grep -Eq '^(- |### )'; then
-  echo "release: CHANGELOG.md [Unreleased] is empty — add entries before releasing" >&2
-  echo "release: (at least one '- ' bullet or '### Added/Changed/Fixed' section required)" >&2
-  exit 1
-fi
-
-TODAY="$(date -u +%Y-%m-%d)"
-# In-place rewrite: rename the current [Unreleased] heading to [NEW] with
-# date, then insert a fresh empty [Unreleased] stub at the top, and update
-# the link footer so `[Unreleased]` points at the new tag-compare URL.
-python3 - "$CHANGELOG" "$NEW" "$TAG" "$TODAY" <<'PY'
-import sys, re, pathlib
-
-path, new_ver, new_tag, today = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-text = pathlib.Path(path).read_text()
-
-# 1. Rename current [Unreleased] → [NEW] - DATE.
-text = re.sub(
-    r"^## \[Unreleased\]\s*$",
-    f"## [Unreleased]\n\n_No changes yet._\n\n## [{new_ver}] - {today}",
-    text, count=1, flags=re.MULTILINE,
-)
-
-# 2. Update link footer.
-#    [Unreleased]: .../compare/vOLD...HEAD  →  .../compare/vNEW...HEAD
-#    insert new line for [NEW] comparing against previous tag.
-lines = text.splitlines()
-for i, ln in enumerate(lines):
-    m = re.match(r"^\[Unreleased\]:\s+(.+/compare/)(v[^.]+\.[^.]+\.[^.]+)\.\.\.HEAD\s*$", ln)
-    if m:
-        prefix, old_tag = m.group(1), m.group(2)
-        lines[i] = f"[Unreleased]: {prefix}{new_tag}...HEAD"
-        lines.insert(i + 1, f"[{new_ver}]: {prefix}{old_tag}...{new_tag}")
-        break
-
-pathlib.Path(path).write_text("\n".join(lines) + "\n")
-PY
-
-# ── 2b. Bump Cargo.toml + commit + tag ────────────────────────────
-sed -i.bak "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml && rm Cargo.toml.bak
-# Refresh Cargo.lock to reflect the version bump without paying for a full
-# release compile (the local artifact isn't consumed; CI builds the
-# authoritative one). cargo update --workspace just touches the lock entry.
-cargo update --workspace --quiet 2>&1 | tail -3
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "release: $TAG"
-git tag -a "$TAG" -m "$TAG"
-
-# ── 3. Push ───────────────────────────────────────────────────────
+# ── 2. Push ───────────────────────────────────────────────────────
 git push origin "$BRANCH"
 git push origin "$TAG"
 
-# ── 4. Wait for the workflow ──────────────────────────────────────
+# ── 3. Get release.yml running for this tag ─────────────────────────
+# release.yml triggers on tag push (`v[0-9]+.[0-9]+.[0-9]+*`), and this
+# script pushes the tag with the operator's own `git`/`gh` credentials
+# (not a GITHUB_TOKEN), so that push trigger fires normally — unlike
+# auto-release.yml, which pushes via GITHUB_TOKEN and MUST dispatch
+# explicitly (GitHub doesn't chain workflow runs off GITHUB_TOKEN-authored
+# pushes). To stay uniform with that path without double-triggering the
+# release (two concurrent `gh release create` calls for the same tag
+# would race and one would fail), briefly poll for the tag-push-triggered
+# run before falling back to an explicit dispatch.
 echo "release: waiting for GitHub Actions release workflow..."
-sleep 5  # give GH a moment to register the run
-RUN_ID="$(gh run list --workflow=release.yml --limit 1 --json databaseId,headBranch,headSha \
-            --jq '.[0].databaseId')"
+RUN_ID=""
+for _ in 1 2 3 4 5 6; do
+  RUN_ID="$(gh run list --workflow=release.yml --limit 5 \
+              --json databaseId,headBranch,event \
+              --jq "[.[] | select(.headBranch == \"$TAG\" and .event == \"push\")][0].databaseId" 2>/dev/null || true)"
+  [ -n "$RUN_ID" ] && break
+  sleep 2
+done
+
+if [ -z "$RUN_ID" ]; then
+  echo "release: no tag-push-triggered run found — dispatching release.yml explicitly" >&2
+  gh workflow run release.yml --ref "$TAG"
+  sleep 5
+  RUN_ID="$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+fi
+
 [ -z "$RUN_ID" ] && { echo "release: no workflow run found — manual install needed" >&2; exit 1; }
 echo "release: tracking run $RUN_ID — https://github.com/kepptic/ghax/actions/runs/$RUN_ID"
 
@@ -152,7 +122,7 @@ if ! gh run watch "$RUN_ID" --exit-status; then
   exit 2
 fi
 
-# ── 5. Install the published artifact ─────────────────────────────
+# ── 4. Install the published artifact ─────────────────────────────
 echo "release: workflow green — installing published artifact"
 bash "$REPO_ROOT/scripts/install-release.sh" "$TAG"
 
