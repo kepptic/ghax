@@ -6,7 +6,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+- `auto-release.yml` now derives the tag it pushes from
+  `git describe --tags --exact-match HEAD` after a successful
+  `bump-version.sh` run, instead of concatenating its own (sometimes empty)
+  `TAG_PREFIX` env with the bare version. The v0.7.0 auto-release run hit
+  this: the `release: v0.7.0` commit pushed to `main` correctly, but the
+  follow-up `git push origin "0.7.0"` failed (missing the `v` prefix, no
+  such ref) and `release.yml` never got dispatched.
 
 ## [0.7.0] - 2026-09-21
 ### Added
