@@ -161,7 +161,21 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "tag=${TAG_PREFIX}${VERSION}" >> "$GITHUB_OUTPUT"
+            # Derive the tag from git, not by string-concatenating
+            # TAG_PREFIX+VERSION here: TAG_PREFIX in THIS step's env is only
+            # set when the workflow was given an explicit tag-prefix input
+            # (see the env block above) — on ghax's own normal
+            # workflow_run-triggered path it's empty, and the actual prefix
+            # bump-version.sh used came from its own default or
+            # .bump-version.conf instead. A bare '${VERSION}' tag push
+            # against a 'v${VERSION}' tag bump-version.sh actually created
+            # is exactly the bug this comment replaced (2026-09-21: pushed
+            # a real v0.7.0 release commit but failed to push its tag).
+            # HEAD is now the release commit AND the annotated tag was just
+            # created pointing at it, so this is unconditionally correct
+            # regardless of which prefix was actually in play.
+            TAG="$(git describe --tags --exact-match HEAD)"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Summary (nothing to release)
