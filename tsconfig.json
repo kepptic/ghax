@@ -17,6 +17,7 @@
     "isolatedModules": true,
     "jsx": "preserve"
   },
+  "files": ["src/build-info.d.ts"],
   "include": ["src/**/*.ts", "bin/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

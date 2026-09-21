@@ -1527,10 +1527,22 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
 
     match wait_for_extension(state.port, actual_port, Duration::from_secs(60), control_active) {
         Ok((info, controlled_tab)) => {
-            let label = match info {
+            let label = match &info {
                 Some((agent, version)) => format!(" ({agent} v{version})"),
                 None => String::new(),
             };
+            // Same stale-extension warning `ghax version --full` prints, but
+            // fired the moment the extension's hello actually lands here —
+            // no need to wait for the user to separately run `version --full`
+            // to find out they forgot to reload it after an update.
+            if let Some((_, version)) = &info {
+                let cli_version = env!("CARGO_PKG_VERSION");
+                if version != cli_version {
+                    eprintln!(
+                        "ghax: WARNING: bridge extension is v{version}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
+                    );
+                }
+            }
             let tab_note = match controlled_tab {
                 Some(id) => format!(", controlling tab {id}"),
                 None => String::new(),

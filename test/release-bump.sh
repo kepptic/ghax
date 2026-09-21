@@ -122,6 +122,25 @@ commit() {
   fi
 }
 
+# Version arithmetic mirroring bump-version.sh's own bump_field(), so these
+# expectations track whatever Cargo.toml's version actually is at clone
+# time instead of a hardcoded number that goes stale the next time ghax
+# itself releases (exactly the kind of silent drift this test suite exists
+# to catch elsewhere).
+bump_expected() {
+  python3 -c "
+v = '$1'.split('.')
+maj, minr, pat = int(v[0]), int(v[1]), int(v[2])
+field = '$2'
+if field == 'major': maj, minr, pat = maj + 1, 0, 0
+elif field == 'minor': minr, pat = minr + 1, 0
+else: pat += 1
+print(f'{maj}.{minr}.{pat}')
+"
+}
+
+BASE="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/version = "([^"]+)".*/\1/')"
+
 # ── (a) print-next on a clean tag ───────────────────────────────
 OUT="$("${BV[@]}" --print-next 2>/dev/null)"
 assert_eq "(a) print-next on clean tag == none" "none" "$OUT"
@@ -134,19 +153,22 @@ assert_eq "(b) docs commit -> none" "none" "$OUT"
 # ── (c) fix commit -> patch ─────────────────────────────────────
 commit "fix(cli): correct a typo"
 OUT="$("${BV[@]}" --print-next 2>/dev/null)"
-assert_eq "(c) fix commit -> patch" "0.5.1" "$OUT"
+assert_eq "(c) fix commit -> patch" "$(bump_expected "$BASE" patch)" "$OUT"
 
 # ── (d) feat commit -> minor ────────────────────────────────────
 commit "feat(cli): add a new verb"
 OUT="$("${BV[@]}" --print-next 2>/dev/null)"
-assert_eq "(d) feat commit -> minor" "0.6.0" "$OUT"
+assert_eq "(d) feat commit -> minor" "$(bump_expected "$BASE" minor)" "$OUT"
 
 # ── (e) feat! on 0.x -> minor; on a fake 1.0.0 tag -> major ─────
 commit "feat!: breaking change while still 0.x"
 OUT="$("${BV[@]}" --print-next 2>/dev/null)"
-assert_eq "(e1) feat! on 0.x -> minor" "0.6.0" "$OUT"
+assert_eq "(e1) feat! on 0.x -> minor" "$(bump_expected "$BASE" minor)" "$OUT"
 
-sed -i.bak 's/^version = "0.5.0"/version = "1.0.0"/' Cargo.toml && rm -f Cargo.toml.bak
+# Match on the SHAPE of the version line, not a hardcoded old value — the
+# same silent-skip trap this session fixed in bump-version.sh itself would
+# otherwise bite this test fixture the next time ghax's own version moves.
+sed -i.bak -E 's/^version = "[^"]+"/version = "1.0.0"/' Cargo.toml && rm -f Cargo.toml.bak
 git add Cargo.toml
 git commit -q -m "chore: fake-bump to 1.0.0 for test fixture"
 git tag -a v1.0.0 -m v1.0.0
@@ -259,6 +281,110 @@ fi
 # ── (h) second run right after -> loop guard -> none ────────────
 OUT="$("${BV[@]}" --print-next 2>/dev/null)"
 assert_eq "(h) second run is a no-op (loop guard)" "none" "$OUT"
+
+echo ""
+echo "▸ (k)-(n): version-file edge cases (silent-skip fix, manifest.json, package-lock.json, .bump-version.conf)"
+
+# ── (k) a file whose version differs from the source of truth still gets
+# forced to the new version, never silently skipped (the bug this session
+# fixed — earlier bump-version.sh matched on the OLD value textually and
+# no-op'd when a file had drifted out of sync). ─────────────────────────
+echo '{"name":"whatever","version":"9.9.9-stale"}' > composer.json
+git add composer.json
+git commit -q -m "chore: fixture for (k)"
+set +e
+OUT="$(bash scripts/bump-version.sh --version-file Cargo.toml --version-file composer.json --bump patch --no-commit --no-tag --allow-empty-changelog 2>&1)"
+STATUS=$?
+set -e
+assert_exit "(k) run exits 0" "0" "$STATUS"
+NEW_K="$(tail -1 <<<"$OUT")"
+COMPOSER_VER="$(grep -m1 '"version"' composer.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+assert_eq "(k) mismatched composer.json is forced to the new version, not silently skipped" "$NEW_K" "$COMPOSER_VER"
+git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md composer.json
+
+# ── (l) extension/manifest.json gets the prerelease/build suffix stripped
+# on an explicit prerelease --bump, while Cargo.toml keeps the full string
+# (Chrome manifests only accept 1-4 dot-separated integers). ───────────
+mkdir -p extension
+echo '{"manifest_version":3,"name":"x","version":"0.1.0"}' > extension/manifest.json
+git add extension/manifest.json
+git commit -q -m "chore: fixture for (l)"
+set +e
+OUT="$(bash scripts/bump-version.sh --version-file Cargo.toml --version-file extension/manifest.json --bump 9.9.9-rc.1 --no-commit --no-tag --allow-empty-changelog 2>&1)"
+STATUS=$?
+set -e
+assert_exit "(l) run exits 0" "0" "$STATUS"
+CARGO_VER_L="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/version = "([^"]+)".*/\1/')"
+MANIFEST_VER_L="$(grep -m1 '"version"' extension/manifest.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+assert_eq "(l) Cargo.toml keeps the full prerelease version" "9.9.9-rc.1" "$CARGO_VER_L"
+assert_eq "(l) extension/manifest.json has the prerelease suffix stripped" "9.9.9" "$MANIFEST_VER_L"
+assert_contains "(l) a warning about stripping the suffix was logged" "$OUT" "stripping prerelease/build suffix"
+git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md extension/manifest.json
+
+# ── (m) package-lock.json: BOTH the root "version" and packages[""].version
+# fields get updated. ────────────────────────────────────────────────────
+cat > package-lock.json <<'JSON'
+{
+  "name": "@ghax/cli",
+  "version": "0.1.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "@ghax/cli",
+      "version": "0.1.0",
+      "license": "MIT"
+    }
+  }
+}
+JSON
+git add package-lock.json
+git commit -q -m "chore: fixture for (m)"
+set +e
+OUT="$(bash scripts/bump-version.sh --version-file Cargo.toml --version-file package-lock.json --bump patch --no-commit --no-tag --allow-empty-changelog 2>&1)"
+STATUS=$?
+set -e
+assert_exit "(m) run exits 0" "0" "$STATUS"
+NEW_M="$(tail -1 <<<"$OUT")"
+LOCK_COUNT="$(grep -c "\"version\": \"$NEW_M\"" package-lock.json)"
+assert_eq "(m) package-lock.json updates BOTH the root and packages[\"\"] version fields" "2" "$LOCK_COUNT"
+git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md package-lock.json
+
+# ── (n) .bump-version.conf is honoured, and a CLI --version-file overrides
+# it entirely (not appended to it). ─────────────────────────────────────
+echo '{"version": "0.1.0"}' > conf-a.json
+echo '{"version": "0.1.0"}' > conf-b.json
+cat > .bump-version.conf <<'CONF'
+VERSION_FILES="Cargo.toml conf-a.json"
+CONF
+git add conf-a.json conf-b.json .bump-version.conf
+git commit -q -m "chore: fixture for (n)"
+
+# No --version-file on the CLI: the conf's list applies (Cargo.toml + conf-a.json, NOT conf-b.json).
+set +e
+OUT="$(bash scripts/bump-version.sh --bump patch --no-commit --no-tag --allow-empty-changelog 2>&1)"
+STATUS=$?
+set -e
+assert_exit "(n1) run exits 0" "0" "$STATUS"
+NEW_N="$(tail -1 <<<"$OUT")"
+CONF_A_VER="$(grep -m1 '"version"' conf-a.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+CONF_B_VER="$(grep -m1 '"version"' conf-b.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+assert_eq "(n1) .bump-version.conf's VERSION_FILES bumps conf-a.json" "$NEW_N" "$CONF_A_VER"
+assert_eq "(n1) conf-b.json (not in the conf's list) is left untouched" "0.1.0" "$CONF_B_VER"
+git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md conf-a.json
+
+# A CLI --version-file fully replaces the conf's list (conf-b.json now, not conf-a.json).
+set +e
+OUT="$(bash scripts/bump-version.sh --version-file Cargo.toml --version-file conf-b.json --bump patch --no-commit --no-tag --allow-empty-changelog 2>&1)"
+STATUS=$?
+set -e
+assert_exit "(n2) run exits 0" "0" "$STATUS"
+NEW_N2="$(tail -1 <<<"$OUT")"
+CONF_A_VER2="$(grep -m1 '"version"' conf-a.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+CONF_B_VER2="$(grep -m1 '"version"' conf-b.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+assert_eq "(n2) CLI --version-file overrides .bump-version.conf entirely" "$NEW_N2" "$CONF_B_VER2"
+assert_eq "(n2) conf-a.json (no longer in the effective list) is untouched this time" "0.1.0" "$CONF_A_VER2"
+git checkout -q -- Cargo.toml Cargo.lock CHANGELOG.md conf-b.json
 
 # never push from this test
 if [ -z "$(git remote -v)" ]; then

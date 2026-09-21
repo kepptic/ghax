@@ -20,9 +20,17 @@ Two files do the work:
    Merge-commit subjects and non-conforming subjects contribute nothing to
    the bump decision (safe default: no release).
 2. **A version file** bump-version.sh knows how to read/write:
-   `Cargo.toml` (`[workspace.package]`/`[package]`), `package.json`,
-   `pyproject.toml`, or a bare `VERSION` file. Multiple files can be kept
-   in lockstep via repeated `--version-file`.
+   `Cargo.toml` (`[workspace.package]`/`[package]`), `pyproject.toml`, a
+   bare `VERSION` file, or **any `*.json` file with a top-level
+   `"version"` key** (`package.json`, `composer.json`, ...) — rewritten via
+   regex substitution on that key, never `json.load`/`dump`, so formatting
+   survives. `package-lock.json` is special-cased to update both the root
+   `"version"` and `packages[""].version`. A file literally named
+   `manifest.json` (Chrome extension manifest) gets any
+   `-prerelease`/`+build` suffix stripped before writing, with a warning
+   logged when one was actually stripped — Chrome only accepts 1-4
+   dot-separated integers there. Multiple files can be kept in lockstep via
+   repeated `--version-file`, or via `.bump-version.conf` (below).
 3. **A `CHANGELOG.md`** with a Keep-a-Changelog `## [Unreleased]` section —
    or pass `--changelog-policy ignore` to skip the gate entirely (no
    changelog, or one that isn't PR-maintained).
@@ -110,6 +118,33 @@ appeared, to avoid a duplicate/conflicting release.
 | `--no-commit` / `--no-tag` | off | |
 | `--dry-run` / `--print-next` | off | preview only, no writes |
 | `--allow-empty-changelog` | off | proceed even with a required-but-empty changelog |
+
+## Repo-local config: `.bump-version.conf`
+
+For a repo that always wants the same flags (ghax itself is the example),
+drop a `.bump-version.conf` at the repo root instead of passing flags every
+time:
+
+```bash
+# .bump-version.conf — sourced as a plain shell fragment
+VERSION_FILES="Cargo.toml package.json package-lock.json extension/manifest.json"
+CHANGELOG_POLICY=require
+TAG_PREFIX=v
+COMMIT_PREFIX="release:"
+```
+
+Only four keys are read (`VERSION_FILES` as a **space-separated string**,
+not a repeated flag; `CHANGELOG_POLICY`; `TAG_PREFIX`; `COMMIT_PREFIX`).
+Precedence is **CLI flags > `.bump-version.conf` > built-in
+defaults/auto-detect** — a `--version-file` on the CLI fully replaces the
+conf's list (it doesn't append to it), same idea as any other flag
+overriding a default. `auto-release.yml` is written to cooperate: it only
+passes `--tag-prefix`/`--changelog-policy` through to the script when the
+workflow was actually given an explicit value (a `workflow_dispatch` or
+cross-repo `workflow_call` invocation) — on ghax's own normal
+`workflow_run`-triggered path there's nothing to pass, so the repo's
+`.bump-version.conf` governs every release without the workflow having to
+know it exists.
 
 ## What Conduit would need
 

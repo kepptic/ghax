@@ -51,7 +51,7 @@ Prerequisites: **Rust 1.80+**, **Node 20+**, git.
 
 ```bash
 npm install
-npm run build            # bundles Node daemon → dist/ghax-daemon.mjs (esbuild)
+npm run build            # scripts/build-daemon.mjs (esbuild) → dist/ghax-daemon.mjs + extension/build-info.json
 npm run build:rust       # compiles Rust CLI → target/release/ghax
 ./target/release/ghax attach   # attach to a running Edge on :9222
 ./target/release/ghax --help   # command surface
@@ -59,7 +59,13 @@ npm run typecheck              # tsc --noEmit
 ```
 
 During dev, editing `src/*.ts` requires `npm run build` again — the
-daemon is a bundle, not a live file.
+daemon is a bundle, not a live file. `npm run build` also stamps the
+bundle (and `extension/build-info.json`, for the bridge extension loaded
+unpacked in `extension/`) with `{version, gitSha, buildDate}` — see
+`scripts/build-daemon.mjs`. `ghax version --full` reports all three
+components' provenance side by side and warns if any of them disagree,
+which is the fast way to notice you forgot this step (or forgot to reload
+the extension after it).
 
 ## Local checks (pre-commit)
 
@@ -134,6 +140,18 @@ picking up) the `release.yml` binary-build workflow, and polling it with
 verifies its SHA-256, and installs it to `~/.cargo/bin/ghax`. On red, it
 stops with a pointer to `gh run view --log-failed` and installs nothing —
 you keep running the previous version until the build is fixed.
+
+`scripts/bump-version.sh` bumps whichever files ghax's `.bump-version.conf`
+lists (`Cargo.toml`, `package.json`, `package-lock.json`,
+`extension/manifest.json` — all four move together on every release now).
+It knows how to write TOML `version = "..."` lines and any JSON file's
+top-level `"version"` key (regex substitution, never
+`json.load`/`dump`, so formatting survives); `package-lock.json` gets both
+its root and `packages[""]` version fields; `extension/manifest.json`
+specifically has any semver prerelease/build suffix stripped first, since
+Chrome only accepts 1-4 dot-separated integers there. See
+`docs/release-automation.md` for the full adoption guide and config-file
+format if you're wiring this into another repo.
 
 To pull the latest published release without cutting a new one (e.g.
 another machine, or after someone else's release):

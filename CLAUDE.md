@@ -56,7 +56,17 @@ the tool in the past.
    bundle is loaded once at attach time. Changes to `src/daemon.ts` don't
    take effect until `ghax detach && bun run build && ghax attach`. Bit me
    once debugging LCP capture — daemon returned null because it was still
-   running the pre-fix code.
+   running the pre-fix code. `bun run build` / `npm run build` invoke
+   `scripts/build-daemon.mjs` (esbuild's JS API, not a shell one-liner —
+   needed to stamp `{version, gitSha, buildDate}` into the bundle via
+   `define`, cross-platform since this also runs in CI on Windows). The same
+   step writes `extension/build-info.json`, the bridge extension's only way
+   to report its own provenance (an MV3 service worker can't shell out to
+   git). `ghax version --full` reports the CLI, the running daemon, and the
+   connected bridge extension's versions side by side and warns on any
+   mismatch — the fast way to catch either half of this trap (a stale
+   daemon bundle, or a bridge extension not reloaded in
+   `edge://extensions`/`chrome://extensions` after a `git pull`).
 
 5. **The Rust CLI and daemon do not share source.** The Rust CLI uses
    `serde_json::Value` for daemon responses (the daemon already returns

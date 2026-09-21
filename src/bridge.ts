@@ -13,7 +13,10 @@
  *
  * Wire format (daemon <-> extension), one JSON object per WS message:
  *   extension -> daemon, on connect:
- *     {"type":"hello","agent":"ghax-ext","version":"0.1.0"}
+ *     {"type":"hello","agent":"ghax-ext","version":"0.1.0","gitSha?":"...","buildDate?":"..."}
+ *     (gitSha/buildDate are optional — absent on any extension build older
+ *     than the provenance change, or one loaded before its first `npm run
+ *     build` produced extension/build-info.json; treated as "unknown".)
  *   daemon -> extension, a CDP command to relay via chrome.debugger.sendCommand:
  *     {"id":<n>,"method":"Page.navigate","params":{...}}
  *   extension -> daemon, the command's reply:
@@ -48,6 +51,11 @@ export interface BridgeEvent {
 export interface BridgeExtensionInfo {
   agent?: string;
   version?: string;
+  /** Optional — absent for any extension build older than the provenance
+   * change (`hello` simply omits the fields), so every reader treats these
+   * as "unknown" rather than a protocol violation. */
+  gitSha?: string;
+  buildDate?: string;
 }
 
 /**
@@ -162,6 +170,8 @@ export interface BridgeInstance {
   browser: string;
   label: string;
   version: string;
+  gitSha: string;
+  buildDate: string;
   role: PeerRole;
   connected: boolean;
   controlledTabId: number | null;
@@ -221,6 +231,8 @@ interface Peer {
   browser: string;
   label: string;
   version: string;
+  gitSha: string;
+  buildDate: string;
   ws: WebSocket | null;
   role: PeerRole;
   lastHelloAt: number;
@@ -405,7 +417,11 @@ export class Bridge extends EventEmitter {
 
   get extensionInfo(): BridgeExtensionInfo | null {
     const p = this.boundPeer;
-    return p ? { agent: 'ghax-ext', version: p.version } : null;
+    if (!p) return null;
+    const info: BridgeExtensionInfo = { agent: 'ghax-ext', version: p.version };
+    if (p.gitSha && p.gitSha !== 'unknown') info.gitSha = p.gitSha;
+    if (p.buildDate && p.buildDate !== 'unknown') info.buildDate = p.buildDate;
+    return info;
   }
 
   /** The tab the bound extension reports it's currently driving, or null. */
@@ -429,6 +445,8 @@ export class Bridge extends EventEmitter {
       browser: p.browser,
       label: p.label,
       version: p.version,
+      gitSha: p.gitSha,
+      buildDate: p.buildDate,
       role: p.role,
       connected: p.ws?.readyState === WebSocket.OPEN,
       controlledTabId: p.controlledTabId,
@@ -684,11 +702,15 @@ export class Bridge extends EventEmitter {
     const browser = typeof msg.browser === 'string' ? msg.browser : '';
     const label = typeof msg.label === 'string' ? msg.label : '';
     const version = typeof msg.version === 'string' ? msg.version : '?';
+    // Optional — absent on any extension build predating the provenance
+    // change. 'unknown' is the same sentinel build-info.ts/build.rs use.
+    const gitSha = typeof msg.gitSha === 'string' && msg.gitSha ? msg.gitSha : 'unknown';
+    const buildDate = typeof msg.buildDate === 'string' && msg.buildDate ? msg.buildDate : 'unknown';
 
     let peer = this.peers.get(instanceId);
     if (!peer) {
       peer = {
-        instanceId, browser, label, version,
+        instanceId, browser, label, version, gitSha, buildDate,
         ws: null, role: 'parked',
         lastHelloAt: 0, lastFrameAt: Date.now(),
         helloCount: 0, replacedCount: 0, controlledTabId: null,
@@ -707,6 +729,8 @@ export class Bridge extends EventEmitter {
     peer.browser = browser || peer.browser;
     peer.label = label || peer.label;
     peer.version = version;
+    peer.gitSha = gitSha;
+    peer.buildDate = buildDate;
     peer.helloCount++;
     peer.lastHelloAt = Date.now();
     peer.lastFrameAt = Date.now();

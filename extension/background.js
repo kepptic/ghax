@@ -15,7 +15,9 @@
  * docs/design/plan/09-bridge-multi-agent.md.
  *
  * Wire format (see src/bridge.ts for the daemon side), per connection:
- *   -> daemon, on connect:   {"type":"hello","agent":"ghax-ext","version":"...","controlledTabId":N|null}
+ *   -> daemon, on connect:   {"type":"hello","agent":"ghax-ext","version":"...","controlledTabId":N|null,
+ *                             "gitSha?":"...","buildDate?":"..."}  (provenance fields omitted when
+ *                             extension/build-info.json hasn't been built yet, see getBuildInfo())
  *   <- daemon, disposition:  {"type":"hello-ack","role":"bound"|"parked","daemonId":"...","sessionToken?":"..."}
  *                            (`daemonId` identifies the daemon PROCESS; a change
  *                             on a port means a different agent, see applyRole)
@@ -102,6 +104,12 @@ const DORMANT_ALARM = 'ghax-bridge-dormant-retry';
 const DORMANT_RETRY_MIN = 5;
 
 /** port → BridgeConnection. One entry per scanned port, daemon present or not. */
+// Cached result of getBuildInfo() — fetched once per service-worker
+// lifetime (MV3 SWs are ephemeral, so "once" really means "once per wake",
+// which is cheap and fine; build-info.json never changes without a
+// reload anyway).
+let buildInfoCache = null;
+
 const connections = new Map();
 /**
  * tabId → the BridgeConnection driving it. The whole point of this registry:
@@ -215,6 +223,33 @@ async function setStatus() {
  * peer registry, so the same instanceId reaching all of them is correct — it
  * says "one browser", which is the truth they each need.
  */
+/**
+ * `npm run build` writes `extension/build-info.json` ({version, gitSha,
+ * buildDate} — the same triple the daemon stamps into dist/ghax-daemon.mjs,
+ * see scripts/build-daemon.mjs). A service worker has no filesystem or
+ * child_process access, so this is the only way it can report git sha /
+ * build date in `hello` — dynamic `import()` isn't allowed in MV3 service
+ * workers, but `fetch(chrome.runtime.getURL(...))` on the extension's own
+ * packaged files is. Missing/stale (extension loaded before a `git pull` +
+ * rebuild) is expected and handled: the fields are simply omitted from
+ * `hello`, same as a pre-provenance extension build.
+ */
+async function getBuildInfo() {
+  if (buildInfoCache) return buildInfoCache;
+  try {
+    const res = await fetch(chrome.runtime.getURL('build-info.json'));
+    const info = await res.json();
+    if (info && typeof info.gitSha === 'string' && typeof info.buildDate === 'string') {
+      buildInfoCache = info;
+      return info;
+    }
+  } catch {
+    // Not built yet, or fetch failed — hello omits the fields, which every
+    // reader already treats as "unknown provenance", not an error.
+  }
+  return null;
+}
+
 async function getIdentity() {
   const stored = await chrome.storage.local.get(['ghaxInstanceId', 'ghaxLabel']);
   let instanceId = stored.ghaxInstanceId;
@@ -420,6 +455,7 @@ class BridgeConnection {
       // Pairing code, if the user set one in the popup. Ignored by daemons that
       // don't require pairing; required by those started with a pair code.
       const { ghaxPairToken } = await chrome.storage.local.get('ghaxPairToken');
+      const buildInfo = await getBuildInfo();
       this.send({
         type: 'hello',
         agent: 'ghax-ext',
@@ -434,6 +470,12 @@ class BridgeConnection {
         controlledTabId: this.controlledTabId,
         resumeToken: session?.ghaxSessionToken ?? null,
         ...(typeof ghaxPairToken === 'string' && ghaxPairToken ? { pairToken: ghaxPairToken } : {}),
+        // Omitted entirely (not sent as "unknown") when build-info.json isn't
+        // there yet — an extension loaded before its first `npm run build`.
+        // The daemon side (src/bridge.ts hello handler) already treats a
+        // missing field as "unknown", so there's no wire-protocol reason to
+        // send the string.
+        ...(buildInfo ? { gitSha: buildInfo.gitSha, buildDate: buildInfo.buildDate } : {}),
       });
       this.startPing();
       void setStatus();

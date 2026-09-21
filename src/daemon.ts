@@ -43,6 +43,7 @@ import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
+import { BUILD_INFO } from './build-info';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -4073,6 +4074,9 @@ async function main() {
       // best-effort
     }
   };
+  log(
+    `daemon starting: ghax-daemon ${BUILD_INFO.version} (${BUILD_INFO.gitSha} ${BUILD_INFO.buildDate})`,
+  );
   log(bridgeMode ? `daemon starting in bridge mode, wsPort=${bridgePortBase}${bridgePortExplicit ? '' : '+'}` : `daemon starting, cdpHttp=${cdpHttpUrl}`);
 
   // Defense-in-depth: a stray async throw (e.g. inside a CDP event handler,
@@ -4306,6 +4310,9 @@ async function main() {
         ok: true,
         bundlePath,
         bundleSha256,
+        version: BUILD_INFO.version,
+        gitSha: BUILD_INFO.gitSha,
+        buildDate: BUILD_INFO.buildDate,
         bridgeMode,
         controlledTabId: ctx.bridge?.controlledTabId ?? null,
         extensionInfo: ctx.bridge?.extensionInfo ?? null,

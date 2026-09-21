@@ -15,10 +15,26 @@ browser-level CDP endpoint, including the `ext` family, return an explicit
 
 ## Load it (unpacked)
 
-1. Open `edge://extensions` (or `chrome://extensions`).
-2. Turn on **Developer mode** (top-right toggle).
-3. Click **Load unpacked** and select this `extension/` directory.
-4. Pin the "ghax bridge" icon to the toolbar if you want quick access.
+1. **Run `npm run build` first.** This writes `extension/build-info.json`
+   (version + git sha + build date) alongside building the daemon bundle —
+   the extension's service worker reads it at startup and reports it in its
+   `hello` handshake so `ghax version --full` can tell you which commit
+   you're actually running. Skipping this step isn't fatal (the extension
+   still works; it just can't report provenance), but do it anyway.
+2. Open `edge://extensions` (or `chrome://extensions`).
+3. Turn on **Developer mode** (top-right toggle).
+4. Click **Load unpacked** and select this `extension/` directory.
+5. Pin the "ghax bridge" icon to the toolbar if you want quick access.
+
+**After every `git pull`: rebuild (`npm run build`) and reload the
+extension** in `edge://extensions`/`chrome://extensions` (the reload icon on
+its card — a fresh `Load unpacked` isn't needed, just a reload). An
+unpacked extension never updates itself; a stale one is the single most
+common source of "it used to work" confusion (see `CLAUDE.md` invariant 4's
+daemon-bundle version of the same trap). `ghax version --full` now catches
+this for you: it warns on stderr when the connected extension's version
+doesn't match the CLI's, and `ghax attach --extension` prints the same
+warning the moment a stale extension's `hello` lands.
 
 ## Use it
 

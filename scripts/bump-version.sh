@@ -20,13 +20,20 @@
 #   --changelog <path>                     Default: CHANGELOG.md if present
 #   --changelog-policy require|ignore      Default: require (only enforced
 #                                          when the changelog file exists)
-#   --version-file <path>                  Repeatable. Default: auto-detect
-#                                          Cargo.toml, package.json, VERSION,
+#   --version-file <path>                  Repeatable. Default: repo-local
+#                                          config (see below), else
+#                                          auto-detect Cargo.toml,
+#                                          package.json, VERSION,
 #                                          pyproject.toml (in that order,
 #                                          whichever exist). The FIRST file
 #                                          given/found is the source of
 #                                          truth for the current version;
-#                                          ALL listed files get bumped.
+#                                          ALL listed files get bumped,
+#                                          REGARDLESS of what version they
+#                                          currently hold (a file that has
+#                                          drifted out of sync gets forced
+#                                          to match, it is never silently
+#                                          skipped).
 #   --commit-prefix <prefix>               Default: "release:"
 #   --no-commit                            Bump files/changelog but don't commit
 #   --no-tag                               Commit but don't tag
@@ -35,6 +42,23 @@
 #                                          (or "none") and exit — no writes
 #   --allow-empty-changelog                Don't refuse when [Unreleased] has
 #                                          no entries (rolls it anyway)
+#
+# Repo-local config: if `.bump-version.conf` exists at the repo root, it is
+# sourced for four optional plain-string settings — `VERSION_FILES` (a
+# SPACE-SEPARATED string, not a flag list), `CHANGELOG_POLICY`, `TAG_PREFIX`,
+# `COMMIT_PREFIX`. Precedence is CLI flags > `.bump-version.conf` > the
+# built-in defaults/auto-detect above. A `--version-file` flag on the CLI
+# fully replaces the conf's file list rather than appending to it.
+#
+# Supported version-file types: Cargo.toml / pyproject.toml (TOML
+# `^version = "..."`), a bare VERSION file, and ANY `*.json` file with a
+# top-level `"version"` key (package.json, composer.json, ...) — rewritten
+# via textual regex substitution, never json.load/dump, so formatting is
+# preserved. `package-lock.json` is special-cased: both the root `"version"`
+# and `packages[""].version` fields are updated. A file literally named
+# `manifest.json` (Chrome extension manifest) gets any `-prerelease`/`+build`
+# suffix stripped before writing (Chrome requires 1-4 dot-separated
+# integers), with a warning logged when a suffix was actually stripped.
 #
 # Bump rule (--bump auto):
 #   A `Release-As: X.Y.Z` trailer in any commit since the last tag wins,
@@ -78,13 +102,63 @@ DRY_RUN=0
 PRINT_NEXT=0
 ALLOW_EMPTY_CHANGELOG=0
 
+# ── repo-local config (.bump-version.conf) ───────────────────────
+# Sourced into a subshell so its variable names (VERSION_FILES as a plain
+# string, TAG_PREFIX, CHANGELOG_POLICY, COMMIT_PREFIX) never collide with
+# this script's own array/scalar variables of the same name.
+CONF="$REPO_ROOT/.bump-version.conf"
+CONF_TAG_PREFIX=""
+CONF_CHANGELOG_POLICY=""
+CONF_COMMIT_PREFIX=""
+CONF_VERSION_FILES=""
+if [ -f "$CONF" ]; then
+  # This subshell's VERSION_FILES is a plain string (what .bump-version.conf
+  # itself assigns, e.g. `VERSION_FILES="a b c"`) — a genuinely different
+  # variable from the outer script's VERSION_FILES array, because a `( ... )`
+  # subshell gets its own scope. shellcheck's static analysis doesn't model
+  # that scoping and flags these two lines as if they touched the outer
+  # array; both are intentional.
+  # shellcheck disable=SC2178,SC2128
+  eval "$(
+    ( VERSION_FILES=""; TAG_PREFIX=""; CHANGELOG_POLICY=""; COMMIT_PREFIX=""
+      # shellcheck disable=SC1090
+      source "$CONF"
+      printf 'CONF_TAG_PREFIX=%q\n' "$TAG_PREFIX"
+      printf 'CONF_CHANGELOG_POLICY=%q\n' "$CHANGELOG_POLICY"
+      printf 'CONF_COMMIT_PREFIX=%q\n' "$COMMIT_PREFIX"
+      printf 'CONF_VERSION_FILES=%q\n' "$VERSION_FILES"
+    )
+  )"
+  log "repo-local config: $CONF"
+  [ -n "$CONF_TAG_PREFIX" ] && log "  tag-prefix       = $CONF_TAG_PREFIX"
+  [ -n "$CONF_CHANGELOG_POLICY" ] && log "  changelog-policy = $CONF_CHANGELOG_POLICY"
+  [ -n "$CONF_COMMIT_PREFIX" ] && log "  commit-prefix    = $CONF_COMMIT_PREFIX"
+  [ -n "$CONF_VERSION_FILES" ] && log "  version-files    = $CONF_VERSION_FILES"
+fi
+
+[ -n "$CONF_TAG_PREFIX" ] && TAG_PREFIX="$CONF_TAG_PREFIX"
+[ -n "$CONF_CHANGELOG_POLICY" ] && CHANGELOG_POLICY="$CONF_CHANGELOG_POLICY"
+[ -n "$CONF_COMMIT_PREFIX" ] && COMMIT_PREFIX="$CONF_COMMIT_PREFIX"
+if [ -n "$CONF_VERSION_FILES" ]; then
+  read -ra VERSION_FILES <<< "$CONF_VERSION_FILES"
+fi
+
+# ── CLI flags (override conf and defaults) ───────────────────────
+VERSION_FILES_CLI_RESET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bump) BUMP="$2"; shift 2 ;;
     --tag-prefix) TAG_PREFIX="$2"; shift 2 ;;
     --changelog) CHANGELOG="$2"; CHANGELOG_SET=1; shift 2 ;;
     --changelog-policy) CHANGELOG_POLICY="$2"; shift 2 ;;
-    --version-file) VERSION_FILES+=("$2"); shift 2 ;;
+    --version-file)
+      # First --version-file on the CLI replaces whatever conf/auto-detect
+      # put in this array wholesale; later ones append, same as before.
+      if [ "$VERSION_FILES_CLI_RESET" = 0 ]; then
+        VERSION_FILES=()
+        VERSION_FILES_CLI_RESET=1
+      fi
+      VERSION_FILES+=("$2"); shift 2 ;;
     --commit-prefix) COMMIT_PREFIX="$2"; shift 2 ;;
     --no-commit) DO_COMMIT=0; shift ;;
     --no-tag) DO_TAG=0; shift ;;
@@ -116,6 +190,7 @@ if [ "${#VERSION_FILES[@]}" -eq 0 ]; then
   done
 fi
 [ "${#VERSION_FILES[@]}" -eq 0 ] && die "no version file found (Cargo.toml/package.json/VERSION/pyproject.toml) and none given via --version-file"
+log "version files: ${VERSION_FILES[*]}"
 
 # ── dirty tree guard (skipped for --dry-run / --print-next) ─────────
 if [ "$DRY_RUN" = 0 ] && [ "$PRINT_NEXT" = 0 ]; then
@@ -125,41 +200,96 @@ if [ "$DRY_RUN" = 0 ] && [ "$PRINT_NEXT" = 0 ]; then
 fi
 
 # ── get/set version in a file ────────────────────────────────────
+# JSON handling (package.json, package-lock.json, extension/manifest.json,
+# composer.json, ...) is generic: any `*.json` file is read/written via a
+# regex match on the first `"version": "..."` occurrence, never
+# json.load/dump, so key order, indentation, and trailing whitespace survive
+# untouched.
 get_version() {
   local f="$1"
   case "$f" in
-    *Cargo.toml)
-      grep -m1 '^version = "' "$f" | sed -E 's/version = "([^"]+)".*/\1/'
-      ;;
-    *package.json)
-      grep -m1 '"version"[[:space:]]*:' "$f" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-      ;;
-    *pyproject.toml)
+    *Cargo.toml|*pyproject.toml)
       grep -m1 '^version = "' "$f" | sed -E 's/version = "([^"]+)".*/\1/'
       ;;
     */VERSION|VERSION)
       tr -d '[:space:]' < "$f"
       ;;
+    *.json)
+      grep -m1 '"version"[[:space:]]*:' "$f" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+      ;;
     *)
-      die "don't know how to read a version from $f (unsupported file type — supported: Cargo.toml, package.json, pyproject.toml, VERSION)"
+      die "don't know how to read a version from $f (unsupported file type — supported: Cargo.toml, pyproject.toml, VERSION, *.json)"
       ;;
   esac
 }
 
+# Writes $new into $f UNCONDITIONALLY — regardless of what version the file
+# currently holds. Earlier versions of this script matched on the OLD value
+# textually and silently no-op'd when a file had drifted out of sync (the
+# bug that left package.json/package-lock.json/extension/manifest.json
+# stuck at their placeholder versions across several ghax releases). Every
+# supported file type below is rewritten by matching the *shape* of the
+# version field (a `version = "..."` TOML line, a `"version": "..."` JSON
+# key), never the specific old value.
+json_replace_version() {
+  # json_replace_version <file> <new-version> <expected-occurrence-count>
+  local f="$1" new="$2" count="$3"
+  python3 - "$f" "$new" "$count" <<'PY'
+import re
+import sys
+import pathlib
+
+path, new, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+p = pathlib.Path(path)
+text = p.read_text()
+new_text, n = re.subn(r'"version"\s*:\s*"[^"]*"', f'"version": "{new}"', text, count=count)
+if n < count:
+    print(f"bump-version: expected {count} \"version\" occurrence(s) in {path}, found {n}", file=sys.stderr)
+    sys.exit(1)
+p.write_text(new_text)
+PY
+}
+
 set_version() {
-  local f="$1" new="$2" old="$3"
+  local f="$1" new="$2"
   case "$f" in
-    *Cargo.toml)
-      sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" "$f" && rm -f "$f.bak"
-      ;;
-    *package.json)
-      sed -i.bak "s/\"version\": \"$old\"/\"version\": \"$new\"/" "$f" && rm -f "$f.bak"
-      ;;
-    *pyproject.toml)
-      sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" "$f" && rm -f "$f.bak"
+    *Cargo.toml|*pyproject.toml)
+      python3 - "$f" "$new" <<'PY'
+import re
+import sys
+import pathlib
+
+path, new = sys.argv[1], sys.argv[2]
+p = pathlib.Path(path)
+text = p.read_text()
+new_text, n = re.subn(r'(?m)^version = "[^"]*"', f'version = "{new}"', text, count=1)
+if n == 0:
+    print(f"bump-version: no 'version = \"...\"' line found in {path}", file=sys.stderr)
+    sys.exit(1)
+p.write_text(new_text)
+PY
       ;;
     */VERSION|VERSION)
       printf '%s\n' "$new" > "$f"
+      ;;
+    *manifest.json)
+      # Chrome extension manifests only accept 1-4 dot-separated integers —
+      # strip any semver prerelease/build metadata before writing.
+      local stripped="$new"
+      if [[ "$stripped" =~ ^([0-9]+(\.[0-9]+){0,3}) ]]; then
+        stripped="${BASH_REMATCH[1]}"
+      fi
+      if [ "$stripped" != "$new" ]; then
+        log "warning: $f is a Chrome manifest — stripping prerelease/build suffix: $new -> $stripped"
+      fi
+      json_replace_version "$f" "$stripped" 1
+      ;;
+    */package-lock.json|package-lock.json)
+      # Two occurrences to update: the root "version" and packages[""].version.
+      json_replace_version "$f" "$new" 2
+      ;;
+    *.json)
+      json_replace_version "$f" "$new" 1
       ;;
     *)
       die "don't know how to write a version to $f (unsupported file type)"
@@ -360,7 +490,13 @@ PY
 fi
 
 for f in "${VERSION_FILES[@]}"; do
-  set_version "$f" "$NEW" "$CURRENT"
+  FILE_CURRENT="$(get_version "$f" 2>/dev/null || echo '?')"
+  set_version "$f" "$NEW"
+  if [ "$FILE_CURRENT" = "$NEW" ]; then
+    log "bumped $f (already $NEW)"
+  else
+    log "bumped $f: $FILE_CURRENT -> $NEW"
+  fi
   CHANGED_FILES+=("$f")
 done
 

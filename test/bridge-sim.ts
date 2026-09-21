@@ -107,6 +107,10 @@ class FakeExt {
 
   /** Set to send a pairToken in hello (for the pairing tests). */
   pairToken: string | null = null;
+  /** Set to send gitSha/buildDate in hello (provenance tests) — a real
+   * extension omits both when extension/build-info.json isn't built yet. */
+  gitSha: string | null = null;
+  buildDate: string | null = null;
 
   sendHello(): void {
     this.helloSends++;
@@ -119,6 +123,7 @@ class FakeExt {
       label: this.label,
       controlledTabId: 42,
       ...(this.pairToken ? { pairToken: this.pairToken } : {}),
+      ...(this.gitSha && this.buildDate ? { gitSha: this.gitSha, buildDate: this.buildDate } : {}),
     });
   }
 
@@ -329,6 +334,41 @@ async function main(): Promise<void> {
       assert(ext.role === 'bound', `expected bound, got ${ext.role}`);
       assert(bridge.state === 'BOUND', `state ${bridge.state}`);
       assert(bridge.controlledTabId === 42, `controlledTabId ${bridge.controlledTabId}`);
+    });
+  });
+
+  // Provenance (gitSha/buildDate): one peer sends them (a built extension),
+  // one doesn't (loaded before its first `npm run build`, or any
+  // pre-provenance extension version) — both must still bind normally, and
+  // extensionInfo/instances() must reflect exactly what each peer sent.
+  await test('hello WITH gitSha/buildDate is reflected in extensionInfo and instances()', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-provenance');
+      ext.gitSha = 'abc1234';
+      ext.buildDate = '2026-09-21';
+      await ext.connect();
+      await until(() => bridge.connected, 'bridge to report connected');
+      assert(bridge.extensionInfo?.gitSha === 'abc1234', `extensionInfo.gitSha: ${bridge.extensionInfo?.gitSha}`);
+      assert(bridge.extensionInfo?.buildDate === '2026-09-21', `extensionInfo.buildDate: ${bridge.extensionInfo?.buildDate}`);
+      const inst = bridge.instances().find((i) => i.instanceId === 'inst-provenance');
+      assert(inst?.gitSha === 'abc1234', `instances() gitSha: ${inst?.gitSha}`);
+      assert(inst?.buildDate === '2026-09-21', `instances() buildDate: ${inst?.buildDate}`);
+    });
+  });
+
+  await test('hello WITHOUT gitSha/buildDate still binds; fields read as unknown/absent', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-no-provenance');
+      // gitSha/buildDate left null — sendHello() omits them, same as a
+      // pre-provenance extension build.
+      await ext.connect();
+      await until(() => bridge.connected, 'bridge to report connected');
+      assert(ext.role === 'bound', `expected bound, got ${ext.role}`);
+      assert(bridge.extensionInfo?.gitSha === undefined, `extensionInfo.gitSha should be absent, got ${bridge.extensionInfo?.gitSha}`);
+      assert(bridge.extensionInfo?.buildDate === undefined, `extensionInfo.buildDate should be absent, got ${bridge.extensionInfo?.buildDate}`);
+      const inst = bridge.instances().find((i) => i.instanceId === 'inst-no-provenance');
+      assert(inst?.gitSha === 'unknown', `instances() gitSha should be 'unknown', got ${inst?.gitSha}`);
+      assert(inst?.buildDate === 'unknown', `instances() buildDate should be 'unknown', got ${inst?.buildDate}`);
     });
   });
 

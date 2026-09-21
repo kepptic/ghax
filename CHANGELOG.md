@@ -6,7 +6,69 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- **The Node daemon bundle and the bridge extension now carry build
+  provenance, same as the Rust CLI.** `scripts/build-daemon.mjs` (replacing
+  the plain esbuild CLI invocation `npm run build` used to shell out to)
+  stamps `dist/ghax-daemon.mjs` with `{version, gitSha, buildDate}` via
+  esbuild's `define`, using the same env-var/fallback precedence as
+  `crates/cli/build.rs` (`BUILD_GIT_SHA`/`BUILD_DATE` → `git rev-parse`/now
+  → `unknown`). It also writes `extension/build-info.json`, which the
+  bridge extension's service worker fetches once at startup (a service
+  worker has no filesystem/git access) and includes in its `hello`
+  handshake — both fields are optional on the wire and omitted entirely by
+  any extension build predating this change or loaded before its first
+  `npm run build`.
+- **`ghax version --full` shows all three shipped components side by side
+  and warns on any version mismatch.** Under "running daemon:" it now
+  prints `version ghax-daemon X.Y.Z (<sha> <date>)`, and the bridge
+  extension line gains `(<sha> <date>)` when the extension reported them.
+  Two new stderr warnings fire when the CLI's own version disagrees with
+  what it's talking to: `running daemon is vX, CLI is vY — run 'ghax
+  detach && ghax attach'...` and `bridge extension is vX, CLI is vY —
+  reload it in edge://extensions...`. The extension warning also fires
+  once, immediately, the moment `ghax attach --extension` sees a
+  mismatched `hello` — no need to separately run `version --full` to
+  discover a forgotten reload. `--full --json` gains `daemonVersionMismatch`
+  and `extensionVersionMismatch` booleans. These are the two most common
+  ghax support problems (see `CLAUDE.md` invariant 4 and
+  `extension/README.md`'s reload notes) turned into a diagnostic instead of
+  a two-hour debugging session.
+- **`scripts/bump-version.sh` gained a repo-local config file,
+  `.bump-version.conf`** (`VERSION_FILES`, `CHANGELOG_POLICY`, `TAG_PREFIX`,
+  `COMMIT_PREFIX` — precedence CLI flags > conf > built-in
+  defaults/auto-detect). ghax's own `.bump-version.conf` lists all four
+  version files that now need to move together: `Cargo.toml package.json
+  package-lock.json extension/manifest.json`.
+- `scripts/bump-version.sh` now bumps **any `*.json` file with a top-level
+  `"version"` key** (not just `package.json`), via textual regex
+  substitution (never `json.load`/`dump`, so formatting is preserved).
+  `package-lock.json` is special-cased to update both the root `"version"`
+  and `packages[""].version`. A file literally named `manifest.json` gets
+  any `-prerelease`/`+build` suffix stripped before writing, with a logged
+  warning — Chrome extension manifests only accept 1-4 dot-separated
+  integers.
+
+### Changed
+- `package.json`, `package-lock.json`, and `extension/manifest.json` now
+  track the ghax workspace version (`Cargo.toml`) instead of drifting
+  independently — `package.json`/`package-lock.json` jump from the
+  `0.0.1` placeholder they'd been stuck at since the project's first commit
+  to `0.6.0`, and `extension/manifest.json` jumps from `0.3.0` to `0.6.0`.
+  Every future release now bumps all four files together in the same
+  `release:` commit. **If you have the bridge extension loaded unpacked,
+  reload it in `edge://extensions` (or `chrome://extensions`) after
+  updating** — `ghax version --full` now tells you when it's stale instead
+  of silently drifting.
+- **Fixed a silent-skip bug in `scripts/bump-version.sh`**: `set_version()`
+  used to match the file's OLD version textually before rewriting it, so a
+  version file that had already drifted out of sync (exactly the state
+  `package.json`/`package-lock.json`/`extension/manifest.json` were stuck
+  in above) was silently left untouched on every release — the tool never
+  errored, it just quietly did nothing to that file. Every supported file
+  type is now rewritten by matching the *shape* of its version field
+  (`version = "..."` / `"version": "..."`), never the specific old value,
+  so a drifted file gets forced back into sync instead of staying drifted.
 
 ## [0.6.0] - 2026-09-21
 ### Added

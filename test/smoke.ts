@@ -239,8 +239,10 @@ c('version --full --json reports resolved + running bundle and mismatch flag', a
   const v = parseJson<{
     cli: { version: string; gitSha: string; buildDate: string };
     resolvedBundle: { path: string | null; tier: string; sha256: string };
-    daemon: { bundleSha256?: string; bundlePath?: string } | null;
+    daemon: { bundleSha256?: string; bundlePath?: string; version?: string; gitSha?: string; buildDate?: string } | null;
     bundleMismatch: boolean;
+    daemonVersionMismatch: boolean;
+    extensionVersionMismatch: boolean;
   }>(r.stdout);
   assert(typeof v.cli?.version === 'string', 'version --full missing cli.version');
   assert(typeof v.cli?.buildDate === 'string', 'version --full missing cli.buildDate');
@@ -252,6 +254,34 @@ c('version --full --json reports resolved + running bundle and mismatch flag', a
     `daemon bundleSha256 not a sha256: ${JSON.stringify(v.daemon?.bundleSha256)}`,
   );
   assert(typeof v.bundleMismatch === 'boolean', 'version --full missing bundleMismatch');
+  // Daemon and CLI are built from the same working tree in this suite (the
+  // smoke run rebuilds the bundle before attaching), so they must report
+  // the identical version/provenance — the whole point of the daemon
+  // carrying provenance at all is to catch the case where they DON'T.
+  assert(v.daemon?.version === v.cli.version, `daemon.version (${v.daemon?.version}) !== cli.version (${v.cli.version})`);
+  assert(
+    typeof v.daemon?.gitSha === 'string' && v.daemon.gitSha.length > 0,
+    `daemon.gitSha missing/empty: ${JSON.stringify(v.daemon?.gitSha)}`,
+  );
+  assert(
+    typeof v.daemon?.buildDate === 'string' && v.daemon.buildDate.length > 0,
+    `daemon.buildDate missing/empty: ${JSON.stringify(v.daemon?.buildDate)}`,
+  );
+  assert(typeof v.daemonVersionMismatch === 'boolean', 'version --full missing daemonVersionMismatch');
+  assert(v.daemonVersionMismatch === false, 'daemonVersionMismatch should be false when daemon and CLI share a build');
+  assert(typeof v.extensionVersionMismatch === 'boolean', 'version --full missing extensionVersionMismatch');
+
+  // scripts/build-daemon.mjs writes extension/build-info.json in the SAME
+  // build step as dist/ghax-daemon.mjs — the bridge extension's only way to
+  // report provenance (a service worker can't shell out to git). They must
+  // agree, or the extension would report stale provenance for a fresh build.
+  const buildInfoPath = path.join(root, 'extension', 'build-info.json');
+  assert(fs.existsSync(buildInfoPath), `${buildInfoPath} missing — did 'npm run build' run before this suite?`);
+  const extBuildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8'));
+  assert(
+    extBuildInfo.gitSha === v.daemon?.gitSha,
+    `extension/build-info.json gitSha (${extBuildInfo.gitSha}) !== daemon-reported gitSha (${v.daemon?.gitSha})`,
+  );
 });
 
 c('tabs returns a non-empty list', async () => {

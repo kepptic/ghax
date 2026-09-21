@@ -10,6 +10,16 @@
 //! extension. A mismatch between the resolved and running bundle is flagged
 //! loudly — that mismatch is exactly what a `cargo clean` or a stale symlink
 //! produces. See docs/design/plan/08-bridge-reliability.md §6.
+//!
+//! Beyond bundle-bytes provenance, `--full` also shows the three shipped
+//! components' *semver* side by side — CLI, running daemon
+//! (`ghax-daemon X.Y.Z (<sha> <date>)`), and bridge extension
+//! (`ghax-ext vX.Y.Z (<sha> <date>)`) — and warns on stderr when the daemon
+//! or extension disagree with the CLI's own version. Those are the two
+//! stale-component traps documented in the repo's CLAUDE.md invariant 4: a
+//! daemon bundle built before the last `npm run build`, and a bridge
+//! extension not reloaded in `edge://extensions` since. `--full --json`
+//! exposes both as `daemonVersionMismatch` / `extensionVersionMismatch`.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -86,6 +96,17 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         None => false,
     };
 
+    // Component-version mismatch checks — the two stale-component traps
+    // (see module doc comment): a daemon bundle built before the last
+    // `npm run build`, or a bridge extension not reloaded in
+    // edge://extensions since. Distinct from `bundleMismatch` above, which
+    // is about the daemon's *executable bytes*, not the semver it reports.
+    let daemon_version = daemon.as_ref().and_then(|d| d.get("version")).and_then(|v| v.as_str());
+    let daemon_version_mismatch = daemon_version.is_some_and(|v| v != cli_version);
+    let extension_info = daemon.as_ref().and_then(|d| d.get("extensionInfo"));
+    let extension_version = extension_info.and_then(|e| e.get("version")).and_then(|v| v.as_str());
+    let extension_version_mismatch = extension_version.is_some_and(|v| v != cli_version);
+
     if parsed.json() {
         output::print(
             &json!({
@@ -97,6 +118,8 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 },
                 "daemon": daemon,
                 "bundleMismatch": mismatch,
+                "daemonVersionMismatch": daemon_version_mismatch,
+                "extensionVersionMismatch": extension_version_mismatch,
             }),
             true,
         );
@@ -118,17 +141,30 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
             println!("running daemon:");
             println!("  path   {running_path}");
             println!("  sha256 {}", short_sha(running_sha));
+            if let Some(v) = daemon_version {
+                let sha = d.get("gitSha").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let date = d.get("buildDate").and_then(|v| v.as_str()).unwrap_or("unknown");
+                println!("  version ghax-daemon {v} ({sha} {date})");
+            }
             if d.get("bridgeMode").and_then(|v| v.as_bool()) == Some(true) {
-                let ext = d.get("extensionInfo");
-                let ext_ver = ext
-                    .and_then(|e| e.get("version"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(not connected)");
+                let ext = extension_info;
+                let ext_ver = ext.and_then(|e| e.get("version")).and_then(|v| v.as_str());
                 let ext_agent = ext
                     .and_then(|e| e.get("agent"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                println!("  bridge extension: {ext_agent} v{ext_ver}");
+                match ext_ver {
+                    Some(v) => {
+                        let sha = ext.and_then(|e| e.get("gitSha")).and_then(|v| v.as_str());
+                        let date = ext.and_then(|e| e.get("buildDate")).and_then(|v| v.as_str());
+                        let provenance = match (sha, date) {
+                            (Some(s), Some(d)) => format!(" ({s} {d})"),
+                            _ => String::new(),
+                        };
+                        println!("  bridge extension: {ext_agent} v{v}{provenance}");
+                    }
+                    None => println!("  bridge extension: (not connected)"),
+                }
             }
         }
     }
@@ -140,6 +176,22 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         eprintln!(
             "         Run `ghax detach && ghax attach` to restart the daemon on the current bundle."
         );
+    }
+    if daemon_version_mismatch {
+        if let Some(v) = daemon_version {
+            eprintln!();
+            eprintln!(
+                "WARNING: running daemon is v{v}, CLI is v{cli_version} — run 'ghax detach && ghax attach' (or reinstall) so they match."
+            );
+        }
+    }
+    if extension_version_mismatch {
+        if let Some(v) = extension_version {
+            eprintln!();
+            eprintln!(
+                "WARNING: bridge extension is v{v}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
+            );
+        }
     }
 
     Ok(EXIT_OK)

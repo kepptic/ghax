@@ -77,8 +77,14 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     env:
       BUMP: ${{ inputs.bump || 'auto' }}
-      TAG_PREFIX: ${{ inputs['tag-prefix'] || 'v' }}
-      CHANGELOG_POLICY: ${{ inputs['changelog-policy'] || 'require' }}
+      # Empty (not 'v'/'require') when the caller didn't pass an explicit
+      # value — for ghax's own workflow_run-triggered runs (the common
+      # case), `inputs` isn't populated at all. Leaving these empty lets
+      # bump-version.sh's own precedence apply: CLI flag > .bump-version.conf
+      # > script default. Passing a hardcoded 'v'/'require' here on every
+      # run would silently override ghax's .bump-version.conf every time.
+      TAG_PREFIX: ${{ inputs['tag-prefix'] }}
+      CHANGELOG_POLICY: ${{ inputs['changelog-policy'] }}
       VERSION_FILES: ${{ inputs['version-files'] || '' }}
       RELEASE_WORKFLOW: ${{ inputs['release-workflow'] || 'release.yml' }}
     steps:
@@ -125,7 +131,13 @@ jobs:
           [ -f "$SCRIPT" ] || SCRIPT=".ghax-release-tools/scripts/bump-version.sh"
           echo "auto-release: using $SCRIPT"
 
-          ARGS=(--bump "$BUMP" --tag-prefix "$TAG_PREFIX" --changelog-policy "$CHANGELOG_POLICY")
+          ARGS=(--bump "$BUMP")
+          # Only pass these when the caller actually set them — an empty
+          # value here means "let bump-version.sh fall back to
+          # .bump-version.conf, then its own default" (see the TAG_PREFIX /
+          # CHANGELOG_POLICY env comment above).
+          [ -n "$TAG_PREFIX" ] && ARGS+=(--tag-prefix "$TAG_PREFIX")
+          [ -n "$CHANGELOG_POLICY" ] && ARGS+=(--changelog-policy "$CHANGELOG_POLICY")
           if [ -n "$VERSION_FILES" ]; then
             for f in $VERSION_FILES; do
               ARGS+=(--version-file "$f")
