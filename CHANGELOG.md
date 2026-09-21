@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.5.0] - 2026-09-21
 ### Added
 - **`ghax --version` now carries provenance.** `ghax --version`, `-V` and
   `ghax version` print `ghax X.Y.Z (<git short sha> <build date>)`; `--json`
@@ -1094,7 +1097,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kepptic/ghax/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/kepptic/ghax/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/kepptic/ghax/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kepptic/ghax/compare/v0.4.1...v0.4.2

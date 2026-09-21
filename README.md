@@ -51,7 +51,7 @@ irm https://github.com/kepptic/ghax/releases/latest/download/ghax-installer.ps1 
 Then, on any OS:
 
 ```bash
-ghax --version     # → ghax 0.4.4
+ghax --version     # → ghax 0.5.0 (1a2b3c4 2026-09-21)
 ghax --help        # full command surface (73 verbs)
 ```
 
