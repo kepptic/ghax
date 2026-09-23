@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.8.0] - 2026-09-23
 ### Added
 - **`ghax bridge reload`** — asks the connected bridge extension to reload
   itself (`chrome.runtime.reload()`), no click in edge://extensions needed.
@@ -1224,7 +1227,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/kepptic/ghax/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/kepptic/ghax/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kepptic/ghax/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kepptic/ghax/compare/v0.5.0...v0.6.0

@@ -1,6 +1,6 @@
 {
   "name": "@ghax/cli",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Attach to your real Chrome or Edge via CDP and drive it — tabs, clicks, a11y snapshots, plus MV3 extension internals.",
   "license": "MIT",
   "type": "module",
