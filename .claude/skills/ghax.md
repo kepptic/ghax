@@ -123,9 +123,18 @@ and the `ext` family (SW/panel/hot-reload).
 
 Bridge caveats:
 
-- **Reload after updating ghax.** Unpacked extensions load from disk at
-  load time — after pulling new ghax, reload the extension in
-  `edge://extensions` or the real Edge keeps running old code.
+- **Reload after updating ghax — no click needed.** The extension's
+  service worker caches its own build-info at startup, so after a
+  `git pull` + `npm run build` it keeps reporting stale (or no) provenance
+  until it reloads. Run `ghax bridge reload` instead of clicking reload in
+  `edge://extensions` — it asks the extension to reload itself and waits
+  for it to reconnect. `npm run sync-local` runs the whole post-release
+  loop (pull, rebuild, install, bridge reload) in one command. A reload
+  drops every OTHER agent's `chrome.debugger` attachment on that browser
+  too (one shared service worker, not per-agent sockets) — `ghax bridge
+  reload` warns and needs `--force` when `ghax tabs` shows another agent's
+  bridge port controlling a tab; each agent recovers automatically either
+  way, same as an ordinary service-worker eviction.
 - **Security (interim).** The bridge WS is localhost-only but currently
   has **no auth token** — while the daemon runs, any local process could
   connect and drive the browser. Acceptable on a single-user machine;
@@ -192,6 +201,8 @@ ghax bridge control --active             #   control the current active tab
 ghax bridge control --tab-id <n>         #   control a specific tab (see `tabs`)
 ghax bridge control --stop               #   release the tab (banner clears)
 ghax attach --extension --bridge-port N  # non-default WS port (default 9223)
+ghax bridge reload                       # reload the extension, no edge://extensions click
+ghax bridge reload --force               # also proceed if another agent has a tab claimed
 
 # Tab work
 ghax tabs                                # list {id, title, url, active}

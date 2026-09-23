@@ -93,6 +93,26 @@ class FakeExtension {
     return conn;
   }
 
+  /**
+   * chrome.runtime.reload(): kills the WHOLE service worker, not just the
+   * connection that asked for it — every daemon sharing this browser drops
+   * and reconnects independently, on its own reconnect loop. Mirrors the
+   * `reload` branch of handleControl in extension/background.js: each
+   * connection's in-memory tab claim is wiped first (simulateWorkerRespawn),
+   * same as an ordinary MV3 eviction, then every socket closes and reopens.
+   * This is the multi-agent fact `ghax bridge reload --force` exists to warn
+   * about at the CLI layer (Rust-only logic, exercised instead by
+   * `cargo test` and the live reload test — see docs/release-automation.md
+   * adjacent test plan).
+   */
+  async reload(): Promise<void> {
+    const conns = [...this.connections];
+    for (const conn of conns) conn.simulateWorkerRespawn();
+    for (const conn of conns) conn.close();
+    await new Promise<void>((r) => setTimeout(r, 30));
+    for (const conn of conns) await conn.open();
+  }
+
   ownerOf(tabId: number): FakeConnection | null {
     const owner = this.tabOwners.get(tabId);
     if (!owner) return null;
@@ -327,6 +347,13 @@ class FakeConnection {
     if (typeof msg.id === 'number') this.lastControlId = msg.id;
     if (this.swallowControl) return; // never answered — the request stays pending
     try {
+      if (msg.action === 'reload') {
+        // Ack first — same as extension/background.js — then bring down the
+        // whole shared worker, taking every OTHER daemon's connection with it.
+        this.send({ type: 'control-ack', id, ok: true });
+        setTimeout(() => { void this.ext.reload(); }, 20);
+        return;
+      }
       if (msg.action === 'stop') {
         this.setControlled(null);
         this.send({ type: 'control-ack', id, ok: true, tabId: null });
@@ -537,6 +564,50 @@ async function main(): Promise<void> {
       // A refused claim must leave BOTH agents where they were.
       assert(a.controlledTabId === 1, `A should still own tab 1, got ${a.controlledTabId}`);
       assert(cb.controlledTabId === null, `B should own nothing, got ${cb.controlledTabId}`);
+    } finally {
+      ext.closeAll();
+      a.close();
+      b.close();
+      await sleep(20);
+    }
+  });
+
+  // The Rust CLI's --force gate (crates/cli/src/bridge.rs) can't be reached
+  // from this browser-free TS simulator — it's argv parsing + an RPC round
+  // trip. What IS testable here is the fact that gate exists to warn about:
+  // a reload is a shared, browser-wide event. One agent asking for it drops
+  // every OTHER agent's connection too, and each agent reclaims exactly the
+  // tab it was driving before — same as any other MV3 service-worker
+  // eviction — with no operator action needed.
+  await test('reload broadcasts to every agent sharing the browser; each reclaims its own tab', async () => {
+    const base = reserveBase();
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const ext = new FakeExtension();
+    try {
+      const ca = await ext.connect(a.port);
+      await ext.connect(b.port);
+      await until(() => a.connected && b.connected, 'both daemons to bind');
+
+      // Agent A is driving tab 1 when agent B (a different agent, on this
+      // same shared browser) asks the extension to reload.
+      await a.sendControl({ action: 'control-tab', tabId: 1 });
+      assert(ca.controlledTabId === 1, 'A should own tab 1 before the reload');
+
+      let aDisconnected = false;
+      a.once('disconnect', () => { aDisconnected = true; });
+
+      const ack = await b.sendControl({ action: 'reload' });
+      assert(ack.ok, `reload control-ack should be ok, got ${JSON.stringify(ack)}`);
+
+      // chrome.runtime.reload() kills the WHOLE worker — A's own connection
+      // sees this as a disconnect too, even though A never asked for it.
+      await until(() => aDisconnected, "agent A's connection to drop from B's reload");
+
+      // Same browser instanceId + same (unchanged) daemonId on each side, so
+      // both agents reclaim exactly the tab they were driving, unattended.
+      await until(() => a.connected && b.connected, 'both agents to reconnect after the shared reload');
+      assert(a.controlledTabId === 1, `A should reclaim tab 1 after the reload, got ${a.controlledTabId}`);
     } finally {
       ext.closeAll();
       a.close();

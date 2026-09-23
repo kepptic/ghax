@@ -6,7 +6,34 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- **`ghax bridge reload`** — asks the connected bridge extension to reload
+  itself (`chrome.runtime.reload()`), no click in edge://extensions needed.
+  Fixes the real trap that motivated it: the extension's service worker
+  caches `extension/build-info.json` for its own lifetime, so an already-running
+  worker keeps reporting stale (or absent) `gitSha`/`buildDate` after a `git
+  pull` + `npm run build` until something makes it re-read the file. The
+  daemon's control channel gets a new `reload` action (extension/background.js,
+  src/bridge.ts) that acks BEFORE reloading — the worker dies immediately
+  after, so there's no "after" to ack from — and the subsequent reconnect
+  goes through the same self-healing path as an ordinary MV3 service-worker
+  eviction, including re-asserting whatever tab was under control. Prints
+  `bridge extension reloaded: ghax-ext vX.Y.Z (<sha> <date>)` and supports
+  `--timeout <ms>` (default 30s) and `--json` (`{ok, before, after,
+  durationMs}`). Refuses with exit 2 (`--force` to override) when another
+  agent currently has a tab claimed on the same browser, because a reload
+  drops EVERY agent's `chrome.debugger` attachment, not just the caller's —
+  and errors clearly, without hanging, against an extension too old to
+  understand the new control action.
+- **`scripts/sync-local.sh`** (`npm run sync-local`) — the post-release
+  local sync in one idempotent command: pull (skippable with `--no-pull`),
+  rebuild the Rust CLI + daemon bundle, dated-backup the previously
+  installed binary/bundle when their version actually changed, reinstall via
+  `scripts/install-link.sh`, then `ghax bridge reload` the browser extension
+  on a private state file so it never contends with a running agent's
+  daemon for a bridge port. Prints a three-line cli/daemon/extension version
+  table and exits non-zero if they disagree, or 0 with instructions if no
+  extension is connected within 30s (the CLI/daemon half still succeeded).
 
 ## [0.7.1] - 2026-09-21
 ### Fixed

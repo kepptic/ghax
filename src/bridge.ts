@@ -68,6 +68,7 @@ export type ControlTarget =
   | { action: 'control-tab'; tabId: number; quiet?: boolean }
   | { action: 'list-tabs' }
   | { action: 'new-window'; url: string }
+  | { action: 'reload' }
   | { action: 'stop' };
 
 export interface ControlAck {
@@ -316,6 +317,15 @@ export class Bridge extends EventEmitter {
   // `setDesiredControl` (env-driven initial control) or `sendControl`
   // (mid-session `ghax bridge control`); cleared by a `stop`.
   private desiredControl: ControlTarget | null = null;
+  /**
+   * Set whenever THIS daemon asks the extension to reload (`sendControl({action:
+   * 'reload'})`). The bound peer's socket closing a few seconds later is that
+   * reload doing its job, not a rival or a crash — `toDegraded` reads this to
+   * log accordingly. Deliberately loose (a few-second window, not a precise
+   * ack correlation): the grace/resume machinery downstream doesn't change
+   * either way, this only affects what gets logged.
+   */
+  private lastReloadRequestedAt = 0;
   private readonly log: (msg: string) => void;
   private readonly graceMs: number;
   private readonly livenessMs: number;
@@ -488,7 +498,9 @@ export class Bridge extends EventEmitter {
   private toDegraded(reason: string): void {
     if (this._state !== 'BOUND') return;
     this._state = 'DEGRADED';
-    this.log(`bridge: bound instance ${this.shortId(this.boundId)} lost (${reason}) — ${this.graceMs}ms grace`);
+    const expectedFromReload = Date.now() - this.lastReloadRequestedAt < 5_000;
+    const logged = expectedFromReload ? 'reload requested' : reason;
+    this.log(`bridge: bound instance ${this.shortId(this.boundId)} lost (${logged}) — ${this.graceMs}ms grace`);
     // In-flight commands can't be silently retried here: only the operation
     // layer knows whether the verb was a read or a click. Hand them a typed
     // interruption and let runBridgeOperation decide.
@@ -1026,6 +1038,11 @@ export class Bridge extends EventEmitter {
     if (target.action === 'stop') this.desiredControl = null;
     else if (target.action === 'control-active') this.desiredControl = target;
     else if (target.action === 'control-tab') this.desiredControl = { ...target, quiet: true };
+    // Deliberately NOT `desiredControl` — a reload must not become "what to
+    // re-assert on the next resume". Leaving desiredControl untouched means
+    // resumeSequence re-asserts whatever tab was ACTUALLY being driven before
+    // the reload, exactly like recovering from an ordinary SW eviction.
+    else if (target.action === 'reload') this.lastReloadRequestedAt = Date.now();
     const ws = this.boundPeer?.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN || this._state !== 'BOUND') {
       return Promise.reject(

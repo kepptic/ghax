@@ -26,15 +26,20 @@ browser-level CDP endpoint, including the `ext` family, return an explicit
 4. Click **Load unpacked** and select this `extension/` directory.
 5. Pin the "ghax bridge" icon to the toolbar if you want quick access.
 
-**After every `git pull`: rebuild (`npm run build`) and reload the
-extension** in `edge://extensions`/`chrome://extensions` (the reload icon on
-its card — a fresh `Load unpacked` isn't needed, just a reload). An
-unpacked extension never updates itself; a stale one is the single most
-common source of "it used to work" confusion (see `CLAUDE.md` invariant 4's
-daemon-bundle version of the same trap). `ghax version --full` now catches
-this for you: it warns on stderr when the connected extension's version
-doesn't match the CLI's, and `ghax attach --extension` prints the same
-warning the moment a stale extension's `hello` lands.
+**After every `git pull`: `npm run sync-local` (or `npm run build` +
+`ghax bridge reload`).** An unpacked extension never updates itself; a
+stale one is the single most common source of "it used to work" confusion
+(see `CLAUDE.md` invariant 4's daemon-bundle version of the same trap).
+`ghax bridge reload` asks the extension to reload itself and waits for it
+to reconnect — no click in `edge://extensions`/`chrome://extensions`
+needed, and no fresh `Load unpacked` either. (It works because the
+extension acks the reload request *before* calling
+`chrome.runtime.reload()` — the click-based path still exists as a
+fallback for an extension too old to understand that message.)
+`ghax version --full` also catches staleness for you: it warns on stderr
+when the connected extension's version doesn't match the CLI's, and
+`ghax attach --extension` prints the same warning the moment a stale
+extension's `hello` lands.
 
 ## Use it
 

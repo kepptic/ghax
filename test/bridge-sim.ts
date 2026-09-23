@@ -111,6 +111,16 @@ class FakeExt {
    * extension omits both when extension/build-info.json isn't built yet. */
   gitSha: string | null = null;
   buildDate: string | null = null;
+  /** Set to a control action this fake should silently ignore — never ack,
+   * never act — simulating an extension too old to have a `control` handler
+   * at all. */
+  ignoreControlAction: string | null = null;
+  /** Set to a control action this fake should immediately reject with
+   * "unknown control action" — simulating an extension that already has
+   * handleControl's catch-all `else` branch but predates this specific
+   * action. Verified live against a real (very stale) bridge extension:
+   * this is the failure shape that actually shows up, not a silent hang. */
+  rejectControlAction: string | null = null;
 
   sendHello(): void {
     this.helloSends++;
@@ -152,6 +162,11 @@ class FakeExt {
     if (msg.type === 'pong' || msg.type === 'ping') return;
     if (msg.type === 'control') {
       this.controls.push(String(msg.action));
+      if (msg.action === this.ignoreControlAction) return; // "too old to understand this" — no ack at all
+      if (msg.action === this.rejectControlAction) {
+        this.send({ type: 'control-ack', id: msg.id, ok: false, error: `unknown control action: ${msg.action}` });
+        return;
+      }
       if (msg.action === 'list-tabs') {
         this.send({
           type: 'control-ack', id: msg.id, ok: true, tabId: 42,
@@ -177,6 +192,19 @@ class FakeExt {
 
   send(obj: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
+  }
+
+  /**
+   * Simulate `chrome.runtime.reload()`: the socket dies, then the extension's
+   * own reconnect logic (background.js) brings it back on the SAME
+   * instanceId — chrome.storage.local survives a reload, unlike an in-memory
+   * worker. Callers update `gitSha`/`buildDate` beforehand to model a rebuilt
+   * extension/build-info.json taking effect.
+   */
+  async simulateReload(): Promise<void> {
+    this.kill();
+    await sleep(30);
+    await this.connect();
   }
 
   /** Hard-kill the socket, the way an evicted MV3 worker would. */
@@ -369,6 +397,88 @@ async function main(): Promise<void> {
       const inst = bridge.instances().find((i) => i.instanceId === 'inst-no-provenance');
       assert(inst?.gitSha === 'unknown', `instances() gitSha should be 'unknown', got ${inst?.gitSha}`);
       assert(inst?.buildDate === 'unknown', `instances() buildDate should be 'unknown', got ${inst?.buildDate}`);
+    });
+  });
+
+  // `ghax bridge reload` (src/daemon.ts `bridge.reload`) is a thin wrapper
+  // around exactly this: sendControl({action:'reload'}) then wait for the
+  // next 'hello'. Test the mechanism directly at the Bridge level, since
+  // there's no HTTP daemon in this simulator to call the RPC through.
+  await test('reload: extension acks then comes back with fresh gitSha/buildDate', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-reload-ok');
+      ext.gitSha = 'aaa1111';
+      ext.buildDate = '2026-09-01';
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+      const before = bridge.extensionInfo;
+      assert(before?.gitSha === 'aaa1111', `before gitSha: ${before?.gitSha}`);
+
+      const nextHello = new Promise<void>((resolve) => bridge.once('hello', () => resolve()));
+      const ack = await bridge.sendControl({ action: 'reload' });
+      assert(ack.ok, `reload control-ack should be ok, got ${JSON.stringify(ack)}`);
+
+      // The extension "rebuilds": a fresh build-info.json, same instanceId
+      // (chrome.storage.local survives a reload).
+      ext.gitSha = 'bbb2222';
+      ext.buildDate = '2026-09-22';
+      await ext.simulateReload();
+      await nextHello;
+      await until(() => bridge.connected, 're-bound after reload');
+
+      const after = bridge.extensionInfo;
+      assert(after?.gitSha === 'bbb2222', `after gitSha: ${after?.gitSha}`);
+      assert(after?.buildDate === '2026-09-22', `after buildDate: ${after?.buildDate}`);
+    });
+  });
+
+  await test('reload against an extension too old to understand it → clean timeout, no hang', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-reload-old');
+      ext.ignoreControlAction = 'reload';
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+
+      const startedAt = Date.now();
+      let caught: any;
+      try {
+        await bridge.sendControl({ action: 'reload' }, 150);
+      } catch (err) {
+        caught = err;
+      }
+      assert(caught, 'sendControl(reload) against an old extension must reject, not hang forever');
+      assert(/timed out/i.test(caught.message), `expected a timeout message, got: ${caught?.message}`);
+      assert(Date.now() - startedAt < 2000, 'must fail close to the requested timeout, not hang');
+      // The old extension is still there, unharmed — reload simply never ran.
+      assert(bridge.connected, 'the (non-reloading) extension should still be connected');
+    });
+  });
+
+  // Verified live against a real, long-stale bridge extension (v0.3.0):
+  // rather than a silent timeout, it answered `reload` IMMEDIATELY via
+  // handleControl's pre-existing catch-all — `{ok:false, error:"unknown
+  // control action: reload"}` — because that error path predates the reload
+  // feature itself. The daemon's bridge.reload RPC handler treats this the
+  // same as a timeout (see the `/unknown control action/i` check there); this
+  // test locks in the underlying Bridge-level rejection it depends on.
+  await test('reload against a slightly-older extension → immediate clean rejection, not a hang', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-reload-rejects');
+      ext.rejectControlAction = 'reload';
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+
+      let caught: any;
+      try {
+        await bridge.sendControl({ action: 'reload' }, 500);
+      } catch (err) {
+        caught = err;
+      }
+      assert(caught, 'sendControl(reload) against a rejecting extension must reject');
+      assert(
+        /unknown control action/i.test(caught.message),
+        `expected the extension's own rejection message, got: ${caught?.message}`,
+      );
     });
   });
 

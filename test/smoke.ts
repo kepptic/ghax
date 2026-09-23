@@ -1943,6 +1943,19 @@ c('downloads land in --downloads-dir with the site-suggested name', async () => 
   }
 });
 
+// The smoke suite runs on the CDP transport (no bridge extension involved),
+// so this is the one bridge-reload check that belongs here: everything else
+// about `ghax bridge reload` needs a real bridge connection and is covered by
+// test/bridge-sim.ts + test/bridge-multi-sim.ts + the live reload test.
+c('bridge reload errors clearly when the daemon is not in bridge mode', async () => {
+  const r = await run(['bridge', 'reload'], { allowFailure: true });
+  assert(r.exitCode !== 0, `expected a non-zero exit, got ${r.exitCode}`);
+  assert(
+    /requires bridge mode/i.test(r.stderr + r.stdout),
+    `expected a clear bridge-mode error, got exit=${r.exitCode} stdout=${r.stdout} stderr=${r.stderr}`,
+  );
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

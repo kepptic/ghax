@@ -57,6 +57,7 @@ import {
   bridgeSnapshot,
   bridgeText,
   isStaleContextError,
+  type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
   type ControlTarget,
@@ -174,7 +175,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'status', 'tabs', 'tab', 'find', 'newWindow',
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
-  'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use',
+  'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
 
@@ -1572,6 +1573,77 @@ register('bridge.control', async (ctx, _args, opts) => {
   return { ok: ack.ok, tabId: ack.tabId };
 });
 
+// `ghax bridge reload` — ask the connected extension to reload itself, so a
+// fresh `git pull` + `npm run build` (new manifest, new background.js, new
+// extension/build-info.json) takes effect with no manual click in
+// edge://extensions. Needed because the service worker caches build-info.json
+// for its own lifetime (see getBuildInfo() in extension/background.js) — a
+// worker that booted before the file existed keeps reporting stale/no
+// provenance until it reloads.
+register('bridge.reload', async (ctx, _args, opts) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new Error('bridge.reload requires bridge mode — start with `ghax attach --extension`');
+  }
+  const bridge = ctx.bridge;
+  const before = bridge.extensionInfo;
+  if (!before) {
+    throw new Error('bridge.reload: no extension connected — run `ghax attach --extension` first');
+  }
+  const timeoutMs = Number(opts.timeoutMs ?? opts.timeout) || 30_000;
+  const startedAt = Date.now();
+
+  // Set up the "it came back" wait BEFORE sending the reload request, so a
+  // reload that lands faster than this promise is wired can't be missed.
+  const reconnected = new Promise<BridgeExtensionInfo>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      bridge.off('hello', onHello);
+      reject(new Error(
+        `bridge.reload: extension did not reconnect within ${timeoutMs}ms — check that the browser `
+        + 'is still running and the ghax bridge extension shows up in edge://extensions.',
+      ));
+    }, timeoutMs);
+    const onHello = (info: BridgeExtensionInfo | null) => {
+      clearTimeout(timer);
+      bridge.off('hello', onHello);
+      resolve(info ?? { agent: 'ghax-ext', version: '?' });
+    };
+    bridge.on('hello', onHello);
+  });
+
+  // The ack timeout is short and independent of `timeoutMs`: the extension
+  // acks BEFORE calling chrome.runtime.reload() (extension/background.js), so
+  // a slow ack means the extension doesn't understand the message at all
+  // (too old), not that the reload itself is taking a while.
+  //
+  // Two distinct failure shapes both mean "too old", verified live against a
+  // real pre-this-feature extension: a very old build that predates the
+  // `control` handler entirely just never answers → `sendControl` times out.
+  // A merely-slightly-older build already has handleControl's catch-all
+  // `else { throw new Error('unknown control action: ...') }` and answers
+  // IMMEDIATELY with `{ok:false, error:'unknown control action: reload'}` —
+  // which rejects here just as fast, with no "timed out" in the message.
+  try {
+    const ack = await bridge.sendControl({ action: 'reload' }, 5_000);
+    if (!ack.ok) throw new Error('extension refused the reload request');
+  } catch (err) {
+    const msg = (err as Error)?.message ?? String(err);
+    if (/timed out/i.test(msg) || /unknown control action/i.test(msg)) {
+      // Deliberately doesn't spell "edge://" / "chrome://" — bridgeError()
+      // below pattern-matches those substrings to append an UNRELATED
+      // "point the bridge at a normal tab" hint (verified live: it fired on
+      // this exact message before this was reworded).
+      throw new Error(
+        'bridge.reload: extension did not acknowledge — it may be too old to support reload. '
+        + "Reload it once by hand in your browser's extensions manager, then retry.",
+      );
+    }
+    throw err;
+  }
+
+  const after = await reconnected;
+  return { ok: true, before, after, durationMs: Date.now() - startedAt };
+});
+
 // `ghax bridge instances` — the inventory that turns "why did my session just
 // die" into a five-second diagnosis: which browsers are connected, which one
 // is driving, and whether ownership has been flapping.
@@ -1580,6 +1652,10 @@ register('bridge.instances', async (ctx) => {
     throw new Error('bridge.instances requires bridge mode — start with `ghax attach --extension`');
   }
   return {
+    // This daemon's own bridge port — lets a caller (e.g. `ghax bridge
+    // reload`'s multi-agent guard) tell "a tab controlledBy me" from
+    // "controlledBy some other agent's daemon".
+    port: ctx.bridge.port,
     state: ctx.bridge.state,
     boundInstanceId: ctx.bridge.instances().find((i) => i.role === 'bound')?.instanceId ?? null,
     livelockSuspected: ctx.bridge.livelockSuspected,

@@ -105,6 +105,18 @@ script still dispatches too (for a uniform way to find the run to poll),
 but backs off first to check whether the tag-push-triggered run already
 appeared, to avoid a duplicate/conflicting release.
 
+## The local-side counterpart: `scripts/sync-local.sh`
+
+CI cutting a release doesn't update anyone's own machine. `npm run
+sync-local` is that other half: pull, rebuild the CLI + daemon bundle,
+reinstall via `scripts/install-link.sh`, and — new since the `ghax bridge
+reload` verb — reload the bridge extension so it picks up the fresh
+`extension/build-info.json` too, with no click in `edge://extensions`. It
+prints a three-line cli/daemon/extension version table and fails loudly if
+any of the three disagree, which is exactly the "stale component" trap
+`ghax version --full` was built to catch (see `CLAUDE.md` invariant 4) —
+now with a one-command fix instead of just a diagnosis.
+
 ## Config knobs (all flags on `bump-version.sh`; matching inputs on the workflow)
 
 | Flag | Default | Notes |

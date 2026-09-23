@@ -26,8 +26,14 @@
  *                            {"id":<n>,"error":{"message":"...","phase":"attach"|"dispatch"|"dispatch-detached"}}
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
- *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop","tabId?":N}
+ *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop"|
+ *                             "list-tabs"|"new-window"|"reload","tabId?":N}
  *   -> daemon, control ack:  {"type":"control-ack","id":<n>,"ok":bool,"tabId?":N,"error?":"..."}
+ *      "reload" is the odd one out: it acks BEFORE doing the thing (see
+ *      handleControl), because chrome.runtime.reload() kills this worker
+ *      outright — there is no "after" to ack from. No bound-role check either:
+ *      unlike control-active/control-tab it needs no chrome.debugger
+ *      attachment, so a parked connection can still ask for it.
  *   -> daemon, control note: {"type":"controlled","tabId":N|null}   (pushed on any change)
  * `list-tabs` acks additionally carry `controlledBy` per tab: the bridge port
  * of the agent that owns it, or null. Nothing else about the protocol changed.
@@ -956,6 +962,18 @@ class BridgeConnection {
   async handleControl(msg) {
     const id = msg.id ?? null;
     try {
+      if (msg.action === 'reload') {
+        // Ack FIRST — chrome.runtime.reload() tears this worker down before
+        // the event loop gets back around to anything, so there is no "after"
+        // to send an ack from. The daemon on the other end reads the socket
+        // close that follows as an EXPECTED consequence of the reload it just
+        // asked for (see Bridge.lastReloadRequestedAt in src/bridge.ts), not a
+        // rival extension taking over — same reconnect path as an ordinary
+        // MV3 service-worker eviction, just self-inflicted.
+        this.send({ type: 'control-ack', id, ok: true });
+        setTimeout(() => chrome.runtime.reload(), 50);
+        return;
+      }
       if (msg.action === 'stop') {
         await this.stopControl();
         this.send({ type: 'control-ack', id, ok: true, tabId: null });

@@ -141,6 +141,12 @@ verifies its SHA-256, and installs it to `~/.cargo/bin/ghax`. On red, it
 stops with a pointer to `gh run view --log-failed` and installs nothing —
 you keep running the previous version until the build is fixed.
 
+After CI cuts a release (yours or someone else's), run `npm run sync-local`
+on your own machine to catch up: pulls, rebuilds the CLI + daemon, reinstalls
+via `scripts/install-link.sh`, and reloads the bridge extension (`ghax bridge
+reload`) so it stops running the pre-release build — no click in
+`edge://extensions` needed. See [`scripts/sync-local.sh`](./scripts/sync-local.sh).
+
 `scripts/bump-version.sh` bumps whichever files ghax's `.bump-version.conf`
 lists (`Cargo.toml`, `package.json`, `package-lock.json`,
 `extension/manifest.json` — all four move together on every release now).

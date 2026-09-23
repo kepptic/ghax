@@ -181,7 +181,17 @@ ghax bridge control --tab-id <n>            # or point it at a specific tab (see
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
-Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); reload the unpacked extension after updating ghax; the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
+Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
+
+**Keeping the extension current — no click in edge://extensions.** After a `git pull` + `npm run build`, the extension's service worker is still running the OLD code and has cached the old `extension/build-info.json` for its own lifetime — `ghax version --full` will show it reporting a stale (or missing) sha until something makes it reload.
+
+```bash
+ghax bridge reload                 # asks the extension to reload itself, waits for it to reconnect
+ghax bridge reload --force         # also proceeds if another agent currently has a tab claimed
+npm run sync-local                 # the whole post-release loop: pull, rebuild, install, bridge reload
+```
+
+`ghax bridge reload` drops **every** agent's `chrome.debugger` attachment on that browser — it's one MV3 service worker dying, not a per-agent socket — so it warns and requires `--force` when `ghax tabs` shows another agent's bridge port controlling a tab. Each agent recovers the same way it recovers from an ordinary service-worker eviction: no operator action needed. `npm run sync-local` runs this as part of the standard post-release local sync — see [`scripts/sync-local.sh`](scripts/sync-local.sh).
 
 **Several browsers, or several profiles — one daemon.** Loading the extension in Edge *and* Chrome (or in two profiles) means several service workers reaching one daemon. Exactly one is **bound** and drives; the rest are **parked** — socket open, but no debugger attachment and no CDP. Parked peers stay quiet by design: closing their socket would restart their reconnect loop, which is what used to make two installs evict each other indefinitely.
 
