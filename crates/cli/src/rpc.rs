@@ -106,36 +106,50 @@ const DEFAULT_RPC_TIMEOUT_SECS: u64 = 120;
 /// Added to a verb's own `--timeout` so the daemon's answer (which may be a
 /// truthful "timed out") arrives before the CLI gives up.
 const OWN_TIMEOUT_MARGIN_SECS: u64 = 30;
-/// Verbs whose run time is set by the user (durations, waits, whole plans),
-/// so no default cap applies.
-const UNBOUNDED: &[&str] = &["perf", "profile", "batch", "ext.hot-reload"];
+/// `batch` gets the per-call budget per step, capped here.
+const BATCH_CAP_SECS: u64 = 30 * 60;
 
-/// The HTTP timeout for one call. `env` is GHAX_RPC_TIMEOUT's value.
-pub fn timeout_for(cmd: &str, opts: &Value, env: Option<&str>) -> Option<Duration> {
-    let own_ms = ["timeout", "timeoutMs"].iter().find_map(|k| match opts.get(*k) {
+fn num(v: Option<&Value>) -> Option<u64> {
+    match v {
         Some(Value::Number(n)) => n.as_u64(),
         Some(Value::String(s)) => s.trim().parse::<u64>().ok(),
         _ => None,
-    });
-    if let Some(ms) = own_ms {
-        return Some(Duration::from_millis(ms) + Duration::from_secs(OWN_TIMEOUT_MARGIN_SECS));
     }
-    if UNBOUNDED.contains(&cmd) {
-        return None;
+}
+
+/// The HTTP timeout for one call. `env` is GHAX_RPC_TIMEOUT's value.
+///
+/// Order: the verb's own `--timeout`/`timeoutMs` (+30 s margin); else
+/// GHAX_RPC_TIMEOUT when set (seconds, 0 = none), for every verb; else a
+/// per-verb default. Nothing is unbounded unless the user asks for it.
+pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> Option<Duration> {
+    let margin = Duration::from_secs(OWN_TIMEOUT_MARGIN_SECS);
+    if let Some(ms) = num(opts.get("timeout")).or_else(|| num(opts.get("timeoutMs"))) {
+        return Some(Duration::from_millis(ms) + margin);
     }
-    let secs = env
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS);
-    if secs == 0 {
-        None
-    } else {
-        Some(Duration::from_secs(secs))
+    if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()) {
+        return if secs == 0 { None } else { Some(Duration::from_secs(secs)) };
     }
+    let base = Duration::from_secs(DEFAULT_RPC_TIMEOUT_SECS);
+    Some(match cmd {
+        // A whole plan: the ordinary budget per step, capped.
+        "batch" => {
+            let steps = args.get(0).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(1).max(1);
+            Duration::from_secs((DEFAULT_RPC_TIMEOUT_SECS * steps as u64).min(BATCH_CAP_SECS))
+        }
+        // perf --wait <ms>
+        "perf" => base + Duration::from_millis(num(opts.get("wait")).unwrap_or(0)),
+        // profile --duration <s>, plus room for a heap snapshot.
+        "profile" => Duration::from_secs(600 + num(opts.get("duration")).unwrap_or(0)),
+        // ext hot-reload --wait <s> (default 5)
+        "ext.hot-reload" => base + Duration::from_secs(num(opts.get("wait")).unwrap_or(5)),
+        _ => base,
+    })
 }
 
 pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
     let env = std::env::var("GHAX_RPC_TIMEOUT").ok();
-    let timeout = timeout_for(cmd, &opts, env.as_deref());
+    let timeout = timeout_for(cmd, &args, &opts, env.as_deref());
     let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
     call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
 }
@@ -349,19 +363,31 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_default_env_own_and_unbounded() {
+    fn timeouts_default_env_own_and_per_verb() {
         let none = json!({});
-        assert_eq!(timeout_for("click", &none, None), Some(Duration::from_secs(120)));
-        assert_eq!(timeout_for("eval", &none, Some("5")), Some(Duration::from_secs(5)));
-        assert_eq!(timeout_for("eval", &none, Some("0")), None);
-        assert_eq!(timeout_for("eval", &none, Some("junk")), Some(Duration::from_secs(120)));
-        for cmd in ["perf", "profile", "batch", "ext.hot-reload"] {
-            assert_eq!(timeout_for(cmd, &none, None), None, "{cmd}");
-        }
+        let no_args = json!([]);
+        let t = |cmd: &str, args: &Value, opts: &Value, env: Option<&str>| timeout_for(cmd, args, opts, env);
+        assert_eq!(t("click", &no_args, &none, None), Some(Duration::from_secs(120)));
+        assert_eq!(t("eval", &no_args, &none, Some("5")), Some(Duration::from_secs(5)));
+        assert_eq!(t("eval", &no_args, &none, Some("0")), None);
+        assert_eq!(t("eval", &no_args, &none, Some("junk")), Some(Duration::from_secs(120)));
+        // Own --timeout wins, with a margin.
         let own = json!({ "timeout": "600000" });
-        assert_eq!(timeout_for("wait", &own, None), Some(Duration::from_secs(630)));
+        assert_eq!(t("wait", &no_args, &own, None), Some(Duration::from_secs(630)));
         let own_ms = json!({ "timeoutMs": 45000 });
-        assert_eq!(timeout_for("bridge.reload", &own_ms, Some("1")), Some(Duration::from_secs(75)));
+        assert_eq!(t("bridge.reload", &no_args, &own_ms, Some("1")), Some(Duration::from_secs(75)));
+        // Formerly unbounded verbs are bounded, and GHAX_RPC_TIMEOUT caps them.
+        let three = json!([[{ "cmd": "a" }, { "cmd": "b" }, { "cmd": "c" }]]);
+        assert_eq!(t("batch", &three, &none, None), Some(Duration::from_secs(360)));
+        let many = json!([vec![json!({ "cmd": "a" }); 100]]);
+        assert_eq!(t("batch", &many, &none, None), Some(Duration::from_secs(1800)));
+        assert_eq!(t("batch", &three, &none, Some("10")), Some(Duration::from_secs(10)));
+        assert_eq!(t("perf", &no_args, &json!({ "wait": "5000" }), None), Some(Duration::from_secs(125)));
+        assert_eq!(t("profile", &no_args, &json!({ "duration": "30" }), None), Some(Duration::from_secs(630)));
+        assert_eq!(t("ext.hot-reload", &no_args, &none, None), Some(Duration::from_secs(125)));
+        for cmd in ["perf", "profile", "batch", "ext.hot-reload"] {
+            assert_eq!(t(cmd, &no_args, &none, Some("7")), Some(Duration::from_secs(7)), "{cmd} honours GHAX_RPC_TIMEOUT");
+        }
     }
 
     #[test]

@@ -143,8 +143,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The CLI's daemon timeout is explicit: 120 s per call.** It used to be
   reqwest's implicit 30 s, which cut off long `wait --stable` and `perf
   --wait` runs. Now a call gets 120 s by default (`GHAX_RPC_TIMEOUT=<s>`,
-  `0` = none), a verb given its own `--timeout` gets that plus 30 s, and
-  `perf`, `profile`, `batch` and `ext hot-reload` are unbounded. A timeout
+  `0` = none, honoured by every verb), a verb given its own `--timeout`
+  gets that plus 30 s, and the long verbs get sized defaults: `batch` 120 s
+  per step (30 min cap), `perf` its `--wait` plus 120 s, `profile` its
+  `--duration` plus 10 min, `ext hot-reload` its `--wait` plus 120 s. A timeout
   says which verb stalled and how to raise the limit, and is never retried
   for a mutating verb.
 

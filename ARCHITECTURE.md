@@ -445,9 +445,9 @@ connect, timeout, or request error. Everything else retries only when the
 TCP connect failed, because the daemon finishes a command even if the CLI
 stops waiting: a timed-out `click` may already have clicked. Unknown verbs
 default to the no-retry side. Every call has an HTTP timeout
-(`rpc::timeout_for`): 120 s by default or `GHAX_RPC_TIMEOUT`, a verb's
-own `--timeout` plus 30 s, none for `perf`/`profile`/`batch`/`ext
-hot-reload`. The daemon's own replay after a bridge drop
+(`rpc::timeout_for`): a verb's own `--timeout` plus 30 s, else
+`GHAX_RPC_TIMEOUT` if set, else 120 s (sized up for `batch`, `perf`,
+`profile`, `ext hot-reload`). Nothing is unbounded unless asked. The daemon's own replay after a bridge drop
 is a separate table, `BRIDGE_RETRY_SAFE` (see
 `docs/design/plan/08-bridge-reliability.md` §2.3).
 

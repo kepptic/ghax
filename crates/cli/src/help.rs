@@ -146,7 +146,8 @@ Dev workflow:
 
 Add --json for machine-readable output on any command.
 Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
-  0 = none); verbs with their own --timeout get that plus 30 s.
+  0 = none); verbs with their own --timeout get that plus 30 s; batch gets
+  120 s per step.
 Put -- before a value that starts with a dash (ghax eval -- '--i').
 Add --trace to any command for a one-line CDP call summary on stderr
   (count, time, heaviest methods). stdout is unchanged.
