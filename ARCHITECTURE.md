@@ -194,6 +194,21 @@ element. Opt out with `--no-auto-snapshot`.
 as the new root instead of inheriting `aria-hidden="true"` from the
 outer app. `--no-dialog-scope` falls back to body-rooted.
 
+Before acting, bridge `click`/`fill`/`upload` run `src/actionability.ts`
+in the page (one `Runtime.callFunctionOn` on the resolved node). It is a
+port of Playwright's rules, not its code: `retarget('button-link')`,
+`getAriaDisabled` (native disabled, `fieldset[disabled]` minus its first
+legend, inherited `aria-disabled` through shadow hosts for the roles in
+`kAriaDisabledRoles`), `inert`, read-only for fill, and for click
+`checkVisibility`, scroll to centre, and `expectHitTarget`'s root-chain
+hit test. The function is shipped with `toString()`, so it must stay
+self-contained. A refusal is `BRIDGE_TARGET_NOT_ACTIONABLE` with a
+reason; a node that no longer exists is `BRIDGE_REF_STALE`. `--force`
+skips everything but "connected" and the rect. The Playwright path runs
+the same function in `precheck` mode (inherited `aria-disabled` and
+`inert` only) because Playwright's own actionability waits out its timeout
+on those two instead of failing.
+
 Shadow DOM: the cursor-interactive pass walks open shadow roots and
 emits Playwright chain selectors (`host >> inner`). This is the only
 form of selector Playwright accepts for descending into shadow trees

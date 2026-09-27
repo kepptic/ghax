@@ -18,6 +18,25 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   points at `--trace`.
 
 ### Fixed
+- **Bridge `click` no longer clicks whatever is on top.** Over the bridge,
+  `click @e3` scrolled, read the box model and fired a mouse event at the
+  centre, so a cookie banner, a spinner overlay or a disabled button all
+  "succeeded". `click`, `fill` and `upload` now run one in-page
+  actionability check first, ported from Playwright's own rules
+  (`retarget`, `getAriaDisabled`, `expectHitTarget`): connected; not
+  disabled (native, `fieldset[disabled]` outside its legend, inherited
+  `aria-disabled` across shadow roots) or inert; for fill, not read-only;
+  for click, visible, scrolled into view, and the hit test at the centre
+  lands on the element (or the button/link it sits in) through every shadow
+  root. Failures are typed: `BRIDGE_TARGET_NOT_ACTIONABLE` names the reason
+  and, for `covered`, the element on top (`covered by div#overlay "Accept
+  cookies"`); a ref whose node is gone is `BRIDGE_REF_STALE` instead of a
+  raw CDP string. `--force` skips the checks (also as a `batch` step opt).
+  The check, the scroll and the click point come from one
+  `Runtime.callFunctionOn`, replacing the old scroll + box-model pair, so a
+  click costs no extra blocking round-trips. On the CDP transport, `click`
+  and `fill` pre-check inherited `aria-disabled` and `inert` and fail at
+  once with the same code instead of waiting out Playwright's 30 s timeout.
 - **The CLI no longer re-sends a click, fill or other mutation after a lost
   reply.** `rpc.rs` retried every verb once on any transport error,
   including a timeout or reset after the daemon had already received the

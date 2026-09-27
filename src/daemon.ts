@@ -45,12 +45,18 @@ import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
+import { actionability } from './actionability';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
   Bridge,
   BridgeInterrupted,
+  BridgeTypedError,
+  notActionableError,
   bridgeBox,
+  bridgeGuard,
+  bridgeReleaseHandle,
+  bridgeResolveHandle,
   bridgeCallOn,
   bridgeEvaluate,
   bridgeGoto,
@@ -234,6 +240,9 @@ function register(name: string, fn: Handler) {
         (e as any).hint = 'Verify the page with `ghax snapshot`; ghax will not replay an action that may have mutated the page.';
         throw e;
       }
+      // Already typed (stale ref, not actionable): its code and hint are the
+      // specific ones, so never let the generic message matchers re-wrap it.
+      if (err instanceof BridgeTypedError) throw err;
       // Decorate recognized failures (unattachable tab, no extension) with a
       // code + recovery hint. Unrecognized errors pass through unchanged.
       const wrapped = bridgeError(err, {
@@ -1713,7 +1722,7 @@ register('screenshot', async (ctx, args, opts) => {
   const fullPage = Boolean(opts.fullPage || opts['full-page']);
   if (ctx.bridgeMode) {
     const ref = target ? await resolveBridgeTarget(ctx, target) : null;
-    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref);
+    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref, target ?? 'element');
     return { path: outPath };
   }
   const page = await activePage(ctx);
@@ -1730,11 +1739,12 @@ async function captureBridgeScreenshot(
   outPath: string,
   fullPage: boolean,
   ref: BridgeRef | null = null,
+  label = 'element',
 ): Promise<void> {
   await bridge.send('Page.enable');
   let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
   if (ref) {
-    clip = { ...(await bridgeBox(bridge, ref)), scale: 1 };
+    clip = { ...(await bridgeBox(bridge, ref, label)), scale: 1 };
   } else if (fullPage) {
     const metrics = await bridge.send('Page.getLayoutMetrics') as {
       cssContentSize?: { x?: number; y?: number; width?: number; height?: number };
@@ -1817,7 +1827,7 @@ register('box', async (ctx, args) => {
   if (!target) throw new Error('Usage: box <@ref|selector>');
   if (ctx.bridgeMode) {
     try {
-      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target));
+      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target), target);
     } catch (err) {
       if (String((err as Error)?.message ?? err).includes('element not visible')) {
         throw new Error(`${target}: element not visible or not in layout`);
@@ -2009,6 +2019,20 @@ async function annotateScreenshot(
   }
 }
 
+/**
+ * Playwright-path parity with the bridge guard (plan 10, settled decision 4).
+ * Playwright already refuses natively disabled and covered targets, but on
+ * an inherited aria-disabled or an inert ancestor it waits out its whole
+ * action timeout. This one evaluate turns that 30 s wait into the same typed
+ * BRIDGE_TARGET_NOT_ACTIONABLE the bridge raises. The code name is shared
+ * across transports on purpose so callers match one string.
+ */
+async function playwrightPrecheck(loc: Locator, label: string, kind: 'click' | 'fill', force: boolean): Promise<void> {
+  if (force) return;
+  const r = await loc.evaluate(actionability, { kind: 'precheck' as const, force: false });
+  if (!r.ok) throw notActionableError(label, kind, r);
+}
+
 // Click — Playwright's `loc.click()` resolves the moment the trusted mouse
 // event has been dispatched. That tells you "the click was sent" but says
 // nothing about whether the page reacted. Real-world failure mode: a
@@ -2033,6 +2057,9 @@ register('click', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   if (!target) throw new Error('Usage: click <@ref|selector>');
   const observe = opts.observe !== false && opts['no-observe'] !== true;
+  // --force skips the actionability guard (covered/disabled/hidden). Works as
+  // a batch step opt too: {"cmd":"click","args":["@e3"],"opts":{"force":true}}.
+  const force = opts.force === true;
   const observeMs = (() => {
     const raw = opts['observe-ms'] ?? opts.observeMs;
     if (raw === undefined) return 300;
@@ -2052,9 +2079,18 @@ register('click', async (ctx, args, opts) => {
       return { dialogs, url: location.href };
     })()`) as Promise<{ dialogs: number; url: string }>;
     const pre = observe ? await readState() : { dialogs: 0, url: '' };
-    const box = await bridgeBox(bridge, ref);
-    const x = box.x + box.width / 2;
-    const y = box.y + box.height / 2;
+    // One in-page call: guard, scroll into view, and the click point. A
+    // covered/disabled/hidden target fails here instead of clicking
+    // whatever sits on top of it.
+    const handle = await bridgeResolveHandle(bridge, ref, target);
+    let guard;
+    try {
+      ({ guard } = await bridgeGuard(bridge, handle, target, 'click', force));
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
+    const x = guard.x ?? 0;
+    const y = guard.y ?? 0;
     await bridge.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await bridge.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await bridge.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
@@ -2082,11 +2118,12 @@ register('click', async (ctx, args, opts) => {
 
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
+  await playwrightPrecheck(loc, target, 'click', force);
 
   const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
   const preUrl = observe ? page.url() : '';
 
-  await loc.click();
+  await loc.click(force ? { force: true } : undefined);
 
   if (!observe) return { ok: true };
 
@@ -2125,15 +2162,20 @@ register('click', async (ctx, args, opts) => {
   };
 });
 
-register('fill', async (ctx, args) => {
+register('fill', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const value = String(args[1] ?? '');
   if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
+  const force = opts.force === true;
   if (ctx.bridgeMode) {
-    const result = await bridgeCallOn(
-      requireBridge(ctx),
-      await resolveBridgeTarget(ctx, target),
-      `function(v) {
+    // Guard (connected, not disabled/inert, not read-only) and the fill run
+    // in the same in-page call. No visibility or hit test on purpose: Monaco
+    // and hidden-but-scriptable inputs are legitimate fill targets.
+    const bridge = requireBridge(ctx);
+    const handle = await bridgeResolveHandle(bridge, await resolveBridgeTarget(ctx, target), target);
+    let filled;
+    try {
+      filled = await bridgeGuard(bridge, handle, target, 'fill', force, { args: [value], fn: `function(v) {
         const start = this;
         const container = start.closest?.('.monaco-editor') || start.closest?.('[data-mode-id]');
         const root = container?.classList?.contains('monaco-editor') ? container : (container?.closest?.('.monaco-editor') || container);
@@ -2155,13 +2197,16 @@ register('fill', async (ctx, args) => {
         e.dispatchEvent(new Event('change', { bubbles: true }));
         e.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
         return {};
-      }`,
-      [value],
-    ) as { editor?: string } | undefined;
+      }` });
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
+    const result = filled.value as { editor?: string } | undefined;
     return result?.editor === 'monaco' ? { ok: true, editor: 'monaco' } : { ok: true };
   }
   const page = await activePage(ctx);
   const loc = resolveRef(ctx, target, page);
+  await playwrightPrecheck(loc, target, 'fill', force);
 
   // Monaco path — Datto RMM, Splunk, Grafana, Postman, and GitLab's Web IDE
   // all embed Monaco for script/query editors. Monaco renders its own
@@ -2528,7 +2573,7 @@ register('press', async (ctx, args) => {
 // that happens to exist in the attach directory. So bridge mode requires
 // an absolute path and rejects anything else with an actionable error
 // instead of guessing.
-register('upload', async (ctx, args) => {
+register('upload', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const pathArg = String(args[1] ?? '');
   if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
@@ -2545,10 +2590,14 @@ register('upload', async (ctx, args) => {
       }
       if (!fs.existsSync(p)) throw new Error(`upload: file not found: ${p}`);
     }
-    await requireBridge(ctx).send('DOM.setFileInputFiles', {
-      backendNodeId: ref.backendNodeId,
-      files: paths,
-    });
+    const bridge = requireBridge(ctx);
+    const handle = await bridgeResolveHandle(bridge, ref, target);
+    try {
+      await bridgeGuard(bridge, handle, target, 'upload', opts.force === true);
+      await bridge.send('DOM.setFileInputFiles', { objectId: handle.objectId, files: paths });
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
     return { ok: true, count: paths.length };
   }
   const page = await activePage(ctx);
@@ -4538,12 +4587,14 @@ async function main() {
         const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
         const code = typeof err?.code === 'string' ? err.code : undefined;
         const hint = typeof err?.hint === 'string' ? err.hint : undefined;
+        const details = err?.details && typeof err.details === 'object' ? err.details : undefined;
         json(res, 500, {
           ok: false,
           error: err.message || String(err),
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(code !== undefined ? { code } : {}),
           ...(hint !== undefined ? { hint } : {}),
+          ...(details !== undefined ? { details } : {}),
           ...buildTrace(),
         });
       }

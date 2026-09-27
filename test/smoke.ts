@@ -597,6 +597,42 @@ c('click --no-observe skips post-click observation', async () => {
   assert(!('dialogDismissed' in data) && !('urlChanged' in data), `expected no observation fields, got keys=${Object.keys(data)}`);
 });
 
+c('click refuses an inherited aria-disabled target fast, --force clicks it', async () => {
+  // Playwright alone would wait out its 30 s action timeout here. The
+  // precheck (src/actionability.ts, kind 'precheck') refuses immediately with
+  // the same typed code the bridge guard uses.
+  const html = `<div aria-disabled="true"><div role="button" id="b" onclick="window.__hit=(window.__hit||0)+1">Go</div></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const started = Date.now();
+  const r = await run(['click', '#b'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(Date.now() - started < 10_000, 'refusal should be immediate, not a Playwright timeout');
+  assert(/not actionable \(disabled\)/.test(r.stderr), `expected a disabled refusal: ${r.stderr}`);
+  assert(/hint: it is disabled/.test(r.stderr), `expected the disabled hint: ${r.stderr}`);
+  const forced = await run(['click', '#b', '--force', '--json']);
+  assert(parseJson<{ ok: boolean }>(forced.stdout).ok === true, `--force click should succeed: ${forced.stdout}`);
+  const hit = await run(['eval', 'window.__hit || 0']);
+  assert(hit.stdout.trim() === '1', `--force should have clicked once, __hit=${hit.stdout.trim()}`);
+});
+
+c('click refuses a target inside an inert subtree', async () => {
+  const html = `<main inert><button id="b">Behind modal</button></main>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['click', '#b'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/not actionable \(inert\)/.test(r.stderr), `expected an inert refusal: ${r.stderr}`);
+});
+
+c('fill refuses an aria-disabled textbox unless --force', async () => {
+  const html = `<div aria-disabled="true"><input id="t" aria-label="Name"></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['fill', '#t', 'x'], { allowFailure: true });
+  assert(r.exitCode === 4 && /not actionable \(disabled\)/.test(r.stderr), `fill should refuse: ${r.stderr}`);
+  await run(['fill', '#t', 'forced', '--force']);
+  const v = await run(['eval', "document.getElementById('t').value"]);
+  assert(v.stdout.trim() === 'forced', `--force fill should land, got ${v.stdout.trim()}`);
+});
+
 c('snapshot scopes locators to the auto-detected modal', async () => {
   // Two buttons named "Confirm": one in the modal, one outside (hidden by
   // an aria-hidden parent the way most React libs hide the page behind a

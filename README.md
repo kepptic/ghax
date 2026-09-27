@@ -260,6 +260,23 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
 - `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect.
 
+### Clicks that refuse to guess
+
+`click`, `fill` and `upload` check the target in the page before acting,
+using Playwright's rules on both transports. A cookie banner over the
+button, a disabled or `aria-disabled` control, an `inert` subtree behind a
+modal, or a hidden element fails with the reason and the element in the
+way, instead of reporting success:
+
+```
+$ ghax click @e7
+ghax: click @e7: covered by div#consent.banner "Accept cookies"
+hint: something is on top of it (div#consent.banner "Accept cookies"): dismiss it, click that instead, or pass --force
+```
+
+`--force` skips the checks. A ref whose element was re-rendered away fails
+as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
+
 ### Downloads
 
 - Attached-browser downloads behave like normal browsing: they go wherever

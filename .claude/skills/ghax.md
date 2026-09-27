@@ -214,7 +214,8 @@ ghax html [<selector>]                   # innerHTML
 # Snapshot + interact (the @ref workflow)
 ghax snapshot -i                         # interactive-only a11y tree with @e refs
 ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
-ghax click @e3                           # click by ref
+ghax click @e3                           # click by ref (refuses covered/disabled targets)
+ghax click @e3 --force                   # skip the actionability checks
 ghax fill @e5 "hello"                    # React-safe input fill
 ghax press Enter
 
@@ -363,6 +364,19 @@ walking them and no automation tool can force entry.
 - `5` — service worker didn't return after hot-reload (bump `--wait`)
 - `6` — re-inject failed on some tabs (details in `--verbose` output)
 - `10` — daemon failed to start
+
+Typed errors print `ghax: <message>` then `hint: <next step>` on stderr
+(exit 4). The ones worth branching on:
+
+- `BRIDGE_REF_STALE` — the element behind `@eN` is gone (re-render or
+  navigation). Re-snapshot and use a fresh ref.
+- `BRIDGE_TARGET_NOT_ACTIONABLE` — `click`/`fill`/`upload` refused before
+  acting. The message says why: `covered by <tag#id.class "text">` (a
+  banner or overlay is on top; dismiss it or click that instead),
+  `disabled` (native, `fieldset[disabled]`, or inherited `aria-disabled`),
+  `inert`, `readonly` (fill), `hidden`/`offscreen`. `--force` skips the
+  checks. Raised on both transports; the CDP path only pre-checks inherited
+  `aria-disabled` and `inert` (Playwright handles the rest itself).
 
 ## Design principles (inherited from gstack, adapted)
 

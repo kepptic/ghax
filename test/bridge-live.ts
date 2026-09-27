@@ -114,6 +114,75 @@ async function main(): Promise<void> {
     assert(f.url.includes('example.org'), `forward should return to example.org, got ${f.url}`);
   });
 
+  // ─── Actionability guard (plan 10, C5) ───────────────────────
+  // These need a real DOM, which the simulator cannot provide.
+  const dataUrl = (html: string) => `data:text/html,${encodeURIComponent(html)}`;
+  const overlayPage = dataUrl(`
+    <button id="under" onclick="window.__hit=(window.__hit||0)+1" style="position:absolute;top:40px;left:40px">Buy</button>
+    <div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.3)">Accept cookies</div>`);
+
+  await test('guard: click on a covered button is refused and names the overlay', async () => {
+    await run(['goto', overlayPage]);
+    const r = await run(['click', '#under']);
+    assert(r.code === 4, `expected exit 4, got ${r.code}: ${r.stderr}`);
+    assert(/covered by div#overlay/.test(r.stderr), `should name the coverer: ${r.stderr}`);
+    assert(/--force/.test(r.stderr), `hint should mention --force: ${r.stderr}`);
+    const hit = await run(['eval', 'window.__hit || 0']);
+    assert(hit.stdout.trim() === '0', 'the covered button must not have been clicked');
+  });
+
+  await test('guard: --force clicks through the overlay (at the button centre)', async () => {
+    const r = await run(['click', '#under', '--force', '--json']);
+    assert(r.code === 0, `--force should succeed: ${r.stderr}`);
+  });
+
+  await test('guard: fieldset[disabled] button is refused as disabled', async () => {
+    await run(['goto', dataUrl('<fieldset disabled><legend>L</legend><button id="b">Save</button></fieldset>')]);
+    const r = await run(['click', '#b']);
+    assert(r.code === 4 && /not actionable \(disabled\)/.test(r.stderr), `expected disabled: ${r.stderr}`);
+  });
+
+  await test('guard: a button inside the fieldset LEGEND stays enabled', async () => {
+    await run(['goto', dataUrl('<fieldset disabled><legend><button id="b" onclick="window.__ok=1">Toggle</button></legend></fieldset>')]);
+    const r = await run(['click', '#b']);
+    assert(r.code === 0, `legend button should click: ${r.stderr}`);
+  });
+
+  await test('guard: inherited aria-disabled wrapper is refused', async () => {
+    await run(['goto', dataUrl('<div aria-disabled="true"><span role="button" id="b">Go</span></div>')]);
+    const r = await run(['click', '#b']);
+    assert(r.code === 4 && /not actionable \(disabled\)/.test(r.stderr), `expected disabled: ${r.stderr}`);
+  });
+
+  const shadowPage = (covered: boolean) => dataUrl(`
+    <div id="host"></div>
+    <script>
+      const root = document.getElementById('host').attachShadow({ mode: 'open' });
+      root.innerHTML = '<button onclick="window.__shadow=1" style="margin:40px">Shadow Save</button>';
+    </script>
+    ${covered ? '<div id="overlay" style="position:fixed;inset:0">x</div>' : ''}`);
+
+  const shadowRef = async (): Promise<string> => {
+    const snap = await run(['snapshot', '-i']);
+    const m = /@(e\d+) \[button\] "Shadow Save"/.exec(snap.stdout);
+    assert(m, `shadow button not in snapshot:\n${snap.stdout}`);
+    return `@${m[1]}`;
+  };
+
+  await test('guard: a shadow-hosted button is hit-tested through its shadow root', async () => {
+    await run(['goto', shadowPage(false)]);
+    const r = await run(['click', await shadowRef()]);
+    assert(r.code === 0, `shadow click should pass the hit test: ${r.stderr}`);
+    const v = await run(['eval', 'window.__shadow || 0']);
+    assert(v.stdout.trim() === '1', 'shadow button should have been clicked');
+  });
+
+  await test('guard: a shadow-hosted button under an overlay is refused as covered', async () => {
+    await run(['goto', shadowPage(true)]);
+    const r = await run(['click', await shadowRef()]);
+    assert(r.code === 4 && /covered by div#overlay/.test(r.stderr), `expected covered: ${r.stderr}`);
+  });
+
   console.log();
   if (failures > 0) {
     console.error(`✗ ${failures}/${checks} checks failed`);

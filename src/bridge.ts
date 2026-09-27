@@ -43,6 +43,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
+import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
 
 export interface BridgeEvent {
   method: string;
@@ -1516,14 +1517,149 @@ export async function bridgeResolveSelector(bridge: Bridge, selector: string): P
   return { backendNodeId: object.backendNodeId, role: '', name: '' };
 }
 
+// ─── Typed action errors (plan 10, C5) ──────────────────────────────
+
+/**
+ * An error with a machine-readable `code` and a recovery `hint`, thrown by
+ * the helpers below and passed through the daemon's bridge error wrapper
+ * untouched. `details` rides along in the RPC envelope.
+ */
+export class BridgeTypedError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly hint: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+  }
+}
+
+/** What CDP says when a backend node id no longer maps to a live node. */
+const STALE_NODE_RE = /no node with given id|could not find node|does not belong to the document|node with given id does not exist/i;
+
+export function isStaleNodeError(err: unknown): boolean {
+  return STALE_NODE_RE.test((err as { message?: string } | null)?.message ?? String(err));
+}
+
+export function staleRefError(label: string): BridgeTypedError {
+  const hint = label.startsWith('@')
+    ? `the element behind ${label} is gone (re-render or navigation). Run 'ghax snapshot -i' and use a fresh ref.`
+    : `the element matched by ${label} is gone (re-render or navigation). Re-run the command.`;
+  return new BridgeTypedError(`${label}: element is gone`, 'BRIDGE_REF_STALE', hint);
+}
+
+const NOT_ACTIONABLE_HINTS: Record<string, (r: ActionabilityResult) => string> = {
+  covered: (r) => `something is on top of it (${r.coveredBy ?? 'unknown'}): dismiss it, click that instead, or pass --force`,
+  disabled: () => 'it is disabled; wait for it to enable or pick another ref',
+  inert: () => 'it sits inside an inert subtree (usually behind an open modal); close the modal or pick another ref',
+  readonly: () => 'it is read-only; pick an editable field or pass --force',
+  hidden: () => 're-snapshot; it is not visible at its current position',
+  offscreen: () => 're-snapshot; it is not visible at its current position',
+  detached: () => "re-snapshot with 'ghax snapshot -i'; the element left the document",
+};
+
+export function notActionableError(label: string, kind: string, r: ActionabilityResult): BridgeTypedError {
+  const reason = r.reason ?? 'unknown';
+  const what = r.retargeted ? `${label} (via ${r.retargeted})` : label;
+  const msg = reason === 'covered'
+    ? `${kind} ${what}: covered by ${r.coveredBy ?? 'another element'}`
+    : `${kind} ${what}: not actionable (${reason})`;
+  const hint = (NOT_ACTIONABLE_HINTS[reason] ?? (() => 'pass --force to act anyway'))(r);
+  return new BridgeTypedError(msg, 'BRIDGE_TARGET_NOT_ACTIONABLE', hint, {
+    reason,
+    ...(r.coveredBy ? { coveredBy: r.coveredBy } : {}),
+    ...(r.retargeted ? { retargeted: r.retargeted } : {}),
+  });
+}
+
+export interface BridgeHandle {
+  objectId: string;
+  backendNodeId: number;
+}
+
+/**
+ * Resolve a ref to a live Runtime object. The one place a stale backend node
+ * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
+ */
+export async function bridgeResolveHandle(bridge: Bridge, ref: BridgeRef, label = 'element'): Promise<BridgeHandle> {
+  let resolved: { object?: { objectId?: string } };
+  try {
+    resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as typeof resolved;
+  } catch (err) {
+    if (isStaleNodeError(err)) throw staleRefError(label);
+    throw err;
+  }
+  const objectId = resolved.object?.objectId;
+  if (!objectId) throw staleRefError(label);
+  return { objectId, backendNodeId: ref.backendNodeId };
+}
+
+/** Fire-and-forget: the caller never waits on a release. */
+export function bridgeReleaseHandle(bridge: Bridge, handle: BridgeHandle): void {
+  void bridge.send('Runtime.releaseObject', { objectId: handle.objectId }).catch(() => undefined);
+}
+
+const ACTIONABILITY_SRC = actionability.toString();
+
+/**
+ * ONE `Runtime.callFunctionOn` that checks the element and, for click,
+ * scrolls it into view and returns the click point. It replaces the old
+ * scrollIntoViewIfNeeded + getBoxModel pair, so a guarded click costs no
+ * more round-trips than an unguarded one did. `then` runs a second function
+ * on the same element in the same call when the guard passes (fill).
+ */
+export async function bridgeGuard(
+  bridge: Bridge,
+  handle: BridgeHandle,
+  label: string,
+  kind: ActionabilityKind,
+  force: boolean,
+  then?: { fn: string; args: unknown[] },
+): Promise<{ guard: ActionabilityResult; value?: unknown }> {
+  const functionDeclaration = `function(kind, force, ...rest) {
+    const guard = (${ACTIONABILITY_SRC})(this, { kind, force });
+    if (!guard.ok) return { guard };
+    ${then ? `return { guard, value: (${then.fn}).apply(this, rest) };` : 'return { guard };'}
+  }`;
+  let raw: unknown;
+  try {
+    raw = await bridge.send('Runtime.callFunctionOn', {
+      objectId: handle.objectId,
+      functionDeclaration,
+      arguments: [kind, force, ...(then?.args ?? [])].map((value) => ({ value })),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+  } catch (err) {
+    if (isStaleNodeError(err) || /cannot find object with id|could not find object/i.test(String((err as Error)?.message ?? err))) {
+      throw staleRefError(label);
+    }
+    throw err;
+  }
+  const out = unwrapEvalResult(raw) as { guard?: ActionabilityResult; value?: unknown } | undefined;
+  const guard = out?.guard;
+  if (!guard) throw new Error(`${kind} ${label}: actionability check returned nothing`);
+  if (!guard.ok) {
+    if (guard.reason === 'detached') throw staleRefError(label);
+    throw notActionableError(label, kind, guard);
+  }
+  return { guard, ...(out && 'value' in out ? { value: out.value } : {}) };
+}
+
 export async function bridgeBox(
   bridge: Bridge,
   ref: BridgeRef,
+  label = 'element',
 ): Promise<{ x: number; y: number; width: number; height: number }> {
   await bridge.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: ref.backendNodeId }).catch(() => undefined);
-  const model = await bridge.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }) as {
-    model?: { border?: number[]; content?: number[] };
-  };
+  let model: { model?: { border?: number[]; content?: number[] } };
+  try {
+    model = await bridge.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }) as typeof model;
+  } catch (err) {
+    if (isStaleNodeError(err)) throw staleRefError(label);
+    throw err;
+  }
   const quad = model.model?.border ?? model.model?.content;
   if (!quad || quad.length < 8) throw new Error('element not visible or not in layout');
   const xs = [quad[0], quad[2], quad[4], quad[6]];
@@ -1538,15 +1674,12 @@ export async function bridgeCallOn(
   ref: BridgeRef,
   functionDeclaration: string,
   args: unknown[] = [],
+  label = 'element',
 ): Promise<unknown> {
-  const resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as {
-    object?: { objectId?: string };
-  };
-  const objectId = resolved.object?.objectId;
-  if (!objectId) throw new Error('element no longer exists. Run \'ghax snapshot\' again.');
+  const handle = await bridgeResolveHandle(bridge, ref, label);
   try {
     const result = await bridge.send('Runtime.callFunctionOn', {
-      objectId,
+      objectId: handle.objectId,
       functionDeclaration,
       arguments: args.map((value) => ({ value })),
       awaitPromise: true,
@@ -1554,6 +1687,6 @@ export async function bridgeCallOn(
     });
     return unwrapEvalResult(result);
   } finally {
-    await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    bridgeReleaseHandle(bridge, handle);
   }
 }

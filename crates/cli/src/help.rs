@@ -49,10 +49,12 @@ Tab:
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
-  click <@ref|selector>
-  fill <@ref|selector> <value>              # Monaco-aware: routes into
+  click <@ref|selector> [--force]           # refuses covered, disabled, inert,
+                                             #   hidden targets; --force skips that
+  fill <@ref|selector> <value> [--force]    # Monaco-aware: routes into
                                              #   monaco.editor.getEditors() when
-                                             #   the target is inside a Monaco editor
+                                             #   the target is inside a Monaco editor.
+                                             #   Refuses disabled/read-only fields.
   select <@ref|selector> <value>            # by visible text, falling back to value attr
   select <@ref|selector> --index <n>        # by 0-based position
   select <@ref|selector> --by-value <val>   # explicit value semantics

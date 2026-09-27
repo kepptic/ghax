@@ -20,7 +20,15 @@
  */
 
 import { WebSocket } from 'ws';
-import { Bridge, BridgeInterrupted, isStaleContextError } from '../src/bridge';
+import {
+  Bridge,
+  BridgeInterrupted,
+  BridgeTypedError,
+  bridgeGuard,
+  bridgeReleaseHandle,
+  bridgeResolveHandle,
+  isStaleContextError,
+} from '../src/bridge';
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
@@ -65,6 +73,14 @@ class FakeExt {
   swallow = new Set<string>();
   /** Methods to answer with an error reply, keyed by the `phase` to report. */
   failWithPhase = new Map<string, string>();
+  /**
+   * Scripted CDP answers: return value becomes `result`; a throw becomes an
+   * error reply with that message. Lets sims drive snapshot/guard code paths
+   * that need real-looking results, not `{echoed}`.
+   */
+  replies = new Map<string, (params: any) => unknown>();
+  /** Params of every CDP command received, in order. */
+  sent: Array<{ method: string; params: any }> = [];
   private pingTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -180,7 +196,17 @@ class FakeExt {
     }
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       this.received.push(msg.method);
+      this.sent.push({ method: msg.method, params: msg.params ?? {} });
       if (this.swallow.has(msg.method)) return; // in flight forever
+      const reply = this.replies.get(msg.method);
+      if (reply) {
+        try {
+          this.send({ id: msg.id, result: reply(msg.params ?? {}) });
+        } catch (err) {
+          this.send({ id: msg.id, error: { message: (err as Error).message, phase: 'dispatch' } });
+        }
+        return;
+      }
       const phase = this.failWithPhase.get(msg.method);
       if (phase) {
         this.send({ id: msg.id, error: { message: 'Detached while handling command.', phase } });
@@ -374,6 +400,90 @@ async function main(): Promise<void> {
       const after = bridge.stats();
       assert(Object.keys(after.methods).length === 0, 'reset clears every method');
       assert(after.since >= s.since, 'reset moves the since marker');
+    });
+  });
+
+  // ─── Actionability guard (plan 10, C5) ─────────────────────────
+  // The in-page logic needs a real DOM (bridge-live covers it); these pin the
+  // daemon side: CDP failure shapes map to typed errors, the guard verdict
+  // becomes BRIDGE_TARGET_NOT_ACTIONABLE naming the coverer, --force is
+  // carried into the page, and a guarded click stays at three relayed calls.
+  const guardedExt = async (port: number, verdict: Record<string, unknown>) => {
+    const ext = new FakeExt(port, 'inst-guard');
+    ext.replies.set('DOM.resolveNode', () => ({ object: { objectId: 'obj-1' } }));
+    ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: verdict } } }));
+    ext.replies.set('Runtime.releaseObject', () => ({}));
+    await ext.connect();
+    return ext;
+  };
+
+  await test('guard: a gone backend node becomes BRIDGE_REF_STALE', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-stale');
+      ext.replies.set('DOM.resolveNode', () => { throw new Error('No node with given id found'); });
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: unknown = null;
+      await bridgeResolveHandle(bridge, { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
+        .catch((e) => { caught = e; });
+      assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
+      const e = caught as BridgeTypedError;
+      assert(e.code === 'BRIDGE_REF_STALE', `code ${e.code}`);
+      assert(/@e3 is gone/.test(e.hint) && /snapshot -i/.test(e.hint), `hint: ${e.hint}`);
+    });
+  });
+
+  await test('guard: covered target names the coverer and suggests --force', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, {
+        ok: false, reason: 'covered', coveredBy: 'div#overlay "Accept cookies"', x: 10, y: 10, width: 5, height: 5,
+      });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
+      let caught: unknown = null;
+      await bridgeGuard(bridge, h, '@e7', 'click', false).catch((e) => { caught = e; });
+      bridgeReleaseHandle(bridge, h);
+      assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
+      const e = caught as BridgeTypedError;
+      assert(e.code === 'BRIDGE_TARGET_NOT_ACTIONABLE', `code ${e.code}`);
+      assert(e.message.includes('div#overlay'), `message should name the coverer: ${e.message}`);
+      assert(/--force/.test(e.hint) && e.hint.includes('div#overlay'), `hint: ${e.hint}`);
+      assert(e.details?.reason === 'covered', `details: ${JSON.stringify(e.details)}`);
+      await sleep(10);
+      assert(
+        ext.received.join(',') === 'DOM.resolveNode,Runtime.callFunctionOn,Runtime.releaseObject',
+        `a guarded click costs resolve + one in-page call + release, got ${ext.received.join(',')}`,
+      );
+    });
+  });
+
+  await test('guard: disabled and detached map to the right codes', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, { ok: false, reason: 'disabled' });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
+      let caught: any = null;
+      await bridgeGuard(bridge, h, '@e2', 'click', false).catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_TARGET_NOT_ACTIONABLE' && /disabled/.test(caught.hint), `disabled: ${caught?.hint}`);
+      ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
+      caught = null;
+      await bridgeGuard(bridge, h, '@e2', 'fill', false).catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
+    });
+  });
+
+  await test('guard: --force is carried into the in-page call', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, { ok: true, x: 40, y: 20, width: 80, height: 40 });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
+      const { guard } = await bridgeGuard(bridge, h, '@e1', 'click', true);
+      assert(guard.x === 40 && guard.y === 20, `click point from the guard: ${JSON.stringify(guard)}`);
+      const call = ext.sent.find((c) => c.method === 'Runtime.callFunctionOn');
+      assert(call, 'no callFunctionOn sent');
+      assert(call.params.arguments[0].value === 'click', `kind arg: ${JSON.stringify(call.params.arguments)}`);
+      assert(call.params.arguments[1].value === true, 'force must reach the page');
+      assert(/function actionability\(/.test(call.params.functionDeclaration), 'guard source must be inlined');
     });
   });
 
