@@ -70,6 +70,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   use `ghax box @eN` (or `snapshot -a`) to see which element a ref is.
 
 ### Fixed
+- **Bridge `goto data:...` no longer reports success while staying put.**
+  Chrome refuses extension-initiated top-level navigation to `data:` URLs,
+  so the navigation never committed; the extension's load watcher timed
+  out after 8 s and the daemon returned the unchanged tab as a successful
+  `goto`. It now fails at once with `BRIDGE_NAVIGATION_BLOCKED` and a hint
+  (serve the page over http, or set content with `eval`). A navigation
+  that CDP reports as failed (`errorText`) is also an error now
+  (`BRIDGE_NAVIGATION_FAILED`) instead of a silent success.
 - **Bridge `click` no longer clicks whatever is on top.** Over the bridge,
   `click @e3` scrolled, read the box model and fired a mouse event at the
   centre, so a cookie banner, a spinner overlay or a disabled button all

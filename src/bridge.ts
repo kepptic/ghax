@@ -1261,10 +1261,31 @@ export async function bridgeGoto(
   url: string,
   loadTimeoutMs = 8_000,
 ): Promise<{ url: string; title: string }> {
+  // Chrome refuses extension-initiated top-level navigation to data: URLs,
+  // through chrome.debugger's Page.navigate and chrome.tabs.update alike. The
+  // navigation never commits, the extension's load watcher times out after
+  // 8 s, and the old tab came back looking like a successful goto. Fail up
+  // front with the reason instead.
+  if (/^\s*data:/i.test(url)) {
+    throw new BridgeTypedError(
+      `goto: the bridge can't open data: URLs (Chrome blocks extension-initiated navigation to data:)`,
+      'BRIDGE_NAVIGATION_BLOCKED',
+      'serve the page over http (e.g. a local server on 127.0.0.1), or load a normal page and set its content with `ghax eval`',
+    );
+  }
   const navigation = await bridge.send('Page.navigate', {
     url,
     ghaxLoadTimeoutMs: loadTimeoutMs,
-  }) as { ghaxFinalUrl?: string; ghaxTitle?: string } | undefined;
+  }) as { ghaxFinalUrl?: string; ghaxTitle?: string; errorText?: string } | undefined;
+  // Page.navigate reports a refused or failed navigation in errorText rather
+  // than rejecting; passing it through as success hid real failures.
+  if (navigation?.errorText) {
+    throw new BridgeTypedError(
+      `goto: navigation to ${url} failed: ${navigation.errorText}`,
+      'BRIDGE_NAVIGATION_FAILED',
+      'check the URL; the tab is still on its previous page',
+    );
+  }
 
   let finalUrl = navigation?.ghaxFinalUrl || url;
   let title = navigation?.ghaxTitle || '';
