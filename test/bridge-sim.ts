@@ -29,8 +29,8 @@ import {
   bridgeResolveHandle,
   bridgeSnapshot,
   isStaleContextError,
-  newBridgeIdentity,
 } from '../src/bridge';
+import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
 const GRACE_MS = 400;
@@ -627,12 +627,13 @@ async function main(): Promise<void> {
       const ext = mutablePage(port, buttons);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const identity = newBridgeIdentity();
-      const first = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const registry = new RefRegistry();
+      const identity = registry.forDoc('doc-a');
+      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       const cancel = refByName(first, 'Cancel');
       buttons.unshift({ id: 9, name: 'Inserted' });
-      const second = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
       assert(refByName(second, 'Save') === save, `Save moved: ${save} -> ${refByName(second, 'Save')}`);
       assert(refByName(second, 'Cancel') === cancel, 'Cancel moved');
       const inserted = refByName(second, 'Inserted');
@@ -647,20 +648,48 @@ async function main(): Promise<void> {
       const ext = mutablePage(port, buttons);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const identity = newBridgeIdentity();
-      const first = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const registry = new RefRegistry();
+      const identity = registry.forDoc('doc-a');
+      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       buttons[0].name = 'Saved';
-      const second = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
       assert(refByName(second, 'Saved') !== save, 'a renamed node must not keep its old ref');
       buttons[1].role = 'link';
-      const third = await bridgeSnapshot(bridge, { identity });
+      const third = await bridgeSnapshot(bridge, { refs: identity });
       assert(third.refs.get(refByName(first, 'Go')!) === undefined, 'a node whose role changed gets a new ref');
       buttons.splice(0, 1);
-      await bridgeSnapshot(bridge, { identity, selector: '#main' });
-      assert(identity.byBackendNodeId.has(10), '--selector snapshots never prune');
-      await bridgeSnapshot(bridge, { identity });
-      assert(!identity.byBackendNodeId.has(10), 'an unscoped snapshot prunes nodes that left the page');
+      const held = registry.size;
+      await bridgeSnapshot(bridge, { refs: identity, selector: '#main' });
+      assert(registry.size === held, '--selector snapshots never prune');
+      await bridgeSnapshot(bridge, { refs: identity });
+      assert(registry.size === held - 1, `an unscoped snapshot prunes nodes that left the page (${held} -> ${registry.size})`);
+    });
+  });
+
+  await test('identity: numbers are never reused after a navigation (finding 1)', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons = [{ id: 10, name: 'Buy' }, { id: 11, name: 'Delete account' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const registry = new RefRegistry();
+      const pageA = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-a') });
+      const aRefs = [...pageA.refs.keys()];
+      // Navigation: the daemon clears identities (clearSnapshotRefs) but the
+      // new document reuses the SAME backend node ids and even the same names.
+      registry.clear();
+      buttons[0].name = 'Delete account';
+      buttons[1].name = 'Buy';
+      const pageB = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-b') });
+      const num = (r: string) => Number(r.slice(1));
+      const maxA = Math.max(...aRefs.map(num));
+      for (const r of pageB.refs.keys()) assert(num(r) > maxA, `page B reused ${r} (page A went up to e${maxA})`);
+      for (const r of aRefs) {
+        assert(!pageB.refs.has(r), `${r} from page A must not resolve on page B`);
+        assert(registry.docOf(r) === 'doc-a', `${r} should remember it was minted on doc-a`);
+      }
+      assert(docIdOfMarker('doc-b|3|https://x/') === 'doc-b' && docIdOfMarker(null) === null, 'marker parsing');
     });
   });
 

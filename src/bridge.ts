@@ -44,6 +44,7 @@ import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
 import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
+import { RefRegistry, type RefAllocator } from './ref-registry';
 
 export interface BridgeEvent {
   method: string;
@@ -105,22 +106,6 @@ export interface BridgeRef {
   cursorId?: number;
   role: string;
   name: string;
-}
-
-/**
- * Bridge ref identity across snapshots (plan 10, C9). Mirrors Playwright's
- * rule on the CDP transport: a backend node keeps its `e<n>` while its role
- * and name are unchanged, and gets a fresh number when either changes, so a
- * ref never silently means a different kind of element. Lives on the daemon
- * ctx; reset on tab change and main-frame navigation.
- */
-export interface BridgeIdentity {
-  byBackendNodeId: Map<number, { ref: string; role: string; name: string }>;
-  next: number;
-}
-
-export function newBridgeIdentity(): BridgeIdentity {
-  return { byBackendNodeId: new Map(), next: 1 };
 }
 
 export interface BridgeSnapshotResult {
@@ -1405,11 +1390,15 @@ export async function bridgeSnapshot(
     selector?: string;
     cursorInteractive?: boolean;
     dialogScope?: boolean;
-    /** Carry refs across snapshots. Omitted = number from e1 every time. */
-    identity?: BridgeIdentity;
+    /**
+     * Ref numbering (src/ref-registry.ts): the daemon passes its registry
+     * bound to the current document, so a number is never reused. Omitted =
+     * a private registry numbering from e1.
+     */
+    refs?: RefAllocator;
   } = {},
 ): Promise<BridgeSnapshotResult> {
-  const identity = opts.identity ?? newBridgeIdentity();
+  const allocator = opts.refs ?? new RefRegistry().forDoc('local');
   await bridge.send('Runtime.enable');
   await bridge.send('DOM.enable');
   await bridge.send('Accessibility.enable');
@@ -1444,13 +1433,10 @@ export async function bridgeSnapshot(
 
   const refs = new Map<string, BridgeRef>();
   const output: string[] = [];
-  const refFor = (backendNodeId: number, role: string, name: string): string => {
-    const known = identity.byBackendNodeId.get(backendNodeId);
-    if (known && known.role === role && known.name === name) return known.ref;
-    const ref = `e${identity.next++}`;
-    identity.byBackendNodeId.set(backendNodeId, { ref, role, name });
-    return ref;
-  };
+  // A node keeps its ref while role and name hold (Playwright's rule); the
+  // registry never hands the same number to a different element.
+  const refFor = (backendNodeId: number, role: string, name: string): string =>
+    allocator.assign('e', `b${backendNodeId}`, role, name);
   const walk = (node: AxNode, depth: number): void => {
     const role = axRole(node);
     const rawRole = String(node.role?.value ?? '');
@@ -1482,14 +1468,8 @@ export async function bridgeSnapshot(
     }
   };
   if (axRoot) walk(axRoot, -1);
-  // Forget nodes that left the document. getFullAXTree is the whole page
-  // even for a modal-scoped walk, but a --selector snapshot is left alone so
-  // a narrow look never costs refs from the wider one (settled decision 5).
-  if (!opts.selector) {
-    const alive = new Set<number>();
-    for (const n of nodes) if (typeof n.backendDOMNodeId === 'number') alive.add(n.backendDOMNodeId);
-    for (const id of identity.byBackendNodeId.keys()) if (!alive.has(id)) identity.byBackendNodeId.delete(id);
-  }
+  const alive = new Set<string>();
+  for (const n of nodes) if (typeof n.backendDOMNodeId === 'number') alive.add(`b${n.backendDOMNodeId}`);
 
   const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
@@ -1520,14 +1500,20 @@ export async function bridgeSnapshot(
     if (cursor.length > 0) {
       output.push('', '── cursor-interactive (not in ARIA tree) ──');
       cursor.forEach((item) => {
-        // The registry id is already stable per element (WeakMap), so it
-        // doubles as the ref number.
-        const ref = `c${item.cursorId}`;
+        // The page registry id is stable per element but restarts at 1 in a
+        // new document, so it is a key, never the printed number.
+        alive.add(`k${item.cursorId}`);
+        const ref = allocator.assign('c', `k${item.cursorId}`, 'cursor-interactive', item.text);
         refs.set(ref, { backendNodeId: null, cursorId: item.cursorId, role: 'cursor-interactive', name: item.text });
         output.push(`@${ref} [${item.reason}] ${JSON.stringify(item.text)}`);
       });
     }
   }
+
+  // Forget nodes that left the document. getFullAXTree is the whole page
+  // even for a modal-scoped walk, but a --selector snapshot is left alone so
+  // a narrow look never costs refs from the wider one (settled decision 5).
+  if (!opts.selector) allocator.prune(alive);
 
   if (output.length === 0) {
     return {

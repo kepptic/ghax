@@ -29,6 +29,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Same budget on both transports (`src/snapshot-budget.ts`).
 
 ### Changed
+- **A ref number is never reused within a daemon's lifetime.** Both
+  transports now take their `@e`/`@c` numbers from one daemon-wide
+  registry (`src/ref-registry.ts`) keyed by document and element, instead
+  of printing Playwright's per-document number or restarting the bridge
+  count at `e1` after a navigation. That closes a wrong-element hole in
+  `batch`: after `click @e3` navigated, the plan's `@e5` could land on the
+  new page's fifth element. A batch step whose ref was minted on a page
+  that is no longer loaded now fails with `BRIDGE_REF_STALE` instead of
+  being re-resolved.
 - **Stable `@e` refs over the bridge too, and `batch` skips needless
   re-snapshots.** The bridge now remembers which ref it gave each backend
   node and reuses it on the next snapshot while the node's role and name

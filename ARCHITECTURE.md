@@ -203,6 +203,14 @@ pinned to an exact version and the smoke suite has checks that fail if a
 bump changes them (stable across insertion, stale after removal, modal
 scope).
 
+Printed numbers are ghax's own, from `ctx.refRegistry`
+(`src/ref-registry.ts`): one monotonic counter per prefix for the
+daemon's lifetime, keyed by (freshness-marker document id, transport key:
+`p<playwright ref>`, `b<backendNodeId>`, cursor ids). A tab change or
+navigation forgets identities but keeps the counters, so a number is
+never handed to a second element, and `docOf(ref)` lets `batch` refuse a
+ref minted on a document that is no longer loaded (`BRIDGE_REF_STALE`).
+
 Over the bridge the daemon keeps the same promise itself:
 `ctx.bridgeIdentity` maps backend node id to `{ref, role, name}`, a
 snapshot reuses the ref while role and name match and mints a new one

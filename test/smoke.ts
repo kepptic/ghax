@@ -813,6 +813,29 @@ c('batch skips the auto re-snapshot when the page has not changed', async () => 
   assert(!('autoSnapshot' in plain[0]), 'steps without refs report nothing');
 });
 
+c('batch refuses a ref from a page the tab navigated away from (never clicks page B)', async () => {
+  // Review finding 1: [snapshot, navigate, click old-ref] used to resolve the
+  // old number against page B. Numbers are daemon-wide and never reused, and
+  // a ref minted on another document fails as BRIDGE_REF_STALE.
+  const pageA = `data:text/html,${encodeURIComponent('<button onclick="window.__a=1">Go</button><button>Other</button>')}`;
+  const pageB = `data:text/html,${encodeURIComponent('<button>Other</button><button onclick="window.__b=1">Go</button>')}`;
+  await run(['goto', pageA]);
+  const oldRef = await snapRef('button', 'Go');
+  const r = await run(['batch', JSON.stringify([
+    { cmd: 'snapshot', opts: { interactive: true } },
+    { cmd: 'goto', args: [pageB] },
+    { cmd: 'click', args: [oldRef] },
+  ])], { allowFailure: true });
+  assert(r.exitCode === 4, `batch should exit 4, got ${r.exitCode}: ${r.stdout}`);
+  const steps = parseJson<Array<{ ok: boolean; code?: string; error?: string }>>(r.stdout);
+  assert(steps[2] && steps[2].ok === false && steps[2].code === 'BRIDGE_REF_STALE',
+    `click of the old ref must fail as stale: ${JSON.stringify(steps[2])}`);
+  const b = await run(['eval', 'String(window.__b || 0)']);
+  assert(b.stdout.trim() === '0', 'page B\'s button must not have been clicked');
+  const fresh = await snapRef('button', 'Go');
+  assert(Number(fresh.slice(2)) > Number(oldRef.slice(2)), `page B must get a new number, got ${fresh} after ${oldRef}`);
+});
+
 c('record + replay round-trips', async () => {
   const name = `smoke-rec-${Date.now()}`;
   await run(['record', 'start', name]);

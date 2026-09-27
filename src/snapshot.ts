@@ -32,6 +32,7 @@
  */
 
 import type { Page, Locator, Frame } from 'playwright';
+import { RefRegistry, type RefAllocator } from './ref-registry';
 
 export interface RefEntry {
   locator: Locator;
@@ -53,6 +54,13 @@ export interface SnapshotOptions {
    * a hidden ancestor. Pass `--no-dialog-scope` to force body.
    */
   dialogScope?: boolean;
+  /**
+   * Ref numbering (src/ref-registry.ts), bound to the current document. The
+   * printed `@eN` is ghax's own daemon-wide number mapped to Playwright's
+   * full `f<seq>e<n>`, never Playwright's number itself: Playwright restarts
+   * `e<n>` per document, and a reused number is a wrong-element click.
+   */
+  refs?: RefAllocator;
 }
 
 export interface SnapshotResult {
@@ -125,12 +133,11 @@ function renderProps(n: AriaNodeJSON): string {
  * A Playwright-minted ref: `e<n>`, or `f<seq>e<n>`. The prefix is NOT only
  * for iframes: Playwright renumbers the MAIN frame every time it navigates
  * away from a real document (server/frames.ts, "Re-number the main frame"),
- * so after the first navigation the main frame's own refs look like
- * `f3e6`. ghax prints and stores the `e<n>` part and keeps the full string
- * for the `aria-ref=` locator; an old ref from the previous document then
- * points at a different `f<seq>` and fails as stale instead of resolving.
+ * so after the first navigation the main frame's own refs look like `f3e6`.
+ * The full string goes into the `aria-ref=` locator; what ghax prints is a
+ * daemon-wide number from the ref registry.
  */
-const PW_REF = /^(?:f\d+)?(e\d+)$/;
+const PW_REF = /^(?:f\d+)?e\d+$/;
 
 export async function snapshot(
   target: Page | Frame,
@@ -139,13 +146,18 @@ export async function snapshot(
   // Root: --selector, else the top-most visible modal, else body. Scoping is
   // inherent now: a ref minted in a modal-scoped snapshot resolves only
   // inside that snapshot's subtree, so no locator re-scoping is needed.
+  const allocator = opts.refs ?? new RefRegistry().forDoc('local');
+  let modalScoped = false;
   let rootLocator: Locator = opts.selector ? target.locator(opts.selector) : target.locator('body');
   if (opts.selector) {
     const count = await rootLocator.count();
     if (count === 0) throw new Error(`Selector not found: ${opts.selector}`);
   } else if (opts.dialogScope !== false) {
     const modal = target.locator(MODAL_SEL).last();
-    if ((await modal.count()) > 0) rootLocator = modal;
+    if ((await modal.count()) > 0) {
+      rootLocator = modal;
+      modalScoped = true;
+    }
   }
 
   // The daemon's ONLY ariaSnapshot* call site (see CACHE RULE above).
@@ -156,6 +168,7 @@ export async function snapshot(
 
   const refs = new Map<string, RefEntry>();
   const output: string[] = [];
+  const alive = new Set<string>();
 
   // Iframe content renders but its refs are not registered (the ref engine
   // can reach them, but ghax's actions and guards assume the main frame).
@@ -179,11 +192,12 @@ export async function snapshot(
       const compactSkip = opts.compact && !isInteractive && !name && !text;
       if (withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
         const pwRef = node.ref;
-        const short = pwRef && !inIframe ? PW_REF.exec(pwRef)?.[1] : undefined;
         let line = '  '.repeat(depth);
-        if (pwRef && short) {
-          line += `@${short} `;
-          refs.set(short, { locator: target.locator(`aria-ref=${pwRef}`), role, name });
+        if (pwRef && !inIframe && PW_REF.test(pwRef)) {
+          alive.add(`p${pwRef}`);
+          const ref = allocator.assign('e', `p${pwRef}`, role, name);
+          line += `@${ref} `;
+          refs.set(ref, { locator: target.locator(`aria-ref=${pwRef}`), role, name });
         }
         line += `[${role}]`;
         if (name) line += ` ${JSON.stringify(name)}`;
@@ -344,9 +358,9 @@ export async function snapshot(
       if (cursorElements.length > 0) {
         output.push('');
         output.push('── cursor-interactive (not in ARIA tree) ──');
-        let c = 1;
         for (const elem of cursorElements) {
-          const ref = `c${c++}`;
+          alive.add(`s${elem.selector}`);
+          const ref = allocator.assign('c', `s${elem.selector}`, 'cursor-interactive', elem.text);
           const locator = target.locator(elem.selector);
           refs.set(ref, { locator, role: 'cursor-interactive', name: elem.text });
           output.push(`@${ref} [${elem.reason}] "${elem.text}"`);
@@ -368,6 +382,10 @@ export async function snapshot(
       }
     }
   }
+
+  // Only a body-rooted snapshot sees the whole page, so only it may forget
+  // identities (a modal or --selector look must not renumber the rest).
+  if (!opts.selector && !modalScoped) allocator.prune(alive);
 
   if (output.length === 0) {
     return { text: '(no interactive elements found)', refs, count: 0 };

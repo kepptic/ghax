@@ -47,6 +47,7 @@ import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import { actionability } from './actionability';
 import { applySnapshotBudget, budgetFromOpts, type BudgetedText } from './snapshot-budget';
+import { RefRegistry, docIdOfMarker } from './ref-registry';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -65,8 +66,6 @@ import {
   bridgeSnapshot,
   bridgeText,
   isStaleContextError,
-  newBridgeIdentity,
-  type BridgeIdentity,
   type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
@@ -139,8 +138,9 @@ interface Ctx {
   activePageId: string | null;
   refs: Map<string, RefEntry>;
   bridgeRefs: Map<string, BridgeRef>;
-  // backendNodeId → {ref, role, name}, so bridge refs survive re-snapshots.
-  bridgeIdentity: BridgeIdentity;
+  // Daemon-wide ref numbering for both transports: stable per element,
+  // never reused, and remembers which document minted each ref.
+  refRegistry: RefRegistry;
   // Page freshness marker (`docId|mutations|href`) read just BEFORE the last
   // snapshot. `batch` compares it to decide whether a ref step needs a
   // re-snapshot. Null whenever the ref map is cleared.
@@ -925,7 +925,8 @@ function requireBridge(ctx: Ctx): Bridge {
 function clearSnapshotRefs(ctx: Ctx): void {
   ctx.refs.clear();
   ctx.bridgeRefs.clear();
-  ctx.bridgeIdentity = newBridgeIdentity();
+  // Forget identities but keep the counters: a number is never reused.
+  ctx.refRegistry.clear();
   ctx.lastSnapshotMarker = null;
 }
 
@@ -1012,15 +1013,11 @@ register('batch', async (ctx, args, opts) => {
   const snapshotHandler = handlers.get('snapshot');
   const results: Array<Record<string, unknown>> = [];
 
-  const usesRef = (step: { args?: unknown[]; opts?: Record<string, unknown> }) => {
-    const inArgs = Array.isArray(step.args)
-      ? step.args.some((v) => typeof v === 'string' && v.startsWith('@e'))
-      : false;
-    const inOpts = step.opts
-      ? Object.values(step.opts).some((v) => typeof v === 'string' && v.startsWith('@e'))
-      : false;
-    return inArgs || inOpts;
-  };
+  const REF_ARG = /^@[ec]\d+$/;
+  const refsOf = (step: { args?: unknown[]; opts?: Record<string, unknown> }): string[] => [
+    ...(Array.isArray(step.args) ? step.args : []),
+    ...Object.values(step.opts ?? {}),
+  ].filter((v): v is string => typeof v === 'string' && REF_ARG.test(v));
 
   for (const raw of steps) {
     if (!raw || typeof raw !== 'object') {
@@ -1049,9 +1046,31 @@ register('batch', async (ctx, args, opts) => {
     // could move a ref has happened, and the re-snapshot was the costliest
     // part of a ref step, especially over the bridge.
     let autoSnap: 'skipped' | 'taken' | undefined;
-    if (autoSnapshot && snapshotHandler && usesRef({ args: stepArgs, opts: stepOpts })) {
-      const current = ctx.lastSnapshotMarker ? await readFreshnessMarker(ctx) : null;
-      if (current !== null && current === ctx.lastSnapshotMarker) {
+    const stepRefs = refsOf({ args: stepArgs, opts: stepOpts });
+    const current = stepRefs.length > 0 ? await readFreshnessMarker(ctx) : null;
+    // A ref minted on a document that is no longer loaded must fail, never
+    // be re-resolved: after `click @e3` navigates, the plan's `@e5` meant
+    // page A's element, and an auto-snapshot of page B must not answer it.
+    const docNow = docIdOfMarker(current);
+    const foreign = docNow
+      ? stepRefs.find((r) => {
+        const d = ctx.refRegistry.docOf(r.slice(1));
+        return d !== undefined && !d.startsWith('unknown:') && d !== docNow;
+      })
+      : undefined;
+    if (foreign) {
+      results.push({
+        cmd,
+        ok: false,
+        code: 'BRIDGE_REF_STALE',
+        error: `${foreign} was taken on a page that is no longer loaded (the tab navigated since). `
+          + `Run 'ghax snapshot -i' and use a fresh ref.`,
+      });
+      if (stopOnError) break;
+      continue;
+    }
+    if (autoSnapshot && snapshotHandler && stepRefs.length > 0) {
+      if (current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker) {
         autoSnap = 'skipped';
       } else {
         autoSnap = 'taken';
@@ -1927,6 +1946,10 @@ register('snapshot', async (ctx, _args, opts) => {
   // up as a changed marker next time (a harmless re-snapshot), never as a
   // false "unchanged".
   const marker = await readFreshnessMarker(ctx);
+  // An unreadable marker gets a one-off id: its refs then never match any
+  // later document, which errs toward "stale", never toward a wrong element.
+  const docId = docIdOfMarker(marker) ?? `unknown:${crypto.randomUUID()}`;
+  const refAllocator = ctx.refRegistry.forDoc(docId);
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
@@ -1938,7 +1961,7 @@ register('snapshot', async (ctx, _args, opts) => {
       selector: opts.selector as string | undefined,
       cursorInteractive: Boolean(opts.cursorInteractive),
       dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
-      identity: ctx.bridgeIdentity,
+      refs: refAllocator,
     });
     let result = await take();
     // Same suspicious-empty guard as `text`: almost no refs while the page is
@@ -1976,6 +1999,7 @@ register('snapshot', async (ctx, _args, opts) => {
     // Default-on dialog scoping; callers opt out with --no-dialog-scope,
     // which the arg parser surfaces as `no-dialog-scope: true`.
     dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
+    refs: refAllocator,
   });
   ctx.refs = result.refs;
   ctx.lastSnapshotMarker = marker;
@@ -4409,7 +4433,7 @@ async function main() {
     activePageId: null,
     refs: new Map(),
     bridgeRefs: new Map(),
-    bridgeIdentity: newBridgeIdentity(),
+    refRegistry: new RefRegistry(),
     lastSnapshotMarker: null,
     bridgeNetworkRequests: new Map(),
     bridgeMainFrameId: null,
