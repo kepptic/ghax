@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # ghax — project instructions for Claude Code
 
 Claude Code auto-loads this file when it opens the ghax repo. Other AI
