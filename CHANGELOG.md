@@ -84,7 +84,8 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read every cursor ref back (three more each), so a 200-ref page paid
   hundreds of WebSocket hops. It now makes the same handful of calls on
   any page (domain enables, one root lookup, `getFullAXTree`, one cursor
-  pass: at most 8). Cursor refs (`@c<n>`) live in a page-side registry and
+  pass, plus the batch freshness-marker read: 9 on a warm page, 2 more
+  the first time a document is seen, to set up ghax's isolated world). Cursor refs (`@c<n>`) live in a page-side registry and
   are resolved only when a verb acts on them; a node that has gone is
   `BRIDGE_REF_STALE`. **`data-ghax-ref` is no longer stamped on elements**;
   use `ghax box @eN` (or `snapshot -a`) to see which element a ref is.

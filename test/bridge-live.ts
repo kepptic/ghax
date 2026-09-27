@@ -145,12 +145,22 @@ async function main(): Promise<void> {
   });
 
   await test('snapshot -i costs a constant number of relayed calls (--trace)', async () => {
-    await gotoFixture(Array.from({ length: 150 }, (_, i) => `<button>b${i}</button>`).join(''));
-    const r = await run(['snapshot', '-i', '--no-cap', '--trace']);
-    assert((r.stdout.match(/@e\d+ \[button\]/g) ?? []).length === 150, 'all 150 buttons should be in the snapshot');
-    const m = /trace: (\d+) cdp calls/.exec(r.stderr);
-    assert(m, `no trace line: ${r.stderr}`);
-    assert(Number(m[1]) <= 10, `150-button snapshot took ${m[1]} relayed calls`);
+    // Constant = independent of page size. The first snapshot of a document
+    // also creates ghax's isolated world (two one-time calls), so measure the
+    // second snapshot of each page.
+    const calls = async (n: number): Promise<number> => {
+      await gotoFixture(Array.from({ length: n }, (_, i) => `<button>b${i}</button>`).join(''));
+      await run(['snapshot', '-i', '--no-cap']);
+      const r = await run(['snapshot', '-i', '--no-cap', '--trace']);
+      assert((r.stdout.match(/@e\d+ \[button\]/g) ?? []).length === n, `all ${n} buttons should be in the snapshot`);
+      const m = /trace: (\d+) cdp calls/.exec(r.stderr);
+      assert(m, `no trace line: ${r.stderr}`);
+      return Number(m[1]);
+    };
+    const small = await calls(10);
+    const big = await calls(150);
+    assert(big === small, `call count grew with the page: 10 buttons ${small}, 150 buttons ${big}`);
+    assert(big <= 10, `a warm snapshot took ${big} relayed calls`);
     assert(!/data-ghax-ref/.test((await run(['html'])).stdout), 'snapshot must not write data-ghax-ref into the DOM');
   });
 
