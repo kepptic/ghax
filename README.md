@@ -262,11 +262,11 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 
 ### Downloads
 
-- Attached-browser downloads behave like normal browsing: they land in the
-  real `~/Downloads` under the site-suggested filename with its extension —
-  not as extension-less GUIDs in a Playwright temp dir. (ghax re-asserts
-  sane CDP `Browser.setDownloadBehavior` after attach, undoing Playwright's
-  `connectOverCDP` hijack.)
+- Attached-browser downloads behave like normal browsing: they go wherever
+  the browser is set to save them, under the site-suggested filename with
+  its extension. ghax attaches with Playwright's `noDefaults`, so Playwright
+  no longer rewrites the download setting, and ghax itself only switches on
+  download events.
 - `ghax attach --downloads-dir <path>` redirects downloads to a chosen dir.
 - `ghax downloads [--last N]` lists captured downloads: url, filename, final
   path, state, byte counts, and timestamps.

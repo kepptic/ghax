@@ -1893,11 +1893,12 @@ c('gif renders a GIF from a recording (if ffmpeg available)', async () => {
 });
 
 c('downloads land in --downloads-dir with the site-suggested name', async () => {
-  // Regression guard for the connectOverCDP download hijack: Playwright
-  // sets `Browser.setDownloadBehavior` to allowAndName + its temp artifacts
-  // dir, so downloads used to land as extension-less GUIDs in /var/folders.
-  // The daemon re-asserts `behavior: 'allow'` with our downloadPath, so
-  // files land under their real name in the configured dir.
+  // Regression guard for the old connectOverCDP download hijack (files
+  // landing as extension-less GUIDs in /var/folders). The daemon now attaches
+  // with `noDefaults: true`, so Playwright leaves download behaviour alone,
+  // and sets `allow` + our downloadPath exactly once at attach. The
+  // new-window below is deliberate: the old code re-asserted the behaviour
+  // there, and this proves one attach-time call is enough.
   //
   // Runs on an ISOLATED daemon (own state file + own window) so it never
   // disturbs the shared suite daemon or the user's real ~/Downloads.

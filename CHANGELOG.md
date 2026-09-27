@@ -29,6 +29,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   comment already said was not wanted: a long `wait --stable` or `perf
   --wait` no longer dies at 30 s.
 
+- **The CDP transport attaches with Playwright's `noDefaults`.**
+  `connectOverCDP` used to apply Playwright's launch-time defaults to the
+  user's existing browser context: download behaviour (files as GUIDs in a
+  temp dir), focus emulation and media emulation. The daemon undid the
+  download part after attach and after every `new-window`. It now passes
+  `noDefaults: true` and makes one `Browser.setDownloadBehavior` call at
+  attach: `allow` into `--downloads-dir` when given, otherwise the
+  browser's own setting, with download events on in both cases so `ghax
+  downloads` keeps working. Without `--downloads-dir`, attaching no longer
+  moves where the user's downloads land.
+
 ### Dependencies
 - **Playwright 1.59.1 to 1.63.0, pinned exact.** The stable-ref work in
   this release leans on Playwright's `aria-ref=` selector engine, whose

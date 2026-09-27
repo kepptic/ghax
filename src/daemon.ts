@@ -157,10 +157,12 @@ interface Ctx {
   // Directory downloads land in (the user's real ~/Downloads by default,
   // overridable via `ghax attach --downloads-dir`).
   downloadsDir: string;
+  // True when `ghax attach --downloads-dir` set GHAX_DOWNLOADS_DIR. Only then
+  // does the daemon override the browser's own download location.
+  downloadsDirExplicit: boolean;
   downloads: CircularBuffer<DownloadEntry>;
-  // Long-lived browser-level CDP session we own. Playwright's connectOverCDP
-  // hijacks download behaviour (allowAndName → GUID files in a temp dir);
-  // we keep this session to re-assert sane behaviour and receive events.
+  // Long-lived browser-level CDP session we own: sets download behaviour
+  // once at attach and receives the download events for `ghax downloads`.
   browserSession: CDPSession | null;
 }
 
@@ -1206,12 +1208,6 @@ register('newWindow', async (ctx, args) => {
     if (ctx.activePageId !== id) ctx.refs.clear();
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
-    // Re-assert sane download behaviour. Playwright re-runs
-    // `Browser.setDownloadBehavior` (allowAndName → temp dir) whenever it
-    // initialises a browser context; a new OS-level window created via the
-    // same default context does *not* trigger that, but re-asserting here is
-    // cheap insurance against any Playwright/Chromium path that resets it.
-    await assertDownloadBehavior(ctx).catch(() => undefined);
     return {
       id,
       url: newPage.url(),
@@ -1224,17 +1220,18 @@ register('newWindow', async (ctx, args) => {
 
 // ─── Downloads ─────────────────────────────────────────────────
 //
-// Playwright's `connectOverCDP` hijacks the profile's download settings:
-// on every browser-context init it issues `Browser.setDownloadBehavior`
-// with behavior `allowAndName` and downloadPath pointed at its own temp
-// `playwright-artifacts-*` dir. Result: files land as extension-less GUIDs
-// in /var/folders/**, not `~/Downloads/report.csv`.
-//
-// We undo this by owning a long-lived browser-level CDP session and
-// re-asserting `behavior: 'allow'` (honours the site-suggested filename +
-// extension) with downloadPath = the user's real Downloads dir. 'allow'
-// (not 'allowAndName') is the key: Chromium then writes the file under its
-// real name and handles collision de-duping (`name (1).ext`) itself.
+// Without `noDefaults`, Playwright's `connectOverCDP` rewrote the profile's
+// download settings on context init (`allowAndName` into its temp
+// `playwright-artifacts-*` dir, so files landed as extension-less GUIDs) and
+// the daemon had to undo it after attach and after every new window. Since
+// Playwright 1.60, `noDefaults: true` leaves the browser's own setting alone
+// (acceptDownloads 'internal-browser-default'; crBrowser skips
+// setDownloadBehavior), so the daemon now makes ONE call at attach, on its
+// own long-lived browser session: `allow` into `--downloads-dir` when one was
+// given, else the browser's `default`, and in both cases `eventsEnabled` so
+// `Browser.downloadWillBegin/Progress` feed this verb. 'allow' (not
+// 'allowAndName') keeps the site-suggested name and Chromium's own
+// `name (1).ext` de-duping.
 register('downloads', async (ctx, _args, opts) => {
   const n = typeof opts.last === 'number' ? opts.last : Number(opts.last ?? 20);
   const limit = Number.isFinite(n) && n > 0 ? n : 20;
@@ -4023,20 +4020,19 @@ register('gesture.scroll', async (ctx, args) => {
 
 // ─── HTTP server ───────────────────────────────────────────────
 
-// Re-assert normal download behaviour on our owned browser-level CDP
-// session. Called after attach and after each new window. Uses `behavior:
-// 'allow'` so Chromium honours the site-suggested filename (with extension)
-// and writes into `ctx.downloadsDir`. No browserContextId → sets the
-// browser-level default, overriding Playwright's last per-default-context
-// write (the default context has no id, so both target the same scope and
-// last-write-wins in our favour since attach runs this after connectOverCDP).
-async function assertDownloadBehavior(ctx: Ctx): Promise<void> {
+// Set download behaviour once, at attach, on our owned browser-level CDP
+// session (see the Downloads comment above for why once is enough now). The
+// point of the call is `eventsEnabled`: without it Chromium sends no
+// download events and `ghax downloads` stays empty. With no
+// `--downloads-dir` the browser keeps its own setting ('default'), so an
+// attach no longer silently changes where the user's downloads go;
+// `ctx.downloadsDir` (~/Downloads) is then only the best guess used to
+// report finalPath.
+async function setDownloadBehavior(ctx: Ctx): Promise<void> {
   if (!ctx.browserSession) return;
-  await ctx.browserSession.send('Browser.setDownloadBehavior', {
-    behavior: 'allow',
-    downloadPath: ctx.downloadsDir,
-    eventsEnabled: true,
-  });
+  await ctx.browserSession.send('Browser.setDownloadBehavior', ctx.downloadsDirExplicit
+    ? { behavior: 'allow', downloadPath: ctx.downloadsDir, eventsEnabled: true }
+    : { behavior: 'default', eventsEnabled: true });
 }
 
 // Wire the browser-level download events into ctx.downloads. Kept on the
@@ -4239,7 +4235,11 @@ async function main() {
       log(`bridge: only '${bindFilter}' may bind — other instances will park`);
     }
   } else {
-    browser = await chromium.connectOverCDP(cdpHttpUrl!);
+    // noDefaults: attach to the user's browser without Playwright's default
+    // overrides on the existing context (download behaviour, focus
+    // emulation, media emulation). Those overrides were written for browsers
+    // Playwright launches, not a session the user keeps working in.
+    browser = await chromium.connectOverCDP(cdpHttpUrl!, { noDefaults: true });
     const contexts = browser.contexts();
     context = contexts[0] ?? (await browser.newContext());
 
@@ -4288,6 +4288,7 @@ async function main() {
     networkListeners: new Set(),
     swLogListeners: new Map(),
     downloadsDir: resolveDownloadsDir(),
+    downloadsDirExplicit: Boolean(process.env.GHAX_DOWNLOADS_DIR?.trim()),
     downloads: new CircularBuffer<DownloadEntry>(200),
     browserSession: null,
   };
@@ -4310,16 +4311,15 @@ async function main() {
   }
 
   if (!bridgeMode && browser) {
-    // Undo Playwright's download hijack. connectOverCDP has, by now, issued
-    // `Browser.setDownloadBehavior` (allowAndName → its temp artifacts dir).
-    // Open our own browser-level CDP session, re-assert `behavior: 'allow'`
-    // with downloadPath = the real Downloads dir, and keep it alive to receive
-    // downloadWillBegin / downloadProgress events.
+    // One browser-level session for the daemon's life: enables download
+    // events (and, with --downloads-dir, points downloads there).
     try {
       ctx.browserSession = traceSend(await browser.newBrowserCDPSession());
       wireDownloadEvents(ctx);
-      await assertDownloadBehavior(ctx);
-      log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
+      await setDownloadBehavior(ctx);
+      log(ctx.downloadsDirExplicit
+        ? `download behavior → allow, dir=${ctx.downloadsDir}`
+        : 'download behavior → browser default (events on)');
     } catch (err) {
       log(`WARN: failed to set download behavior: ${String(err)}`);
     }

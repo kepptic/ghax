@@ -158,6 +158,14 @@ it.
 runs gives a useful error (or triggers a launch with `--launch`),
 instead of silently attaching to Edge.
 
+Playwright attaches with `connectOverCDP(url, { noDefaults: true })`.
+Without it, Playwright treats the user's existing default context like one
+it launched: it rewrites download behaviour and turns on focus and media
+emulation. The daemon's own browser-level session makes one
+`Browser.setDownloadBehavior` call at attach (`allow` + `--downloads-dir`,
+or the browser's `default`), always with `eventsEnabled` so the
+`downloads` verb gets `Browser.downloadWillBegin/Progress`.
+
 ## Ref resolution
 
 `ghax snapshot -i` builds an accessibility tree and assigns `@e<n>` refs
