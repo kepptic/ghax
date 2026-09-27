@@ -93,8 +93,16 @@ export interface BridgeTab {
   controlledBy: number | null;
 }
 
+/**
+ * What a bridge `@ref` points at. AX refs carry the backend node id the AX
+ * tree already gave us. Cursor refs (`@c<n>`, elements the AX tree misses)
+ * carry `cursorId`, a key into the page-side `window.__ghax.nodes` map, and
+ * are resolved to a node only when something acts on them: tagging each one
+ * at snapshot time cost two relayed calls per ref.
+ */
 export interface BridgeRef {
-  backendNodeId: number;
+  backendNodeId: number | null;
+  cursorId?: number;
   role: string;
   name: string;
 }
@@ -1325,35 +1333,31 @@ async function runtimeObjectFor(
   }
 }
 
-async function tagBackendNode(bridge: Bridge, backendNodeId: number, ref: string): Promise<boolean> {
-  try {
-    const resolved = await bridge.send('DOM.resolveNode', {
-      backendNodeId,
-      objectGroup: 'ghax-refs',
-    }) as { object?: { objectId?: string } };
-    const objectId = resolved.object?.objectId;
-    if (!objectId) return false;
-    await bridge.send('Runtime.callFunctionOn', {
-      objectId,
-      functionDeclaration: `function(ref) {
-        if (this && this.nodeType === Node.ELEMENT_NODE) this.setAttribute('data-ghax-ref', ref);
-        return true;
-      }`,
-      arguments: [{ value: ref }],
-      returnByValue: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
+/**
+ * Page-side cursor-ref registry, installed once per document. Elements get a
+ * stable numeric id from a WeakMap (so re-snapshots reuse it) and live in
+ * `nodes` until they disconnect. Ported from jev-ultrafast's snapshot.js.
+ */
+const CURSOR_REGISTRY_JS = `const reg = (window.__ghax ||= { ids: new WeakMap(), nodes: new Map(), next: 1 });
+  for (const [id, e] of reg.nodes) if (!e.isConnected) reg.nodes.delete(id);
+  const cursorId = (e) => {
+    let id = reg.ids.get(e);
+    if (id === undefined) { id = reg.next++; reg.ids.set(e, id); }
+    reg.nodes.set(id, e);
+    return id;
+  };`;
 
 /**
- * Build the bridge snapshot from Chromium's own accessibility tree. Every
- * emitted ref keeps the AX node's backendDOMNodeId and is also tagged in the
- * page DOM for human inspection/debugging. The backend id is the resolver;
- * the attribute is not relied on for interaction and therefore survives
- * selector changes caused by React rerenders better than a CSS path.
+ * Build the bridge snapshot from Chromium's own accessibility tree.
+ *
+ * Cost is a constant number of relayed CDP calls however large the page is
+ * (three domain enables, one evaluate + describeNode + release for the root,
+ * one getFullAXTree, one cursor-pass evaluate): the old version tagged every
+ * ref in the DOM (`data-ghax-ref`, two calls per ref) and read every cursor
+ * ref back (three more each). Refs resolve from the backend node id (AX) or
+ * the page-side registry (cursor) only when a verb acts on them. The
+ * `data-ghax-ref` attribute is gone; `ghax box @eN` answers "which element
+ * is this" instead.
  */
 export async function bridgeSnapshot(
   bridge: Bridge,
@@ -1369,57 +1373,39 @@ export async function bridgeSnapshot(
   await bridge.send('Runtime.enable');
   await bridge.send('DOM.enable');
   await bridge.send('Accessibility.enable');
-  await bridgeEvaluate(bridge, `(() => {
-    const walk = (root) => {
-      for (const el of root.querySelectorAll('*')) {
-        el.removeAttribute('data-ghax-ref');
-        if (el.shadowRoot) walk(el.shadowRoot);
-      }
-    };
-    walk(document);
-  })()`).catch(() => undefined);
-  await bridge.send('Runtime.releaseObjectGroup', { objectGroup: 'ghax-refs' }).catch(() => undefined);
 
-  let rootBackendNodeId: number | null = null;
-  if (opts.selector) {
-    const root = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(opts.selector)})`);
-    if (!root) throw new Error(`Selector not found: ${opts.selector}`);
-    rootBackendNodeId = root.backendNodeId;
-    await bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
-  } else if (opts.dialogScope !== false) {
-    const modal = await runtimeObjectFor(bridge, `(() => {
+  // Root selection in ONE evaluate: --selector, else the top-most visible
+  // modal (unless --no-dialog-scope), else body.
+  const selectorJs = opts.selector ? JSON.stringify(opts.selector) : 'null';
+  const root = await runtimeObjectFor(bridge, `(() => {
+    const sel = ${selectorJs};
+    if (sel) return document.querySelector(sel);
+    if (${opts.dialogScope !== false}) {
       const selectors = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
       const visible = [...document.querySelectorAll(selectors)].filter((el) => {
         const s = getComputedStyle(el); const r = el.getBoundingClientRect();
         return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
       });
-      return visible.at(-1) || document.body;
-    })()`);
-    if (modal) {
-      rootBackendNodeId = modal.backendNodeId;
-      await bridge.send('Runtime.releaseObject', { objectId: modal.objectId }).catch(() => undefined);
+      if (visible.length) return visible.at(-1);
     }
-  }
-  if (rootBackendNodeId === null) {
-    const body = await runtimeObjectFor(bridge, 'document.body');
-    if (body) {
-      rootBackendNodeId = body.backendNodeId;
-      await bridge.send('Runtime.releaseObject', { objectId: body.objectId }).catch(() => undefined);
-    }
-  }
+    return document.body;
+  })()`);
+  if (!root && opts.selector) throw new Error(`Selector not found: ${opts.selector}`);
+  const rootBackendNodeId = root ? root.backendNodeId : null;
+  if (root) void bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
 
   const result = await bridge.send('Accessibility.getFullAXTree', {}) as { nodes?: AxNode[] };
   const nodes = result.nodes ?? [];
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
-  let root = rootBackendNodeId === null
+  let axRoot = rootBackendNodeId === null
     ? undefined
     : nodes.find((n) => n.backendDOMNodeId === rootBackendNodeId);
-  root ??= nodes.find((n) => !n.parentId) ?? nodes[0];
+  axRoot ??= nodes.find((n) => !n.parentId) ?? nodes[0];
 
   const refs = new Map<string, BridgeRef>();
   const output: string[] = [];
   let nextRef = 1;
-  const walk = async (node: AxNode, depth: number): Promise<void> => {
+  const walk = (node: AxNode, depth: number): void => {
     const role = axRole(node);
     const rawRole = String(node.role?.value ?? '');
     const axName = String(node.name?.value ?? '');
@@ -1435,7 +1421,6 @@ export async function bridgeSnapshot(
     if (!skipStructural && withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
       if (typeof node.backendDOMNodeId === 'number') {
         const ref = `e${nextRef++}`;
-        await tagBackendNode(bridge, node.backendDOMNodeId, ref);
         refs.set(ref, { backendNodeId: node.backendDOMNodeId, role, name });
         let line = `${'  '.repeat(Math.max(0, depth))}@${ref} [${role}]`;
         if (name) line += ` ${JSON.stringify(name)}`;
@@ -1447,16 +1432,17 @@ export async function bridgeSnapshot(
     }
     for (const childId of node.childIds ?? []) {
       const child = byId.get(childId);
-      if (child) await walk(child, skipStructural ? depth : depth + 1);
+      if (child) walk(child, skipStructural ? depth : depth + 1);
     }
   };
-  if (root) await walk(root, -1);
+  if (axRoot) walk(axRoot, -1);
 
   const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
     const cursor = await bridgeEvaluate(bridge, `(() => {
+      ${CURSOR_REGISTRY_JS}
       const standard = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','SUMMARY','DETAILS']);
-      const out = []; let n = 1;
+      const out = [];
       const walk = (root, inShadow) => {
         for (const el of root.querySelectorAll('*')) {
           const style = getComputedStyle(el);
@@ -1464,38 +1450,26 @@ export async function bridgeSnapshot(
           const tabindex = el.hasAttribute('tabindex') && Number(el.getAttribute('tabindex')) >= 0;
           if (visible && !standard.has(el.tagName) && !el.hasAttribute('role') &&
               (style.cursor === 'pointer' || el.hasAttribute('onclick') || tabindex)) {
-            const ref = 'c' + n++;
-            el.setAttribute('data-ghax-ref', ref);
             const reasons = [];
             if (inShadow) reasons.push('shadow');
             if (style.cursor === 'pointer') reasons.push('cursor:pointer');
             if (el.hasAttribute('onclick')) reasons.push('onclick');
             if (tabindex) reasons.push('tabindex=' + el.getAttribute('tabindex'));
-            out.push({ ref, text: (el.innerText || el.tagName.toLowerCase()).trim().slice(0, 80), reason: reasons.join(', ') });
+            out.push({ cursorId: cursorId(el), text: (el.innerText || el.tagName.toLowerCase()).trim().slice(0, 80), reason: reasons.join(', ') });
           }
           if (el.shadowRoot) walk(el.shadowRoot, true);
         }
       };
       walk(document, false);
       return out;
-    })()`) as Array<{ ref: string; text: string; reason: string }>;
+    })()`) as Array<{ cursorId: number; text: string; reason: string }>;
     if (cursor.length > 0) {
       output.push('', '── cursor-interactive (not in ARIA tree) ──');
-      for (const item of cursor) {
-        const object = await runtimeObjectFor(bridge, `(() => {
-          const find = (root) => {
-            const hit = root.querySelector('[data-ghax-ref="${item.ref}"]');
-            if (hit) return hit;
-            for (const el of root.querySelectorAll('*')) if (el.shadowRoot) { const nested = find(el.shadowRoot); if (nested) return nested; }
-            return null;
-          };
-          return find(document);
-        })()`);
-        if (!object) continue;
-        refs.set(item.ref, { backendNodeId: object.backendNodeId, role: 'cursor-interactive', name: item.text });
-        await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
-        output.push(`@${item.ref} [${item.reason}] ${JSON.stringify(item.text)}`);
-      }
+      cursor.forEach((item, i) => {
+        const ref = `c${i + 1}`;
+        refs.set(ref, { backendNodeId: null, cursorId: item.cursorId, role: 'cursor-interactive', name: item.text });
+        output.push(`@${ref} [${item.reason}] ${JSON.stringify(item.text)}`);
+      });
     }
   }
 
@@ -1575,7 +1549,8 @@ export function notActionableError(label: string, kind: string, r: Actionability
 
 export interface BridgeHandle {
   objectId: string;
-  backendNodeId: number;
+  /** Null for a cursor ref: nothing downstream needs it, so it isn't fetched. */
+  backendNodeId: number | null;
 }
 
 /**
@@ -1583,6 +1558,18 @@ export interface BridgeHandle {
  * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
  */
 export async function bridgeResolveHandle(bridge: Bridge, ref: BridgeRef, label = 'element'): Promise<BridgeHandle> {
+  if (ref.backendNodeId === null) {
+    // Cursor ref: look it up in the page-side registry. A missing registry
+    // (new document) or a disconnected node is a stale ref, never a guess.
+    const id = Number(ref.cursorId);
+    const evaluated = await bridge.send('Runtime.evaluate', {
+      expression: `(() => { const n = window.__ghax?.nodes.get(${id}); return n && n.isConnected ? n : null; })()`,
+      returnByValue: false,
+    }) as { result?: { objectId?: string; subtype?: string } };
+    const objectId = evaluated.result?.objectId;
+    if (!objectId || evaluated.result?.subtype === 'null') throw staleRefError(label);
+    return { objectId, backendNodeId: null };
+  }
   let resolved: { object?: { objectId?: string } };
   try {
     resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as typeof resolved;
@@ -1652,13 +1639,19 @@ export async function bridgeBox(
   ref: BridgeRef,
   label = 'element',
 ): Promise<{ x: number; y: number; width: number; height: number }> {
-  await bridge.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: ref.backendNodeId }).catch(() => undefined);
+  // AX refs address the node by backend id directly; cursor refs need the
+  // page-side registry lookup first.
+  const handle = ref.backendNodeId === null ? await bridgeResolveHandle(bridge, ref, label) : null;
+  const target = handle ? { objectId: handle.objectId } : { backendNodeId: ref.backendNodeId };
   let model: { model?: { border?: number[]; content?: number[] } };
   try {
-    model = await bridge.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }) as typeof model;
+    await bridge.send('DOM.scrollIntoViewIfNeeded', target).catch(() => undefined);
+    model = await bridge.send('DOM.getBoxModel', target) as typeof model;
   } catch (err) {
     if (isStaleNodeError(err)) throw staleRefError(label);
     throw err;
+  } finally {
+    if (handle) bridgeReleaseHandle(bridge, handle);
   }
   const quad = model.model?.border ?? model.model?.content;
   if (!quad || quad.length < 8) throw new Error('element not visible or not in layout');

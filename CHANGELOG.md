@@ -17,6 +17,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   attach` for that). `ghax bridge stats` outside bridge mode exits 2 and
   points at `--trace`.
 
+### Changed
+- **Bridge `snapshot` costs a constant number of relayed CDP calls.** It
+  used to stamp `data-ghax-ref` on every ref (two relayed calls each) and
+  read every cursor ref back (three more each), so a 200-ref page paid
+  hundreds of WebSocket hops. It now makes the same handful of calls on
+  any page (domain enables, one root lookup, `getFullAXTree`, one cursor
+  pass: at most 8). Cursor refs (`@c<n>`) live in a page-side registry and
+  are resolved only when a verb acts on them; a node that has gone is
+  `BRIDGE_REF_STALE`. **`data-ghax-ref` is no longer stamped on elements**;
+  use `ghax box @eN` (or `snapshot -a`) to see which element a ref is.
+
 ### Fixed
 - **Bridge `click` no longer clicks whatever is on top.** Over the bridge,
   `click @e3` scrolled, read the box model and fired a mouse event at the

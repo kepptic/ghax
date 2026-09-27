@@ -193,8 +193,8 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
  * Verbs whose ENTIRE operation can be re-run after a bridge reconnect.
  *
  * Retry is classified per *operation*, never per CDP command: a verb like
- * `snapshot` enables domains, strips old ref tags, releases an object group,
- * reads the AX tree, then writes fresh tags (see bridgeSnapshot in bridge.ts).
+ * `snapshot` enables domains, resolves a root, reads the AX tree, then
+ * registers cursor refs page-side (see bridgeSnapshot in bridge.ts).
  * Resuming from an interrupted middle command could splice two documents or
  * two ref generations together. Restarting the whole thing against a freshly
  * re-attached tab is safe; resuming a fragment is not.
@@ -2562,9 +2562,9 @@ register('press', async (ctx, args) => {
 //
 // Bridge mode: same DOM.setFileInputFiles CDP call, just dispatched via
 // chrome.debugger instead of Playwright's local connectOverCDP transport.
-// `resolveBridgeTarget` already hands back the backendNodeId that
-// bridgeBox/bridgeCallOn use for click/fill, and DOM.setFileInputFiles
-// accepts backendNodeId directly — no objectId resolution needed. The one
+// The ref resolves to a Runtime object (the same handle click/fill use, so a
+// cursor ref works and a vanished node is BRIDGE_REF_STALE), which
+// DOM.setFileInputFiles accepts as `objectId`. The one
 // real difference from the non-bridge path: there is no Playwright to
 // resolve a relative path for you, and `path.resolve()` on the daemon side
 // would silently resolve against the DAEMON's cwd (captured when `ghax

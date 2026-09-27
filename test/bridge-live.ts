@@ -114,6 +114,16 @@ async function main(): Promise<void> {
     assert(f.url.includes('example.org'), `forward should return to example.org, got ${f.url}`);
   });
 
+  await test('snapshot -i costs a constant number of relayed calls (--trace)', async () => {
+    const many = `data:text/html,${encodeURIComponent(Array.from({ length: 150 }, (_, i) => `<button>b${i}</button>`).join(''))}`;
+    await run(['goto', many]);
+    const r = await run(['snapshot', '-i', '--trace']);
+    const m = /trace: (\d+) cdp calls/.exec(r.stderr);
+    assert(m, `no trace line: ${r.stderr}`);
+    assert(Number(m[1]) <= 10, `150-button snapshot took ${m[1]} relayed calls`);
+    assert(!/data-ghax-ref/.test((await run(['html'])).stdout), 'snapshot must not write data-ghax-ref into the DOM');
+  });
+
   // ─── Actionability guard (plan 10, C5) ───────────────────────
   // These need a real DOM, which the simulator cannot provide.
   const dataUrl = (html: string) => `data:text/html,${encodeURIComponent(html)}`;

@@ -27,6 +27,7 @@ import {
   bridgeGuard,
   bridgeReleaseHandle,
   bridgeResolveHandle,
+  bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
 
@@ -484,6 +485,77 @@ async function main(): Promise<void> {
       assert(call.params.arguments[0].value === 'click', `kind arg: ${JSON.stringify(call.params.arguments)}`);
       assert(call.params.arguments[1].value === true, 'force must reach the page');
       assert(/function actionability\(/.test(call.params.functionDeclaration), 'guard source must be inlined');
+    });
+  });
+
+  // ─── Snapshot cost (plan 10, C6) ──────────────────────────────
+  /** A fake page: body (backend 1) with `n` buttons (backend 100+i). */
+  const snapshotExt = (port: number, n: number, cursorItems: number) => {
+    const ext = new FakeExt(port, 'inst-snap');
+    for (const m of ['Runtime.enable', 'DOM.enable', 'Accessibility.enable', 'Runtime.releaseObject']) {
+      ext.replies.set(m, () => ({}));
+    }
+    const liveCursor = new Set<number>(Array.from({ length: cursorItems }, (_, i) => i + 1));
+    ext.replies.set('Runtime.evaluate', (p) => {
+      const expr = String(p.expression ?? '');
+      if (expr.includes('window.__ghax?.nodes.get(')) {
+        const id = Number(/nodes\.get\((\d+)\)/.exec(expr)?.[1]);
+        return liveCursor.has(id)
+          ? { result: { type: 'object', subtype: 'node', objectId: `cursor-${id}` } }
+          : { result: { type: 'object', subtype: 'null', value: null } };
+      }
+      if (p.returnByValue === false) return { result: { type: 'object', subtype: 'node', objectId: 'root' } };
+      // Cursor pass.
+      return { result: { value: [...liveCursor].map((id) => ({ cursorId: id, text: `div ${id}`, reason: 'cursor:pointer' })) } };
+    });
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1 } }));
+    ext.replies.set('Accessibility.getFullAXTree', () => ({
+      nodes: [
+        { nodeId: 'root', role: { value: 'RootWebArea' }, childIds: ['body'] },
+        {
+          nodeId: 'body', parentId: 'root', backendDOMNodeId: 1, role: { value: 'generic' },
+          childIds: Array.from({ length: n }, (_, i) => `b${i}`),
+        },
+        ...Array.from({ length: n }, (_, i) => ({
+          nodeId: `b${i}`, parentId: 'body', backendDOMNodeId: 100 + i,
+          role: { value: 'button' }, name: { value: `Button ${i}` },
+        })),
+      ],
+    }));
+    return { ext, liveCursor };
+  };
+
+  await test('snapshot: a 40-button page costs a constant number of relayed calls', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext } = snapshotExt(port, 40, 3);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      bridge.resetStats();
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      await sleep(10);
+      const buttons = [...snap.refs.keys()].filter((k) => k.startsWith('e'));
+      assert(buttons.length === 40, `expected 40 @e refs, got ${buttons.length}`);
+      assert(snap.refs.get('c1')?.cursorId === 1, 'cursor refs carry the registry id');
+      const calls = Object.values(bridge.stats().methods).reduce((n, m) => n + m.calls, 0);
+      assert(calls <= 10, `snapshot should be <= 10 relayed calls, got ${calls}: ${ext.received.join(',')}`);
+      assert(!ext.received.includes('DOM.resolveNode'), 'no per-ref resolveNode (no DOM tagging)');
+      assert(ext.received.filter((m) => m === 'DOM.describeNode').length === 1, 'only the root is described');
+    });
+  });
+
+  await test('snapshot: cursor refs resolve lazily, and a gone node is BRIDGE_REF_STALE', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext, liveCursor } = snapshotExt(port, 2, 2);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const c2 = snap.refs.get('c2')!;
+      const h = await bridgeResolveHandle(bridge, c2, '@c2');
+      assert(h.objectId === 'cursor-2', `resolved to ${h.objectId}`);
+      liveCursor.delete(2);
+      let caught: any = null;
+      await bridgeResolveHandle(bridge, c2, '@c2').catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
   });
 

@@ -194,6 +194,17 @@ element. Opt out with `--no-auto-snapshot`.
 as the new root instead of inheriting `aria-hidden="true"` from the
 outer app. `--no-dialog-scope` falls back to body-rooted.
 
+Over the bridge, `snapshot` is a constant-cost operation: three domain
+enables, one evaluate + `describeNode` (+ fire-and-forget release) to
+pick the root (`--selector`, top-most modal, or body), one
+`Accessibility.getFullAXTree`, and one evaluate for the cursor pass.
+Nothing is written into the DOM. `@e` refs keep the AX node's backend id;
+`@c` refs keep an id into `window.__ghax.nodes` (a `WeakMap` element to
+id, so the same element keeps its id across snapshots, plus an id to
+element `Map` pruned of disconnected nodes). A cursor ref is looked up
+only when a verb acts on it; a missing registry or a disconnected node is
+`BRIDGE_REF_STALE`, never a best guess.
+
 Before acting, bridge `click`/`fill`/`upload` run `src/actionability.ts`
 in the page (one `Runtime.callFunctionOn` on the resolved node). It is a
 port of Playwright's rules, not its code: `retarget('button-link')`,
