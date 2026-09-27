@@ -5,8 +5,17 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`ghax bridge stats` and a global `--trace` flag.** The bridge now counts
+  every relayed CDP command per method (calls, errors, total and max ms).
+  `ghax bridge stats` prints them heaviest first; `--reset` zeroes them.
+  `--trace` on any command prints one stderr line with that command's CDP
+  call count, CDP time, handler time and top three methods, and leaves
+  stdout (including `--json`) untouched. On the CDP transport it counts the
+  CDP sessions the daemon opens itself; Playwright's own protocol traffic is
+  not counted (use `DEBUG=pw:protocol DEBUG_FILE=/tmp/pw-protocol.log ghax
+  attach` for that). `ghax bridge stats` outside bridge mode exits 2 and
+  points at `--trace`.
 
 ## [0.8.0] - 2026-09-23
 ### Added

@@ -300,6 +300,27 @@ The daemon doesn't care whether commands arrive from fresh CLI
 invocations or from a long-running shell process. Same HTTP RPC,
 same handlers, same state.
 
+## CDP instrumentation
+
+`src/cdp-stats.ts` keeps per-method counters (`calls`, `errors`,
+`totalMs`, `maxMs`). The bridge owns one instance and records every
+command in `Bridge.send()`, so a command queued while the extension
+reconnects is counted once, wait included. `ghax bridge stats` reads it.
+
+On the CDP transport a module-level instance counts only the CDP
+sessions the daemon opens itself (`traceSend` wraps `newCDPSession` /
+`newBrowserCDPSession` results, and `CdpTarget.send` in the raw pool).
+Playwright's own protocol traffic goes through its private connection
+object and is not counted. To see it, start the daemon with Playwright's
+debug logger: `DEBUG=pw:protocol DEBUG_FILE=/tmp/pw-protocol.log ghax
+attach` (attach passes its environment through to the daemon).
+
+`--trace` is stripped from argv by the CLI and sent as `opts.trace`. The
+daemon snapshots the relevant counters before the handler runs, diffs
+after, and returns `trace: {transport, handlerMs, cdpCalls, cdpMs,
+byMethod}` beside `data` in the RPC envelope, so the printed result never
+changes. `rpc.rs` turns it into one stderr line.
+
 ## Disconnect recovery
 
 When the user closes their browser (or a scratch browser crashes),
@@ -336,6 +357,7 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 |------|-------|---------|
 | `src/daemon.ts` | ~1700 | RPC dispatch, all daemon-side handlers, SSE endpoints, capture wiring |
 | `src/cdp-client.ts` | ~350 | Target pool, WebSocket management, raw CDP helpers |
+| `src/cdp-stats.ts` | ~100 | Per-method CDP call counters behind `bridge stats` and `--trace` |
 | `src/snapshot.ts` | ~500 | a11y tree walker, ref assignment, cursor-interactive + shadow-DOM pass |
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
 | `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |

@@ -22,6 +22,15 @@ Connection:
   detach
   restart
 
+Bridge (after attach --extension):
+  bridge control [--active | --tab-id <n> | --stop]  # point the bridge at a tab
+  bridge instances                    # connected browsers, bound + parked
+  bridge use <instance-id|browser|label>
+                                      # bind a different browser
+  bridge reload [--timeout <ms>] [--force]
+                                      # reload the extension, no click needed
+  bridge stats [--reset]              # relayed CDP calls per method since attach
+
 Tab:
   tabs [--browser <id|edge|chrome|label>]
                                   # bridge: --browser lists another connected
@@ -130,4 +139,6 @@ Dev workflow:
   update [--check] [--to vX.Y.Z]    # install latest GitHub release (or check only)
 
 Add --json for machine-readable output on any command.
+Add --trace to any command for a one-line CDP call summary on stderr
+  (count, time, heaviest methods). stdout is unchanged.
 "#;

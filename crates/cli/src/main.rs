@@ -26,7 +26,13 @@ mod version;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // `ghax --trace <verb> ...`: move a leading global flag behind the verb;
+    // dispatch::run strips it from wherever it lands.
+    if argv.len() > 1 && argv[0] == "--trace" {
+        let flag = argv.remove(0);
+        argv.push(flag);
+    }
     if argv.is_empty() || matches!(argv[0].as_str(), "--help" | "-h" | "help") {
         print!("{}", help::HELP);
         return ExitCode::from(dispatch::EXIT_OK as u8);

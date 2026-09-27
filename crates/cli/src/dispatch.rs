@@ -15,6 +15,17 @@ pub const EXIT_CDP_ERROR: i32 = 4;
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
     let cfg = state::resolve_config();
+    // `--trace` is global: pull it out before any per-verb parser sees it, so
+    // `ghax click --trace @e3` can't read "@e3" as the flag's value.
+    let traced = rest.iter().any(|a| a == "--trace");
+    rpc::set_trace(traced);
+    let stripped: Vec<String>;
+    let rest = if traced {
+        stripped = rest.iter().filter(|a| *a != "--trace").cloned().collect();
+        &stripped[..]
+    } else {
+        rest
+    };
     match dispatch_inner(&cfg, verb, rest) {
         Ok(code) => code,
         Err(err) => {

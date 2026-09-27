@@ -354,6 +354,29 @@ async function main(): Promise<void> {
     });
   });
 
+  await test('stats: per-method counters and reset', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-stats');
+      await ext.connect();
+      await until(() => bridge.connected, 'bridge to connect');
+      await bridge.send('DOM.resolveNode', {});
+      await bridge.send('DOM.resolveNode', {});
+      await bridge.send('Runtime.evaluate', {});
+      ext.failWithPhase.set('DOM.getBoxModel', 'attach');
+      await bridge.send('DOM.getBoxModel', {}).catch(() => undefined);
+      await sleep(5);
+      const s = bridge.stats();
+      assert(s.methods['DOM.resolveNode']?.calls === 2, `resolveNode calls: ${JSON.stringify(s.methods)}`);
+      assert(s.methods['Runtime.evaluate']?.calls === 1, 'evaluate counted once');
+      assert(s.methods['DOM.getBoxModel']?.errors === 1, 'a failed call counts as an error');
+      assert(s.methods['DOM.resolveNode'].totalMs >= 0 && s.methods['DOM.resolveNode'].maxMs >= 0, 'timings present');
+      bridge.resetStats();
+      const after = bridge.stats();
+      assert(Object.keys(after.methods).length === 0, 'reset clears every method');
+      assert(after.since >= s.since, 'reset moves the since marker');
+    });
+  });
+
   await test('a single extension binds on hello', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-a');

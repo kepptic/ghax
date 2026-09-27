@@ -204,6 +204,16 @@ ghax attach --extension --browser edge   # only Edge may bind; others park
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 
+**Why is this verb slow?** Every bridge command is a relay hop, so call count is usually the answer:
+
+```bash
+ghax snapshot -i --trace       # stderr: trace: 7 cdp calls, 41.2 ms cdp, 55.0 ms handler (bridge); top: ...
+ghax bridge stats              # per-method totals since attach, heaviest first
+ghax bridge stats --reset      # print, then zero the counters
+```
+
+`--trace` works on any command and either transport; stdout is unchanged.
+
 **Several agents, one browser.** The other axis: two agents driving *different tabs of the same real session*. Each agent gets its own daemon (its own `GHAX_STATE_FILE`, per the isolation rule below), the daemons auto-pick adjacent bridge ports, and the extension holds one connection and one debugger attachment per daemon. No browser-side configuration — the extension scans the port window the daemons allocate from.
 
 ```bash

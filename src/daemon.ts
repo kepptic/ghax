@@ -44,6 +44,7 @@ import { resolveConfig, type DaemonState, writeState, readState } from './config
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
+import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -176,6 +177,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
+  'bridge.stats',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
 
@@ -268,7 +270,7 @@ async function pageTargetId(page: Page): Promise<string | null> {
   const cached = pageTargetIds.get(page);
   if (cached) return cached;
   try {
-    const session = await page.context().newCDPSession(page);
+    const session = traceSend(await page.context().newCDPSession(page));
     const info = await session.send('Target.getTargetInfo');
     await session.detach().catch(() => undefined);
     const id = (info as any)?.targetInfo?.targetId ?? null;
@@ -1181,7 +1183,7 @@ register('newWindow', async (ctx, args) => {
   if (!browser) throw new Error('newWindow: no browser available');
   const context = browser.contexts()[0];
   if (!context) throw new Error('newWindow: no browser context available');
-  const cdpSession = await browser.newBrowserCDPSession();
+  const cdpSession = traceSend(await browser.newBrowserCDPSession());
   try {
     // Race-free: subscribe to the "page" event BEFORE firing createTarget.
     // Playwright surfaces the new page as soon as the target becomes
@@ -1661,6 +1663,22 @@ register('bridge.instances', async (ctx) => {
     livelockSuspected: ctx.bridge.livelockSuspected,
     instances: ctx.bridge.instances(),
   };
+});
+
+// `ghax bridge stats` — per-method counters for every CDP command relayed
+// through the extension since attach (or the last --reset). The first place to
+// look when a bridge verb feels slow: the relay hop dominates, so call count is
+// usually the whole story.
+register('bridge.stats', async (ctx, _args, opts) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new DaemonError(
+      'bridge stats requires bridge mode (`ghax attach --extension`). On the CDP transport, add --trace to a command for its CDP call count.',
+      2,
+    );
+  }
+  const snap = ctx.bridge.stats();
+  if (opts.reset === true) ctx.bridge.resetStats();
+  return { since: snap.since, reset: opts.reset === true, methods: snap.methods };
 });
 
 // `ghax bridge use <id|browser|label>` — explicit takeover. Rebinding happens
@@ -3207,7 +3225,7 @@ async function withCdpSession<T>(
   page: Page,
   fn: (session: import('playwright').CDPSession) => Promise<T>,
 ): Promise<T> {
-  const session = await page.context().newCDPSession(page);
+  const session = traceSend(await page.context().newCDPSession(page));
   try {
     return await fn(session);
   } finally {
@@ -4298,7 +4316,7 @@ async function main() {
     // with downloadPath = the real Downloads dir, and keep it alive to receive
     // downloadWillBegin / downloadProgress events.
     try {
-      ctx.browserSession = await browser.newBrowserCDPSession();
+      ctx.browserSession = traceSend(await browser.newBrowserCDPSession());
       wireDownloadEvents(ctx);
       await assertDownloadBehavior(ctx);
       log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
@@ -4490,9 +4508,31 @@ async function main() {
         json(res, 400, { ok: false, error: 'Missing cmd' });
         return;
       }
+      // --trace: diff the CDP counters around this one RPC and ship the
+      // delta beside `data`, so stdout (which prints `data`) never changes.
+      // Concurrent RPCs on the same daemon would bleed into each other's
+      // numbers; one agent per daemon is the supported shape anyway.
+      const rpcOpts = { ...(body.opts ?? {}) };
+      const wantTrace = rpcOpts.trace === true;
+      delete rpcOpts.trace;
+      const stats = ctx.bridge ? ctx.bridge.cdpStats : daemonCdpStats;
+      const before = wantTrace ? stats.snapshot() : null;
+      const startedAt = performance.now();
+      const buildTrace = () => {
+        if (!before) return {};
+        const delta = diffStats(before, stats.snapshot());
+        return {
+          trace: {
+            transport: ctx.bridgeMode ? 'bridge' : 'cdp',
+            handlerMs: Math.round((performance.now() - startedAt) * 10) / 10,
+            ...delta,
+            ...(ctx.bridgeMode ? {} : { note: 'playwright-internal protocol traffic not counted' }),
+          },
+        };
+      };
       try {
-        const data = await dispatch(body.cmd, body.args ?? [], body.opts ?? {});
-        json(res, 200, { ok: true, data });
+        const data = await dispatch(body.cmd, body.args ?? [], rpcOpts);
+        json(res, 200, { ok: true, data, ...buildTrace() });
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
         const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
@@ -4504,6 +4544,7 @@ async function main() {
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(code !== undefined ? { code } : {}),
           ...(hint !== undefined ? { hint } : {}),
+          ...buildTrace(),
         });
       }
       return;

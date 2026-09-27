@@ -42,6 +42,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
+import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
 
 export interface BridgeEvent {
   method: string;
@@ -340,6 +341,9 @@ export class Bridge extends EventEmitter {
   private pairFailures: number[] = [];
 
   readonly port: number;
+
+  /** Every CDP command relayed through the extension, by method. */
+  readonly cdpStats = new CdpStats();
 
   /**
    * This daemon process's identity, minted fresh on every construction.
@@ -902,6 +906,21 @@ export class Bridge extends EventEmitter {
    * otherwise → rejected immediately with install guidance.
    */
   send(method: string, params: Record<string, unknown> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
+    // Counted here rather than in dispatch() so a command queued while
+    // DEGRADED is counted once, with the reconnect wait included in its time.
+    return this.cdpStats.track(method, this.sendUntracked(method, params, timeoutMs));
+  }
+
+  /** Per-method relayed-call counters since start or the last reset. */
+  stats(): CdpStatsSnapshot {
+    return this.cdpStats.snapshot();
+  }
+
+  resetStats(): void {
+    this.cdpStats.reset();
+  }
+
+  private sendUntracked(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
     if (this._state === 'BOUND') return this.dispatch(method, params, timeoutMs);
     if (this._state === 'DEGRADED') {
       if (this.queue.length >= QUEUE_CAP) {

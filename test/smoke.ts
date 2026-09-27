@@ -1956,6 +1956,29 @@ c('bridge reload errors clearly when the daemon is not in bridge mode', async ()
   );
 });
 
+c('bridge stats errors clearly when not in bridge mode', async () => {
+  const r = await run(['bridge', 'stats'], { allowFailure: true });
+  assert(r.exitCode === 2, `expected exit 2, got ${r.exitCode} stderr=${r.stderr}`);
+  assert(
+    /requires bridge mode/i.test(r.stderr) && /--trace/.test(r.stderr),
+    `expected a bridge-mode error pointing at --trace, got: ${r.stderr}`,
+  );
+});
+
+c('--trace prints a trace line on stderr and leaves stdout alone', async () => {
+  const plain = await run(['eval', '1 + 1', '--json']);
+  const traced = await run(['eval', '--trace', '1 + 1', '--json']);
+  assert(traced.stdout === plain.stdout, `stdout changed under --trace: ${plain.stdout} vs ${traced.stdout}`);
+  assert(
+    /^trace: \d+ cdp calls, [\d.]+ ms cdp, [\d.]+ ms handler \(cdp\)/m.test(traced.stderr),
+    `expected a trace line on stderr, got: ${traced.stderr}`,
+  );
+  assert(!/^trace:/m.test(plain.stderr), `no trace line expected without the flag: ${plain.stderr}`);
+  // A leading global flag works too.
+  const leading = await run(['--trace', 'tabs', '--json']);
+  assert(/^trace: /m.test(leading.stderr), `leading --trace ignored: ${leading.stderr}`);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);
