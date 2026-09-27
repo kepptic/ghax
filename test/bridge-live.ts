@@ -263,6 +263,27 @@ async function main(): Promise<void> {
     assert(v.stdout.trim() === '1', 'the click should reach the handler');
   });
 
+  // Review finding 6: the page's own world can't steer ghax.
+  await test('isolated world: a page squatting window.__ghax and faking hit-tests cannot steer ghax', async () => {
+    await gotoFixture(`
+      <button id="b" onclick="window.__buy=1">Buy</button>
+      <div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.2)">Cookie wall</div>
+      <span style="cursor:pointer" onclick="window.__c=1">Pointer thing</span>
+      <script>
+        window.__ghax = 'squatted';
+        const btn = document.getElementById('b');
+        Document.prototype.elementsFromPoint = function () { return [btn]; };
+        Document.prototype.elementFromPoint = function () { return btn; };
+        Element.prototype.getBoundingClientRect = function () { return new DOMRect(0, 0, 1, 1); };
+      </script>`);
+    const snap = await run(['snapshot', '-C']);
+    assert(snap.code === 0 && /@c\d+ .*"Pointer thing"/.test(snap.stdout), `cursor pass must work despite a squatted __ghax:\n${snap.stdout}${snap.stderr}`);
+    const r = await run(['click', '#b']);
+    assert(r.code === 4 && /covered by div#overlay/.test(r.stderr), `the fake hit-test must not hide the overlay: ${r.stderr}`);
+    const v = await run(['eval', 'String(window.__buy || 0)']);
+    assert(v.stdout.trim() === '0', 'the covered button must not have been clicked');
+  });
+
   await test('goto data: fails fast and says why (Chrome blocks it for extensions)', async () => {
     const started = Date.now();
     const r = await run(['goto', 'data:text/html,x']);

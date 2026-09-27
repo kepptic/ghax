@@ -1211,7 +1211,7 @@ export function unwrapEvalResult(result: unknown): unknown {
 export async function bridgeEvaluate(
   bridge: Bridge,
   expression: string,
-  opts: { uniqueContextId?: string | null; timeoutMs?: number } = {},
+  opts: { uniqueContextId?: string | null; contextId?: number; timeoutMs?: number } = {},
 ): Promise<unknown> {
   const params: Record<string, unknown> = {
     expression,
@@ -1219,6 +1219,7 @@ export async function bridgeEvaluate(
     returnByValue: true,
   };
   if (opts.uniqueContextId) params.uniqueContextId = opts.uniqueContextId;
+  else if (typeof opts.contextId === 'number') params.contextId = opts.contextId;
   const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs);
   return unwrapEvalResult(result);
 }
@@ -1335,13 +1336,77 @@ function axProps(node: AxNode): string {
   return values.length > 0 ? `[${values.join(', ')}]` : '';
 }
 
+// ─── ghax's own isolated world (review finding 6) ──────────────────
+//
+// The cursor-ref registry, root selection, selector resolution and the
+// click/upload actionability guard run in a ghax-owned isolated world, not
+// the page's main world. There the page cannot squat `window.__ghax`, and a
+// page that overrides getBoundingClientRect / elementsFromPoint / querySelector
+// in its own world cannot move ghax's click point or hide an overlay from
+// the hit test: isolated worlds share the DOM but not JS prototypes. One
+// world per document: created on first use, forgotten on main-frame
+// navigation, context teardown, or a control change, and re-created once if
+// CDP says the context is gone. Fill stays in the main world on purpose: it
+// needs the page's own `monaco` global.
+
+interface WorldState { contextId: number | null }
+const worlds = new WeakMap<Bridge, WorldState>();
+
+function worldState(bridge: Bridge): WorldState {
+  let st = worlds.get(bridge);
+  if (st) return st;
+  const state: WorldState = { contextId: null };
+  worlds.set(bridge, state);
+  bridge.onEvent((ev) => {
+    const p = ev.params as { executionContextId?: unknown; frame?: { parentId?: unknown } };
+    if (ev.method === 'Runtime.executionContextsCleared') state.contextId = null;
+    else if (ev.method === 'Runtime.executionContextDestroyed' && p.executionContextId === state.contextId) state.contextId = null;
+    else if (ev.method === 'Page.frameNavigated' && !p.frame?.parentId) state.contextId = null;
+  });
+  bridge.on('controlled', () => { state.contextId = null; });
+  bridge.on('disconnect', () => { state.contextId = null; });
+  return state;
+}
+
+/** The execution context id of ghax's isolated world in the controlled tab. */
+export async function bridgeIsolatedWorld(bridge: Bridge): Promise<number> {
+  const st = worldState(bridge);
+  if (st.contextId !== null) return st.contextId;
+  const tree = await bridge.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } };
+  const frameId = tree.frameTree?.frame?.id;
+  if (!frameId) throw new Error('bridge: no main frame to create the ghax isolated world in');
+  const res = await bridge.send('Page.createIsolatedWorld', {
+    frameId,
+    worldName: 'ghax',
+    grantUniveralAccess: true,
+  }) as { executionContextId?: number };
+  if (typeof res.executionContextId !== 'number') {
+    throw new Error('bridge: Page.createIsolatedWorld returned no execution context');
+  }
+  st.contextId = res.executionContextId;
+  return st.contextId;
+}
+
+/** Run `fn` in the isolated world, re-creating it once if it went stale. */
+async function inWorld<T>(bridge: Bridge, fn: (contextId: number) => Promise<T>): Promise<T> {
+  try {
+    return await fn(await bridgeIsolatedWorld(bridge));
+  } catch (err) {
+    if (!isStaleContextError(err)) throw err;
+    worldState(bridge).contextId = null;
+    return await fn(await bridgeIsolatedWorld(bridge));
+  }
+}
+
 async function runtimeObjectFor(
   bridge: Bridge,
   expression: string,
+  contextId?: number,
 ): Promise<{ objectId: string; backendNodeId: number; nodeName: string } | null> {
   const evaluated = await bridge.send('Runtime.evaluate', {
     expression,
     returnByValue: false,
+    ...(typeof contextId === 'number' ? { contextId } : {}),
   }) as { result?: { objectId?: string; subtype?: string } };
   const objectId = evaluated.result?.objectId;
   if (!objectId || evaluated.result?.subtype === 'null') return null;
@@ -1410,7 +1475,7 @@ export async function bridgeSnapshot(
   // Root selection in ONE evaluate: --selector, else the top-most visible
   // modal (unless --no-dialog-scope), else body.
   const selectorJs = opts.selector ? JSON.stringify(opts.selector) : 'null';
-  const root = await runtimeObjectFor(bridge, `(() => {
+  const root = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `(() => {
     const sel = ${selectorJs};
     if (sel) return document.querySelector(sel);
     if (${opts.dialogScope !== false}) {
@@ -1422,7 +1487,7 @@ export async function bridgeSnapshot(
       if (visible.length) return visible.at(-1);
     }
     return document.body;
-  })()`);
+  })()`, cid));
   if (!root && opts.selector) throw new Error(`Selector not found: ${opts.selector}`);
   const rootBackendNodeId = root ? root.backendNodeId : null;
   // Anything but <body> means --selector or a modal won: not the whole page.
@@ -1479,7 +1544,7 @@ export async function bridgeSnapshot(
 
   const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
-    const cursor = await bridgeEvaluate(bridge, `(() => {
+    const cursor = await inWorld(bridge, (contextId) => bridgeEvaluate(bridge, `(() => {
       ${CURSOR_REGISTRY_JS}
       const standard = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','SUMMARY','DETAILS']);
       const out = [];
@@ -1502,7 +1567,7 @@ export async function bridgeSnapshot(
       };
       walk(document, false);
       return out;
-    })()`) as Array<{ cursorId: number; text: string; reason: string }>;
+    })()`, { contextId })) as Array<{ cursorId: number; text: string; reason: string }>;
     if (cursor.length > 0) {
       output.push('', '── cursor-interactive (not in ARIA tree) ──');
       cursor.forEach((item) => {
@@ -1552,7 +1617,7 @@ export async function bridgeRefStillMatches(bridge: Bridge, ref: BridgeRef): Pro
 
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */
 export async function bridgeResolveSelector(bridge: Bridge, selector: string): Promise<BridgeRef> {
-  const object = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`);
+  const object = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`, cid));
   if (!object) throw new Error(`Selector not found: ${selector}`);
   await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
   return { backendNodeId: object.backendNodeId, role: '', name: '' };
@@ -1624,29 +1689,48 @@ export interface BridgeHandle {
  * Resolve a ref to a live Runtime object. The one place a stale backend node
  * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
  */
-export async function bridgeResolveHandle(bridge: Bridge, ref: BridgeRef, label = 'element'): Promise<BridgeHandle> {
-  if (ref.backendNodeId === null) {
-    // Cursor ref: look it up in the page-side registry. A missing registry
-    // (new document) or a disconnected node is a stale ref, never a guess.
+export async function bridgeResolveHandle(
+  bridge: Bridge,
+  ref: BridgeRef,
+  label = 'element',
+  /** 'isolated' (default): ghax's own world. 'main': the page's, for fill. */
+  world: 'isolated' | 'main' = 'isolated',
+): Promise<BridgeHandle> {
+  let backendNodeId = ref.backendNodeId;
+  if (backendNodeId === null) {
+    // Cursor ref: look it up in ghax's registry, which lives in the isolated
+    // world where the page can't reach it. A missing registry (new document),
+    // a registry of the wrong shape, or a disconnected node is a stale ref,
+    // never a guess.
     const id = Number(ref.cursorId);
-    const evaluated = await bridge.send('Runtime.evaluate', {
-      expression: `(() => { const n = window.__ghax?.nodes.get(${id}); return n && n.isConnected ? n : null; })()`,
+    const evaluated = await inWorld(bridge, (contextId) => bridge.send('Runtime.evaluate', {
+      expression: `(() => { const r = window.__ghax; const n = r && r.nodes instanceof Map ? r.nodes.get(${id}) : null; return n && n.isConnected ? n : null; })()`,
       returnByValue: false,
-    }) as { result?: { objectId?: string; subtype?: string } };
+      contextId,
+    })) as { result?: { objectId?: string; subtype?: string } };
     const objectId = evaluated.result?.objectId;
     if (!objectId || evaluated.result?.subtype === 'null') throw staleRefError(label);
-    return { objectId, backendNodeId: null };
+    if (world === 'isolated') return { objectId, backendNodeId: null };
+    // Main-world handle wanted: hop through the backend id.
+    const described = await bridge.send('DOM.describeNode', { objectId }) as { node?: { backendNodeId?: number } };
+    void bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    if (typeof described.node?.backendNodeId !== 'number') throw staleRefError(label);
+    backendNodeId = described.node.backendNodeId;
   }
+  const resolveIn = (executionContextId?: number) => bridge.send('DOM.resolveNode', {
+    backendNodeId,
+    ...(typeof executionContextId === 'number' ? { executionContextId } : {}),
+  }) as Promise<{ object?: { objectId?: string } }>;
   let resolved: { object?: { objectId?: string } };
   try {
-    resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as typeof resolved;
+    resolved = world === 'isolated' ? await inWorld(bridge, resolveIn) : await resolveIn();
   } catch (err) {
     if (isStaleNodeError(err)) throw staleRefError(label);
     throw err;
   }
   const objectId = resolved.object?.objectId;
   if (!objectId) throw staleRefError(label);
-  return { objectId, backendNodeId: ref.backendNodeId };
+  return { objectId, backendNodeId };
 }
 
 /** Fire-and-forget: the caller never waits on a release. */
@@ -1736,7 +1820,7 @@ export async function bridgeCallOn(
   args: unknown[] = [],
   label = 'element',
 ): Promise<unknown> {
-  const handle = await bridgeResolveHandle(bridge, ref, label);
+  const handle = await bridgeResolveHandle(bridge, ref, label, 'main');
   try {
     const result = await bridge.send('Runtime.callFunctionOn', {
       objectId: handle.objectId,

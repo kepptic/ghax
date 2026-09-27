@@ -2344,7 +2344,8 @@ register('fill', async (ctx, args, opts) => {
     // in the same in-page call. No visibility or hit test on purpose: Monaco
     // and hidden-but-scriptable inputs are legitimate fill targets.
     const bridge = requireBridge(ctx);
-    const handle = await bridgeResolveHandle(bridge, await resolveBridgeTarget(ctx, target), target);
+    // Main world on purpose: the Monaco path needs the page's own globals.
+    const handle = await bridgeResolveHandle(bridge, await resolveBridgeTarget(ctx, target), target, 'main');
     let filled;
     try {
       filled = await bridgeGuard(bridge, handle, target, 'fill', force, { args: [value], fn: `function(v) {

@@ -118,6 +118,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   target), `display:contents` elements act through their first rendered
   child, and a target covered near the viewport edge (sticky header) is
   scrolled to the centre and hit-tested again before being refused.
+  The guard, the cursor-ref registry, root selection and selector lookups
+  run in a ghax-owned isolated world (`Page.createIsolatedWorld`, one per
+  document), so a page that defines `window.__ghax` or overrides
+  `getBoundingClientRect`/`elementsFromPoint` in its own world can neither
+  break snapshots nor move a click past an overlay. Fill stays in the main
+  world because it needs the page's `monaco` global.
 - **The CLI no longer re-sends a click, fill or other mutation after a lost
   reply.** `rpc.rs` retried every verb once on any transport error,
   including a timeout or reset after the daemon had already received the

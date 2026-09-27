@@ -82,7 +82,13 @@ class FakeExt {
    * error reply with that message. Lets sims drive snapshot/guard code paths
    * that need real-looking results, not `{echoed}`.
    */
-  replies = new Map<string, (params: any) => unknown>();
+  replies = new Map<string, (params: any) => unknown>([
+    // ghax's isolated world (finding 6): one frame, one world per "document".
+    ['Page.getFrameTree', () => ({ frameTree: { frame: { id: 'main-frame' } } })],
+    ['Page.createIsolatedWorld', () => ({ executionContextId: 700 + (++this.worldsCreated) })],
+  ]);
+  /** How many isolated worlds this fake has created. */
+  worldsCreated = 0;
   /** Params of every CDP command received, in order. */
   sent: Array<{ method: string; params: any }> = [];
   private pingTimer: NodeJS.Timeout | null = null;
@@ -454,10 +460,13 @@ async function main(): Promise<void> {
       assert(/--force/.test(e.hint) && e.hint.includes('div#overlay'), `hint: ${e.hint}`);
       assert(e.details?.reason === 'covered', `details: ${JSON.stringify(e.details)}`);
       await sleep(10);
+      const worldSetup = new Set(['Page.getFrameTree', 'Page.createIsolatedWorld']);
       assert(
-        ext.received.join(',') === 'DOM.resolveNode,Runtime.callFunctionOn,Runtime.releaseObject',
+        ext.received.filter((m) => !worldSetup.has(m)).join(',') === 'DOM.resolveNode,Runtime.callFunctionOn,Runtime.releaseObject',
         `a guarded click costs resolve + one in-page call + release, got ${ext.received.join(',')}`,
       );
+      const resolve = ext.sent.find((c) => c.method === 'DOM.resolveNode');
+      assert(typeof resolve?.params.executionContextId === 'number', 'the guard handle must live in the ghax isolated world');
     });
   });
 
@@ -501,7 +510,7 @@ async function main(): Promise<void> {
     const liveCursor = new Set<number>(Array.from({ length: cursorItems }, (_, i) => i + 1));
     ext.replies.set('Runtime.evaluate', (p) => {
       const expr = String(p.expression ?? '');
-      if (expr.includes('window.__ghax?.nodes.get(')) {
+      if (expr.includes('nodes.get(')) {
         const id = Number(/nodes\.get\((\d+)\)/.exec(expr)?.[1]);
         return liveCursor.has(id)
           ? { result: { type: 'object', subtype: 'node', objectId: `cursor-${id}` } }
@@ -722,6 +731,38 @@ async function main(): Promise<void> {
       ax = { role: 'checkbox', name: 'Save' };
       assert(!(await bridgeRefStillMatches(bridge, ref)), 'a role change must not match');
       assert(await bridgeRefStillMatches(bridge, { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
+    });
+  });
+
+  await test('isolated world: created once per document, re-created after navigation (finding 6)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-world');
+      ext.replies.set('DOM.resolveNode', () => ({ object: { objectId: 'o' } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const ref = { backendNodeId: 5, role: 'button', name: 'Go' };
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(ext.worldsCreated === 1, `one world per document, got ${ext.worldsCreated}`);
+      const ctxIds = ext.sent.filter((c) => c.method === 'DOM.resolveNode').map((c) => c.params.executionContextId);
+      assert(ctxIds.every((id) => id === 701), `both resolves in world 701: ${ctxIds}`);
+      // Main-frame navigation drops the world; the next use makes a new one.
+      ext.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'main-frame' } } });
+      await sleep(20);
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(Number(ext.worldsCreated) === 2, 'navigation must re-create the world');
+      // A main-world handle (fill) does not use the isolated world at all.
+      await bridgeResolveHandle(bridge, ref, '@e1', 'main');
+      const last = ext.sent.filter((c) => c.method === 'DOM.resolveNode').at(-1);
+      assert(last?.params.executionContextId === undefined, 'main-world resolve carries no context id');
+      // A stale context is re-created once, transparently.
+      let fail = true;
+      ext.replies.set('DOM.resolveNode', (p) => {
+        if (fail && p.executionContextId) { fail = false; throw new Error('Cannot find context with specified id'); }
+        return { object: { objectId: 'o2' } };
+      });
+      const h = await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(h.objectId === 'o2' && Number(ext.worldsCreated) === 3, `stale world should be rebuilt: ${ext.worldsCreated}`);
     });
   });
 
