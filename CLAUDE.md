@@ -46,13 +46,16 @@ the tool in the past.
    daemon pointing at the same state file. For parallel agents, use
    `GHAX_STATE_FILE=/tmp/ghax-<agent>.json` — each gets its own daemon.
 
-3. **Refs survive only until the next snapshot — and only on the tab
-   they were taken on.** `ghax click @e3` looks up `@e3` against the
-   daemon's *last* snapshot ref map. If the DOM changed, re-snapshot
-   first. The `tab` and `new-window` handlers clear the ref map when
-   the active page changes, so a stale ref from tab A can't resolve
-   against tab B; a smoke check asserts this. Never cache ref IDs in
-   code that outlives a single action.
+3. **Refs resolve against the daemon's last snapshot, and only on the
+   tab they were taken on.** `ghax click @e3` looks up `@e3` in the
+   *last* snapshot's ref map. On the CDP transport an element keeps its
+   ref across re-snapshots of the same document (Playwright `aria-ref`),
+   but refs never survive a tab switch or navigation. The `tab` and
+   `new-window` handlers clear the ref map when the active page changes,
+   so a stale ref from tab A can't resolve against tab B; a smoke check
+   asserts this. `src/snapshot.ts` must stay the only `ariaSnapshot*`
+   call site (a second one replaces Playwright's ref cache). Never cache
+   ref IDs in code that outlives a single action.
 
 4. **Daemon restart required after editing `src/daemon.ts`.** The daemon
    bundle is loaded once at attach time. Changes to `src/daemon.ts` don't

@@ -236,6 +236,7 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 ### Snapshot and interact
 
 - Accessibility-tree snapshots with `@e<n>` refs. Click by role and name, not brittle CSS selectors.
+- Stable refs on the CDP transport. A ref is minted by Playwright and cached on the element, so `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
 - Shadow-DOM traversal. Chain selectors (`host >> inner`) descend into open shadow roots for custom-element apps (Lit, Shoelace, web components).
 - Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors, and Monaco-aware — routes into `monaco.editor.getEditors()`/`setValue()` when the target lives inside a `.monaco-editor` (Datto RMM, Splunk, Grafana, Postman, GitLab Web IDE).

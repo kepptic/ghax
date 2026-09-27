@@ -889,11 +889,20 @@ async function enableBridgeDomains(ctx: Ctx): Promise<void> {
   ]).catch(() => undefined);
 }
 
-function resolveRef(ctx: Ctx, target: string, page: Page): Locator {
+async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator> {
   if (target.startsWith('@')) {
     const key = target.slice(1);
     const entry = ctx.refs.get(key);
     if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
+    // An `aria-ref=` locator matches nothing once its element is gone or
+    // renamed, or once a newer ariaSnapshot replaced Playwright's ref cache.
+    // Fail here with the same wording instead of letting an action wait out
+    // its timeout (or, for the @c selector chains, hit a different element).
+    if (await entry.locator.count() === 0) {
+      throw new Error(
+        `Ref ${target} not found in the latest snapshot (element gone, renamed, or a newer snapshot replaced it). Run 'ghax snapshot' first.`,
+      );
+    }
     return entry.locator;
   }
   return page.locator(target);
@@ -1727,7 +1736,7 @@ register('screenshot', async (ctx, args, opts) => {
   }
   const page = await activePage(ctx);
   if (target) {
-    await resolveRef(ctx, target, page).screenshot({ path: outPath });
+    await (await resolveRef(ctx, target, page)).screenshot({ path: outPath });
   } else {
     await page.screenshot({ path: outPath, fullPage });
   }
@@ -1836,7 +1845,7 @@ register('box', async (ctx, args) => {
     }
   }
   const page = await activePage(ctx);
-  const locator = resolveRef(ctx, target, page);
+  const locator = await resolveRef(ctx, target, page);
   const box = await locator.first().boundingBox();
   if (!box) throw new Error(`${target}: element not visible or not in layout`);
   return box;
@@ -2117,7 +2126,7 @@ register('click', async (ctx, args, opts) => {
   }
 
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   await playwrightPrecheck(loc, target, 'click', force);
 
   const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
@@ -2205,7 +2214,7 @@ register('fill', async (ctx, args, opts) => {
     return result?.editor === 'monaco' ? { ok: true, editor: 'monaco' } : { ok: true };
   }
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   await playwrightPrecheck(loc, target, 'fill', force);
 
   // Monaco path — Datto RMM, Splunk, Grafana, Postman, and GitLab's Web IDE
@@ -2328,7 +2337,7 @@ register('select', async (ctx, args, opts) => {
   }
 
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   const attempts: string[] = [];
 
   // ── (a) native <select> ──────────────────────────────────────
@@ -2601,7 +2610,7 @@ register('upload', async (ctx, args, opts) => {
     return { ok: true, count: paths.length };
   }
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   await loc.setInputFiles(paths.length === 1 ? paths[0] : paths);
   return { ok: true, count: paths.length };
 });
@@ -3010,7 +3019,7 @@ register('is', async (ctx, args) => {
   const target = String(args[1] ?? '');
   if (!check || !target) throw new Error('Usage: is <visible|enabled|checked|hidden|disabled> <@ref|selector>');
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   let result: boolean;
   switch (check) {
     case 'visible':

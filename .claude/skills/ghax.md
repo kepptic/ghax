@@ -311,8 +311,11 @@ matching tab. User's tabs + sidepanel + scroll position stay intact.
 3. `ghax click @e<n>` — the daemon resolves the ref against the last
    snapshot's locator map.
 
-Refs survive until the next snapshot call; if the DOM changes underneath
-you (route change, dialog opens), re-snapshot.
+On the CDP transport an element keeps its ref across re-snapshots of the
+same page, so numbers are stable but sparse (`snapshot -i` may start at
+`@e4`; never assume `@e1`). After a route change or when a dialog opens,
+re-snapshot. A ref whose element is gone fails with "not found in the
+latest snapshot": re-snapshot and pick again.
 
 ### Debug a Chrome extension's service worker live
 

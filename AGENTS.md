@@ -16,7 +16,7 @@ If you just arrived and need to install: see [llms.txt](./llms.txt) for the inst
 
 2. **Single daemon per state file.** `.ghax/ghax.json` at the git root stores `{pid, port, browserKind, browserUrl, cwd}`. Never spawn a second daemon pointing at the same state file. For parallel agents, use `GHAX_STATE_FILE=/tmp/ghax-<name>.json`. This holds on the bridge too — each agent's daemon auto-picks a bridge port in 9223–9232 and the extension multiplexes between them, one tab per agent (`docs/design/plan/09-bridge-multi-agent.md`).
 
-3. **Refs survive only until the next snapshot, only on the tab they were taken on.** `ghax click @e3` looks up `@e3` against the daemon's last snapshot ref map. If the DOM changed, re-snapshot first. The `tab` and `new-window` handlers clear the ref map when the active page changes.
+3. **Refs resolve against the daemon's last snapshot, only on the tab they were taken on.** `ghax click @e3` looks up `@e3` in the last snapshot's ref map. On the CDP transport the element keeps its ref across re-snapshots of the same document (Playwright `aria-ref`), but refs never survive a tab switch or a navigation, and a ref absent from the latest snapshot fails as not found. The `tab` and `new-window` handlers clear the ref map when the active page changes. Never add a second `ariaSnapshot`/`ariaSnapshotJSON` call site: it would replace Playwright's ref cache.
 
 4. **Daemon restart required after editing `src/daemon.ts`.** The daemon bundle is loaded once at attach time. Changes to `src/daemon.ts` don't take effect until `ghax detach && npm run build && ghax attach`.
 

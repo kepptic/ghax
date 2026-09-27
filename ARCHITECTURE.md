@@ -173,12 +173,36 @@ or the browser's `default`), always with `eventsEnabled` so the
 map lives on the daemon's active tab. `ghax click @e3` looks up `@e3`
 against that map and drives a Playwright locator.
 
-Refs survive until the next snapshot — and only on the tab they were
-taken on. `tab <id>` and `new-window` clear the ref map when the active
-page changes, so a stale `@e3` from a previous tab can't silently
-resolve against the wrong DOM. If the DOM changed and you run
-`click @e3`, Playwright fails with a clear "no element" error — fix by
-re-snapshotting.
+On the CDP transport the refs are Playwright's own.
+`src/snapshot.ts` calls `rootLocator.ariaSnapshotJSON({ mode: 'ai' })`,
+which mints `e<n>` for every visible node that receives pointer events
+and caches `{role, name, ref}` on the element (`_ariaRef`, injected
+`ariaSnapshot.ts`). The next snapshot reuses the cached ref while role
+and name are unchanged, so refs are stable across re-snapshots and
+sparse in the printed output. The counter is per frame and per document,
+so it restarts on navigation. Each registered ref is the locator
+`aria-ref=e<n>`, whose engine resolves only against the LAST
+ariaSnapshot taken in that frame (`_lastAriaSnapshotForQuery`), requires
+`isConnected`, and returns at most one element. Two consequences:
+
+- `snapshot.ts` must remain the daemon's only caller of `ariaSnapshot`
+  or `ariaSnapshotJSON`. Any other call would silently replace the cache
+  and orphan the user's refs.
+- A locator-scoped snapshot (modal, `--selector`) sets the cache to that
+  subtree, so modal scoping needs no locator re-rooting any more.
+
+`resolveRef` checks `count() === 0` before acting and fails with "not
+found in the latest snapshot ... Run 'ghax snapshot' first", so a gone
+or renamed element never waits out an action timeout or lands on a
+neighbour. Iframe refs (`f<seq>e<n>`) render without `@` and are not
+registered. Because the cache semantics are undocumented, Playwright is
+pinned to an exact version and the smoke suite has checks that fail if a
+bump changes them (stable across insertion, stale after removal, modal
+scope).
+
+Refs die on tab change: `tab <id>` and `new-window` clear the ref map
+when the active page changes, so a stale `@e3` from a previous tab can't
+silently resolve against the wrong DOM.
 
 `ghax batch` skips that re-snapshotting ceremony for you: when a step
 inside a batch plan references an `@e<n>` ref, the daemon auto-runs a
@@ -223,7 +247,7 @@ on those two instead of failing.
 Shadow DOM: the cursor-interactive pass walks open shadow roots and
 emits Playwright chain selectors (`host >> inner`). This is the only
 form of selector Playwright accepts for descending into shadow trees
-as of Playwright 1.58+.
+(checked against the pinned 1.63.0).
 
 ## Extension internals
 

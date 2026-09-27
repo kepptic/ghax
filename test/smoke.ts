@@ -84,6 +84,24 @@ function parseJson<T = unknown>(out: string): T {
   }
 }
 
+/**
+ * The `@eN` ref printed for a role (and optional name) in snapshot output.
+ * Refs are Playwright-minted and sparse since the aria-ref switch, so the
+ * first interactive element is no longer guaranteed to be `@e1`.
+ */
+function refOf(snapshotText: string, role: string, name?: string): string {
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`@(e\\d+) \\[${esc(role)}\\]${name === undefined ? '' : ` ${esc(JSON.stringify(name))}`}`);
+  const m = re.exec(snapshotText);
+  if (!m) fail(`no [${role}]${name ? ` "${name}"` : ''} ref in snapshot:\n${snapshotText.slice(0, 400)}`);
+  return `@${m[1]}`;
+}
+
+async function snapRef(role: string, name?: string, extra: string[] = []): Promise<string> {
+  const snap = await run(['snapshot', '-i', ...extra]);
+  return refOf(snap.stdout, role, name);
+}
+
 const checks: Array<{ name: string; fn: () => Promise<void> }> = [];
 const c = (name: string, fn: () => Promise<void>) => checks.push({ name, fn });
 
@@ -542,9 +560,9 @@ c('snapshot cursor scan pierces open shadow DOM', async () => {
 c('click @e<n> resolves against the last snapshot', async () => {
   // Need a fresh snapshot because viewport/responsive don't touch refs,
   // but click resolves the last ref map regardless of subsequent commands.
-  await run(['snapshot', '-i']);
-  // example.com has one link — @e1.
-  await run(['click', '@e1']);
+  // example.com has one link.
+  const link = await snapRef('link');
+  await run(['click', link]);
   // After clicking the link, URL should have changed from example.com home.
   const r = await run(['eval', 'location.href']);
   assert(r.stdout.trim() !== 'https://example.com/', `click @e1 should navigate away: ${r.stdout}`);
@@ -561,8 +579,7 @@ c('click reports dialogDismissed when a modal closes', async () => {
   `;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--json']);
+  const r = await run(['click', await snapRef('button', 'OK'), '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean; preDialogCount: number; postDialogCount: number }>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(data.dialogDismissed === true, `expected dialogDismissed=true, got ${JSON.stringify(data)}`);
@@ -576,8 +593,7 @@ c('click reports dialogDismissed=false when nothing changes', async () => {
   const html = `<button id="b" onclick="void 0">noop</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--observe-ms', '100', '--json']);
+  const r = await run(['click', await snapRef('button', 'noop'), '--observe-ms', '100', '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean; urlChanged: boolean }>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(data.dialogDismissed === false, `expected dialogDismissed=false, got ${JSON.stringify(data)}`);
@@ -590,8 +606,7 @@ c('click --no-observe skips post-click observation', async () => {
   const html = `<button>x</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--no-observe', '--json']);
+  const r = await run(['click', await snapRef('button', 'x'), '--no-observe', '--json']);
   const data = parseJson<Record<string, unknown>>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(!('dialogDismissed' in data) && !('urlChanged' in data), `expected no observation fields, got keys=${Object.keys(data)}`);
@@ -653,8 +668,7 @@ c('snapshot scopes locators to the auto-detected modal', async () => {
   `;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--json']);
+  const r = await run(['click', await snapRef('button', 'Confirm'), '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean }>(r.stdout);
   assert(data.ok === true, `click should not error under strict-mode: ${JSON.stringify(data)}`);
   assert(data.dialogDismissed === true, `expected modal button to dismiss the dialog, got ${JSON.stringify(data)}`);
@@ -662,6 +676,60 @@ c('snapshot scopes locators to the auto-detected modal', async () => {
   const which = await run(['eval', 'JSON.stringify({inside: !!window.__inside, outside: !!window.__outside})']);
   const flags = parseJson<{ inside: boolean; outside: boolean }>(which.stdout);
   assert(flags.inside === true && flags.outside === false, `expected inside-button click, got ${JSON.stringify(flags)}`);
+});
+
+c('modal-scoped refs do not resolve outside the modal', async () => {
+  // A page-wide snapshot mints a ref for the outside button; a modal-scoped
+  // snapshot then replaces both ghax's ref map and Playwright's aria-ref
+  // cache, so the old ref must fail cleanly, never land on the page.
+  const html = `
+    <button id="outside" onclick="window.__outside=true">Outside</button>
+    <div role="dialog" aria-modal="true"><button id="inside">Inside</button></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const outside = await snapRef('button', 'Outside', ['--no-dialog-scope']);
+  const modalSnap = await run(['snapshot', '-i']);
+  assert(!modalSnap.stdout.includes('"Outside"'), `modal scope should hide the outside button:\n${modalSnap.stdout}`);
+  const r = await run(['click', outside], { allowFailure: true });
+  assert(r.exitCode === 4 && /Run 'ghax snapshot' first/.test(r.stderr), `old ref should fail: exit=${r.exitCode} ${r.stderr}`);
+  const flag = await run(['eval', 'String(!!window.__outside)']);
+  assert(flag.stdout.trim() === 'false', 'the outside button must not have been clicked');
+});
+
+c('refs are stable across snapshots: an insertion above does not shift them', async () => {
+  const html = `<div id="top"></div><a href="#x" id="link">Target link</a>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const before = await snapRef('link', 'Target link');
+  await run(['eval', `document.getElementById('top').innerHTML = '<button>Inserted</button>'; 'ok'`]);
+  const snap = await run(['snapshot', '-i']);
+  const after = refOf(snap.stdout, 'link', 'Target link');
+  assert(after === before, `link ref moved from ${before} to ${after} after an insertion above it`);
+  const inserted = refOf(snap.stdout, 'button', 'Inserted');
+  assert(inserted !== before, 'the new button must get a new number');
+  await run(['click', after]);
+  const hash = await run(['eval', 'location.hash']);
+  assert(hash.stdout.trim() === '#x', `stable ref should still click the link, hash=${hash.stdout.trim()}`);
+});
+
+c('a ref whose element was removed fails as stale, exit 4', async () => {
+  const html = `<button id="gone">Vanish</button><button>Stay</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const ref = await snapRef('button', 'Vanish');
+  await run(['eval', `document.getElementById('gone').remove(); 'ok'`]);
+  const started = Date.now();
+  const r = await run(['click', ref], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/not found in the latest snapshot/.test(r.stderr), `expected the stale-ref message: ${r.stderr}`);
+  assert(Date.now() - started < 10_000, 'stale ref must fail fast, not wait out the action timeout');
+});
+
+c('snapshot -d limits depth', async () => {
+  const html = `<nav aria-label="Outer"><ul><li><a href="#deep">Deep link</a></li></ul></nav>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const full = await run(['snapshot']);
+  assert(/"Deep link"/.test(full.stdout), `full snapshot should include the deep link:\n${full.stdout}`);
+  const shallow = await run(['snapshot', '-d', '0']);
+  assert(/\[navigation\] "Outer"/.test(shallow.stdout), `depth 0 keeps the top level:\n${shallow.stdout}`);
+  assert(!/"Deep link"/.test(shallow.stdout), `depth 0 must drop nested nodes:\n${shallow.stdout}`);
 });
 
 c('chain executes multiple steps', async () => {
@@ -895,18 +963,16 @@ c('box returns {x, y, width, height} for a selector', async () => {
 
 c('box also resolves @e<n> refs from the last snapshot', async () => {
   await run(['goto', 'https://example.com']);
-  await run(['snapshot', '-i']);
-  const r = await run(['box', '@e1', '--json']);
+  const r = await run(['box', await snapRef('link'), '--json']);
   const box = parseJson<{ width: number }>(r.stdout);
   assert(box.width > 0, 'ref box missing width');
 });
 
 c('is <check> asserts element state', async () => {
   await run(['goto', 'https://example.com']);
-  await run(['snapshot', '-i']);
-  const r = await run(['is', 'visible', '@e1', '--json']);
+  const r = await run(['is', 'visible', await snapRef('link'), '--json']);
   const data = parseJson<{ check: string; target: string; result: boolean }>(r.stdout);
-  assert(data.check === 'visible' && data.result === true, `is visible @e1 → ${JSON.stringify(data)}`);
+  assert(data.check === 'visible' && data.result === true, `is visible <link ref> → ${JSON.stringify(data)}`);
 });
 
 c('storage local round-trips set/get/remove', async () => {

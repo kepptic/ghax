@@ -18,6 +18,24 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   points at `--trace`.
 
 ### Changed
+- **Stable `@e` refs on the CDP transport.** Snapshots now come from
+  Playwright's `ariaSnapshotJSON({ mode: 'ai' })` and each ref resolves
+  through its `aria-ref=` selector engine, replacing the `getByRole().nth()`
+  reconstruction. Playwright caches the ref on the element, so the same
+  element keeps its number across re-snapshots of a document and an
+  insertion above it no longer renumbers everything below. Before, a
+  re-render could quietly point `@e5` at the next same-named element.
+  Visible changes: **numbering is sparse** (Playwright counts every
+  clickable node, ghax prints the ones you asked for, so `snapshot -i` may
+  start at `@e4`), numbers restart after navigation, nameless layout
+  `generic` wrappers are flattened (clickable ones print with
+  `[cursor:pointer]`), `placeholder` shows in the props, and a ref whose
+  element was removed or renamed fails immediately with "not found in the
+  latest snapshot" instead of waiting out a Playwright timeout. Modal and
+  `--selector` scoping now come for free: a ref resolves only inside the
+  subtree it was taken from. Iframe content renders but its refs are not
+  clickable yet. The ref engine is semi-private Playwright behaviour, so
+  smoke checks pin it and Playwright is pinned to an exact version.
 - **Bridge `snapshot` costs a constant number of relayed CDP calls.** It
   used to stamp `data-ghax-ref` on every ref (two relayed calls each) and
   read every cursor ref back (three more each), so a 200-ref page paid
