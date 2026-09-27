@@ -222,8 +222,9 @@ per-element id as their number. The map resets with the ref map.
 a ref. Each snapshot first reads a freshness marker,
 `window.__ghaxMark` (per-document random id + a MutationObserver count of
 childList/characterData and the attributes behind role, name, visibility
-and state, observed in every open shadow root and in roots attached
-later via a wrapped `attachShadow`) joined with `location.href`, and stores it as
+and state, observed in every open shadow root; roots attached later are
+found by rescanning open roots on each read and count as a change; no
+page prototype is patched) joined with `location.href`, and stores it as
 `ctx.lastSnapshotMarker` (null after a `--selector` or modal-scoped
 snapshot, whose ref map is partial). Before a ref step, batch re-reads it and
 re-snapshots only on a mismatch or a failed read. On a match it still

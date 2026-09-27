@@ -943,35 +943,43 @@ function clearSnapshotRefs(ctx: Ctx): void {
  */
 const FRESHNESS_MARKER_JS = `(() => {
   let m = window.__ghaxMark;
-  if (!m || typeof m.mut !== 'number' || typeof m.docId !== 'string') {
-    m = { docId: Math.random().toString(36).slice(2), mut: 0 };
-    Object.defineProperty(window, '__ghaxMark', { value: m, configurable: true });
+  const fresh = !m || typeof m.mut !== 'number' || typeof m.docId !== 'string' || typeof m.watch !== 'function';
+  if (fresh) {
+    const state = { docId: Math.random().toString(36).slice(2), mut: 0 };
     const seen = new WeakSet();
-    const obs = new MutationObserver((records) => { m.mut += records.length; });
+    const obs = new MutationObserver((records) => { state.mut += records.length; });
     const opts = {
       childList: true, characterData: true, subtree: true, attributes: true,
       attributeFilter: ['role', 'aria-label', 'aria-labelledby', 'aria-hidden', 'hidden', 'disabled',
         'aria-disabled', 'open', 'aria-expanded', 'aria-pressed', 'aria-checked', 'aria-selected',
         'value', 'title', 'alt', 'placeholder'],
     };
-    // MutationObserver does not see into shadow roots, so every open root
-    // present now gets its own observation, and roots attached later (open
-    // or closed) are caught by wrapping attachShadow, which also counts as
-    // a change because it can replace what a host renders.
-    const watch = (root) => {
+    // MutationObserver does not see into shadow roots, so each open root
+    // gets its own observation. Roots attached after install are found by
+    // rescanning on every read (no page prototype is patched: a wrapped
+    // attachShadow is visible to fingerprinting scripts in a real session).
+    // Finding one counts as a change. Closed roots are invisible here; the
+    // role+name recheck in batch backs that up.
+    state.watch = (root, counts) => {
       if (seen.has(root)) return;
       seen.add(root);
       obs.observe(root, opts);
-      for (const el of root.querySelectorAll('*')) if (el.shadowRoot) watch(el.shadowRoot);
+      if (counts) state.mut++;
     };
-    watch(document);
-    const attach = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function (init) {
-      const root = attach.call(this, init);
-      m.mut++;
-      try { watch(root); } catch (e) { /* never break the page */ }
-      return root;
+    state.scan = (counts) => {
+      const walk = (root) => {
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) { state.watch(el.shadowRoot, counts); walk(el.shadowRoot); }
+        }
+      };
+      walk(document);
     };
+    state.watch(document, false);
+    state.scan(false);
+    Object.defineProperty(window, '__ghaxMark', { value: state, configurable: true });
+    m = state;
+  } else {
+    m.scan(true);
   }
   return m.docId + '|' + m.mut + '|' + location.href;
 })()`;

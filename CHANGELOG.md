@@ -57,7 +57,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   covers only part of the page). The marker watches structure, text, and
   the attributes that feed a role, name or state (including `value`,
   `title`, `alt`, `placeholder`, `aria-labelledby`, `aria-pressed`,
-  `aria-checked`, `aria-selected`), inside open shadow roots too. When it
+  `aria-checked`, `aria-selected`), inside open shadow roots too (roots
+  attached later are found by a rescan on each read; no page prototype is
+  patched, so nothing is visible to a site's fingerprinting). When it
   says "unchanged", batch still confirms each ref's element has the role
   and name it was printed with before trusting the old snapshot.
   Each such step now reports `autoSnapshot: "skipped"` or `"taken"`.

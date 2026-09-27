@@ -861,6 +861,17 @@ c('batch notices changes the old marker missed: shadow roots and name attributes
     { cmd: 'click', args: [keep] },
   ])])).stdout);
   assert(s1[1].autoSnapshot === 'taken', `a shadow-root mutation must force a re-snapshot: ${JSON.stringify(s1)}`);
+  // 1b. No page prototype is patched (fingerprinting would see it), and a
+  // shadow root attached AFTER the snapshot is still noticed (rescan on read).
+  const native = await run(['eval', "String(Element.prototype.attachShadow.toString().includes('[native code]'))"]);
+  assert(native.stdout.trim() === 'true', 'attachShadow must stay native after a snapshot');
+  const late = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["const d = document.createElement('div'); document.body.prepend(d); 'ok'"] },
+    { cmd: 'snapshot', opts: { interactive: true } },
+    { cmd: 'eval', args: ["document.body.firstElementChild.attachShadow({ mode: 'open' }).innerHTML = '<b>x</b>'; 'ok'"] },
+    { cmd: 'click', args: [keep] },
+  ])])).stdout);
+  assert(late[3].autoSnapshot === 'taken', `a shadow root attached after the snapshot must force a re-snapshot: ${JSON.stringify(late)}`);
   // 2. aria-pressed is now observed.
   const pressed = `<button id="p" aria-pressed="false">Toggle</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(pressed)}`]);
