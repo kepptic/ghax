@@ -65,6 +65,7 @@ import {
   bridgeResolveSelector,
   bridgeSnapshot,
   bridgeText,
+  bridgeRefStillMatches,
   isStaleContextError,
   type BridgeExtensionInfo,
   type BridgeRef,
@@ -942,15 +943,64 @@ function clearSnapshotRefs(ctx: Ctx): void {
  */
 const FRESHNESS_MARKER_JS = `(() => {
   let m = window.__ghaxMark;
-  if (!m) {
-    m = window.__ghaxMark = { docId: Math.random().toString(36).slice(2), mut: 0 };
-    new MutationObserver((records) => { m.mut += records.length; }).observe(document, {
+  if (!m || typeof m.mut !== 'number' || typeof m.docId !== 'string') {
+    m = { docId: Math.random().toString(36).slice(2), mut: 0 };
+    Object.defineProperty(window, '__ghaxMark', { value: m, configurable: true });
+    const seen = new WeakSet();
+    const obs = new MutationObserver((records) => { m.mut += records.length; });
+    const opts = {
       childList: true, characterData: true, subtree: true, attributes: true,
-      attributeFilter: ['role', 'aria-label', 'aria-hidden', 'hidden', 'disabled', 'aria-disabled', 'open', 'aria-expanded'],
-    });
+      attributeFilter: ['role', 'aria-label', 'aria-labelledby', 'aria-hidden', 'hidden', 'disabled',
+        'aria-disabled', 'open', 'aria-expanded', 'aria-pressed', 'aria-checked', 'aria-selected',
+        'value', 'title', 'alt', 'placeholder'],
+    };
+    // MutationObserver does not see into shadow roots, so every open root
+    // present now gets its own observation, and roots attached later (open
+    // or closed) are caught by wrapping attachShadow, which also counts as
+    // a change because it can replace what a host renders.
+    const watch = (root) => {
+      if (seen.has(root)) return;
+      seen.add(root);
+      obs.observe(root, opts);
+      for (const el of root.querySelectorAll('*')) if (el.shadowRoot) watch(el.shadowRoot);
+    };
+    watch(document);
+    const attach = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      const root = attach.call(this, init);
+      m.mut++;
+      try { watch(root); } catch (e) { /* never break the page */ }
+      return root;
+    };
   }
   return m.docId + '|' + m.mut + '|' + location.href;
 })()`;
+
+/**
+ * Belt and braces for a skipped auto-snapshot: the marker cannot see
+ * everything (closed shadow roots from before it was installed, name
+ * sources it doesn't observe), so before acting on a ref whose snapshot was
+ * trusted, confirm the element still has the role and name it was printed
+ * with. Cursor refs carry no AX identity and are not rechecked.
+ */
+async function refStillMatches(ctx: Ctx, ref: string): Promise<boolean> {
+  const key = ref.slice(1);
+  try {
+    if (ctx.bridgeMode) {
+      const entry = ctx.bridgeRefs.get(key);
+      if (!entry) return false;
+      return await bridgeRefStillMatches(requireBridge(ctx), entry);
+    }
+    const entry = ctx.refs.get(key);
+    if (!entry) return false;
+    if (entry.role === 'cursor-interactive') return true;
+    const page = await activePage(ctx);
+    const byRole = page.getByRole(entry.role as Parameters<Page['getByRole']>[0], entry.name ? { name: entry.name, exact: true } : undefined);
+    return (await entry.locator.and(byRole).count()) === 1;
+  } catch {
+    return false;
+  }
+}
 
 async function readFreshnessMarker(ctx: Ctx): Promise<string | null> {
   try {
@@ -1070,7 +1120,13 @@ register('batch', async (ctx, args, opts) => {
       continue;
     }
     if (autoSnapshot && snapshotHandler && stepRefs.length > 0) {
-      if (current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker) {
+      let fresh = current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker;
+      if (fresh) {
+        for (const r of stepRefs) {
+          if (!(await refStillMatches(ctx, r))) { fresh = false; break; }
+        }
+      }
+      if (fresh) {
         autoSnap = 'skipped';
       } else {
         autoSnap = 'taken';

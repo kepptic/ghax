@@ -27,6 +27,7 @@ import {
   bridgeGuard,
   bridgeReleaseHandle,
   bridgeResolveHandle,
+  bridgeRefStillMatches,
   bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
@@ -702,6 +703,25 @@ async function main(): Promise<void> {
       assert((await bridgeSnapshot(bridge, { selector: '#form' })).scoped === true, '--selector is scoped');
       ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'DIALOG' } }));
       assert((await bridgeSnapshot(bridge, {})).scoped === true, 'a modal-rooted snapshot is scoped');
+    });
+  });
+
+  await test('recheck: a skipped snapshot is re-verified by role and name (finding 5)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-recheck');
+      let ax = { role: 'button', name: 'Save' };
+      ext.replies.set('Accessibility.getPartialAXTree', (p) => ({
+        nodes: [{ nodeId: 'n', backendDOMNodeId: p.backendNodeId, role: { value: ax.role }, name: { value: ax.name } }],
+      }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const ref = { backendNodeId: 42, role: 'button', name: 'Save' };
+      assert(await bridgeRefStillMatches(bridge, ref), 'same role and name should match');
+      ax = { role: 'button', name: 'Delete' };
+      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a rename must not match');
+      ax = { role: 'checkbox', name: 'Save' };
+      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a role change must not match');
+      assert(await bridgeRefStillMatches(bridge, { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
     });
   });
 

@@ -50,7 +50,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (document id, a MutationObserver count of structural changes, URL), and
   a `batch` step that uses a ref re-snapshots only when that marker moved
   (always after a `--selector` or modal-scoped snapshot, whose ref map
-  covers only part of the page).
+  covers only part of the page). The marker watches structure, text, and
+  the attributes that feed a role, name or state (including `value`,
+  `title`, `alt`, `placeholder`, `aria-labelledby`, `aria-pressed`,
+  `aria-checked`, `aria-selected`), inside open shadow roots too. When it
+  says "unchanged", batch still confirms each ref's element has the role
+  and name it was printed with before trusting the old snapshot.
   Each such step now reports `autoSnapshot: "skipped"` or `"taken"`.
 - **Stable `@e` refs on the CDP transport.** Snapshots now come from
   Playwright's `ariaSnapshotJSON({ mode: 'ai' })` and each ref resolves

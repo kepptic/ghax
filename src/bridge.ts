@@ -1532,6 +1532,24 @@ export async function bridgeSnapshot(
   return { text: output.join('\n'), refs, count: refs.size, scoped };
 }
 
+/**
+ * Does the node behind an AX ref still have the role and name it was
+ * printed with? One `Accessibility.getPartialAXTree` call; cursor refs
+ * (no backend id) are not rechecked.
+ */
+export async function bridgeRefStillMatches(bridge: Bridge, ref: BridgeRef): Promise<boolean> {
+  if (ref.backendNodeId === null) return true;
+  const res = await bridge.send('Accessibility.getPartialAXTree', {
+    backendNodeId: ref.backendNodeId,
+    fetchRelatives: false,
+  }) as { nodes?: AxNode[] };
+  const node = (res.nodes ?? []).find((n) => n.backendDOMNodeId === ref.backendNodeId) ?? res.nodes?.[0];
+  if (!node || node.ignored) return false;
+  const rawRole = String(node.role?.value ?? '');
+  const name = rawRole === 'StaticText' || rawRole === 'LineBreak' ? '' : String(node.name?.value ?? '');
+  return axRole(node) === ref.role && name === ref.name;
+}
+
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */
 export async function bridgeResolveSelector(bridge: Bridge, selector: string): Promise<BridgeRef> {
   const object = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`);

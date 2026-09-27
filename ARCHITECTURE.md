@@ -221,11 +221,15 @@ per-element id as their number. The map resets with the ref map.
 `ghax batch` skips its automatic re-snapshot when nothing could have moved
 a ref. Each snapshot first reads a freshness marker,
 `window.__ghaxMark` (per-document random id + a MutationObserver count of
-childList/characterData and role/name/visibility/disabled/expanded
-attribute changes) joined with `location.href`, and stores it as
+childList/characterData and the attributes behind role, name, visibility
+and state, observed in every open shadow root and in roots attached
+later via a wrapped `attachShadow`) joined with `location.href`, and stores it as
 `ctx.lastSnapshotMarker` (null after a `--selector` or modal-scoped
 snapshot, whose ref map is partial). Before a ref step, batch re-reads it and
-re-snapshots only on a mismatch or a failed read. The marker is read
+re-snapshots only on a mismatch or a failed read. On a match it still
+rechecks each step ref's role and name (bridge:
+`Accessibility.getPartialAXTree`; CDP: the `aria-ref` locator AND
+`getByRole(role, {name, exact})`) and re-snapshots if one moved. The marker is read
 before the snapshot, so a change during the snapshot errs toward an extra
 re-snapshot. Steps report `autoSnapshot: "skipped" | "taken"`.
 

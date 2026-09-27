@@ -849,6 +849,39 @@ c('batch re-snapshots after a --selector snapshot instead of skipping (finding 4
   assert(v.stdout.trim() === '1', 'the outside button should have been clicked');
 });
 
+c('batch notices changes the old marker missed: shadow roots and name attributes (finding 5)', async () => {
+  type Step = { cmd: string; ok: boolean; autoSnapshot?: string };
+  // 1. A mutation inside an open shadow root now moves the marker.
+  const shadow = `<div id="h"></div><button onclick="window.__k=(window.__k||0)+1">Keep</button>
+    <script>document.getElementById('h').attachShadow({ mode: 'open' }).innerHTML = '<span>old</span>';</script>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(shadow)}`]);
+  const keep = await snapRef('button', 'Keep');
+  const s1 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('h').shadowRoot.innerHTML = '<button>new</button>'; 'ok'"] },
+    { cmd: 'click', args: [keep] },
+  ])])).stdout);
+  assert(s1[1].autoSnapshot === 'taken', `a shadow-root mutation must force a re-snapshot: ${JSON.stringify(s1)}`);
+  // 2. aria-pressed is now observed.
+  const pressed = `<button id="p" aria-pressed="false">Toggle</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(pressed)}`]);
+  const toggle = await snapRef('button', 'Toggle');
+  const s2 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('p').setAttribute('aria-pressed', 'true'); 'ok'"] },
+    { cmd: 'click', args: [toggle] },
+  ])])).stdout);
+  assert(s2[1].autoSnapshot === 'taken', `aria-pressed must move the marker: ${JSON.stringify(s2)}`);
+  // 3. Belt and braces: an attribute the marker ignores (input type) changes
+  // the role; the role+name recheck refuses to trust the old snapshot.
+  const typed = `<input id="i" type="button" value="Go">`;
+  await run(['goto', `data:text/html,${encodeURIComponent(typed)}`]);
+  const go = await snapRef('button', 'Go');
+  const s3 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('i').type = 'checkbox'; 'ok'"] },
+    { cmd: 'click', args: [go] },
+  ])], { allowFailure: true })).stdout);
+  assert(s3[1].autoSnapshot === 'taken', `a role change must fail the recheck: ${JSON.stringify(s3)}`);
+});
+
 c('record + replay round-trips', async () => {
   const name = `smoke-rec-${Date.now()}`;
   await run(['record', 'start', name]);
