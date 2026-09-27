@@ -200,12 +200,30 @@ pinned to an exact version and the smoke suite has checks that fail if a
 bump changes them (stable across insertion, stale after removal, modal
 scope).
 
+Over the bridge the daemon keeps the same promise itself:
+`ctx.bridgeIdentity` maps backend node id to `{ref, role, name}`, a
+snapshot reuses the ref while role and name match and mints a new one
+otherwise, and unscoped snapshots prune ids that left the AX tree
+(`--selector` snapshots never prune). `@c` refs use the page registry's
+per-element id as their number. The map resets with the ref map.
+
+`ghax batch` skips its automatic re-snapshot when nothing could have moved
+a ref. Each snapshot first reads a freshness marker,
+`window.__ghaxMark` (per-document random id + a MutationObserver count of
+childList/characterData and role/name/visibility/disabled/expanded
+attribute changes) joined with `location.href`, and stores it as
+`ctx.lastSnapshotMarker`. Before a ref step, batch re-reads it and
+re-snapshots only on a mismatch or a failed read. The marker is read
+before the snapshot, so a change during the snapshot errs toward an extra
+re-snapshot. Steps report `autoSnapshot: "skipped" | "taken"`.
+
 Refs die on tab change: `tab <id>` and `new-window` clear the ref map
 when the active page changes, so a stale `@e3` from a previous tab can't
 silently resolve against the wrong DOM.
 
 `ghax batch` skips that re-snapshotting ceremony for you: when a step
-inside a batch plan references an `@e<n>` ref, the daemon auto-runs a
+inside a batch plan references an `@e<n>` ref and the page changed since
+the last snapshot (freshness marker, below), the daemon auto-runs a
 fresh snapshot first and resolves the ref against the current DOM.
 That's the main reason batch exists — on framework-heavy forms where
 an earlier step (like opening a combobox) reshuffles the ARIA tree,

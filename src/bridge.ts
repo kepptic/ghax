@@ -107,6 +107,22 @@ export interface BridgeRef {
   name: string;
 }
 
+/**
+ * Bridge ref identity across snapshots (plan 10, C9). Mirrors Playwright's
+ * rule on the CDP transport: a backend node keeps its `e<n>` while its role
+ * and name are unchanged, and gets a fresh number when either changes, so a
+ * ref never silently means a different kind of element. Lives on the daemon
+ * ctx; reset on tab change and main-frame navigation.
+ */
+export interface BridgeIdentity {
+  byBackendNodeId: Map<number, { ref: string; role: string; name: string }>;
+  next: number;
+}
+
+export function newBridgeIdentity(): BridgeIdentity {
+  return { byBackendNodeId: new Map(), next: 1 };
+}
+
 export interface BridgeSnapshotResult {
   text: string;
   refs: Map<string, BridgeRef>;
@@ -1368,8 +1384,11 @@ export async function bridgeSnapshot(
     selector?: string;
     cursorInteractive?: boolean;
     dialogScope?: boolean;
+    /** Carry refs across snapshots. Omitted = number from e1 every time. */
+    identity?: BridgeIdentity;
   } = {},
 ): Promise<BridgeSnapshotResult> {
+  const identity = opts.identity ?? newBridgeIdentity();
   await bridge.send('Runtime.enable');
   await bridge.send('DOM.enable');
   await bridge.send('Accessibility.enable');
@@ -1404,7 +1423,13 @@ export async function bridgeSnapshot(
 
   const refs = new Map<string, BridgeRef>();
   const output: string[] = [];
-  let nextRef = 1;
+  const refFor = (backendNodeId: number, role: string, name: string): string => {
+    const known = identity.byBackendNodeId.get(backendNodeId);
+    if (known && known.role === role && known.name === name) return known.ref;
+    const ref = `e${identity.next++}`;
+    identity.byBackendNodeId.set(backendNodeId, { ref, role, name });
+    return ref;
+  };
   const walk = (node: AxNode, depth: number): void => {
     const role = axRole(node);
     const rawRole = String(node.role?.value ?? '');
@@ -1420,7 +1445,7 @@ export async function bridgeSnapshot(
     const compactSkip = Boolean(opts.compact && !isInteractive && !name);
     if (!skipStructural && withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
       if (typeof node.backendDOMNodeId === 'number') {
-        const ref = `e${nextRef++}`;
+        const ref = refFor(node.backendDOMNodeId, role, name);
         refs.set(ref, { backendNodeId: node.backendDOMNodeId, role, name });
         let line = `${'  '.repeat(Math.max(0, depth))}@${ref} [${role}]`;
         if (name) line += ` ${JSON.stringify(name)}`;
@@ -1436,6 +1461,14 @@ export async function bridgeSnapshot(
     }
   };
   if (axRoot) walk(axRoot, -1);
+  // Forget nodes that left the document. getFullAXTree is the whole page
+  // even for a modal-scoped walk, but a --selector snapshot is left alone so
+  // a narrow look never costs refs from the wider one (settled decision 5).
+  if (!opts.selector) {
+    const alive = new Set<number>();
+    for (const n of nodes) if (typeof n.backendDOMNodeId === 'number') alive.add(n.backendDOMNodeId);
+    for (const id of identity.byBackendNodeId.keys()) if (!alive.has(id)) identity.byBackendNodeId.delete(id);
+  }
 
   const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
@@ -1465,8 +1498,10 @@ export async function bridgeSnapshot(
     })()`) as Array<{ cursorId: number; text: string; reason: string }>;
     if (cursor.length > 0) {
       output.push('', '── cursor-interactive (not in ARIA tree) ──');
-      cursor.forEach((item, i) => {
-        const ref = `c${i + 1}`;
+      cursor.forEach((item) => {
+        // The registry id is already stable per element (WeakMap), so it
+        // doubles as the ref number.
+        const ref = `c${item.cursorId}`;
         refs.set(ref, { backendNodeId: null, cursorId: item.cursorId, role: 'cursor-interactive', name: item.text });
         output.push(`@${ref} [${item.reason}] ${JSON.stringify(item.text)}`);
       });

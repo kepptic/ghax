@@ -29,6 +29,18 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Same budget on both transports (`src/snapshot-budget.ts`).
 
 ### Changed
+- **Stable `@e` refs over the bridge too, and `batch` skips needless
+  re-snapshots.** The bridge now remembers which ref it gave each backend
+  node and reuses it on the next snapshot while the node's role and name
+  are unchanged (a rename or role change gets a new number, the same rule
+  Playwright applies on the CDP transport). Cursor refs take their number
+  from the page-side registry, so `@c<n>` is stable too. Numbering is
+  sparse on both transports now; the map resets on tab change and
+  navigation, and a `--selector` snapshot never drops refs learned by a
+  wider one. Separately, every snapshot records a page freshness marker
+  (document id, a MutationObserver count of structural changes, URL), and
+  a `batch` step that uses a ref re-snapshots only when that marker moved.
+  Each such step now reports `autoSnapshot: "skipped"` or `"taken"`.
 - **Stable `@e` refs on the CDP transport.** Snapshots now come from
   Playwright's `ariaSnapshotJSON({ mode: 'ai' })` and each ref resolves
   through its `aria-ref=` selector engine, replacing the `getByRole().nth()`

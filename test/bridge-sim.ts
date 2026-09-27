@@ -29,6 +29,7 @@ import {
   bridgeResolveHandle,
   bridgeSnapshot,
   isStaleContextError,
+  newBridgeIdentity,
 } from '../src/bridge';
 import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
@@ -593,6 +594,74 @@ async function main(): Promise<void> {
     }
     const small = applySnapshotBudget(['@e1 [link] "a"'], budgetFromOpts({}));
     assert(small.text === '@e1 [link] "a"' && small.omittedLines === 0, 'small pages are untouched');
+  });
+
+  // ─── Stable bridge refs (plan 10, C9) ─────────────────────────
+  /** A page whose button list the test edits between snapshots. */
+  const mutablePage = (port: number, buttons: Array<{ id: number; name: string; role?: string }>) => {
+    const ext = new FakeExt(port, 'inst-ident');
+    for (const m of ['Runtime.enable', 'DOM.enable', 'Accessibility.enable', 'Runtime.releaseObject']) {
+      ext.replies.set(m, () => ({}));
+    }
+    ext.replies.set('Runtime.evaluate', (p) => (p.returnByValue === false
+      ? { result: { type: 'object', subtype: 'node', objectId: 'root' } }
+      : { result: { value: [] } }));
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1 } }));
+    ext.replies.set('Accessibility.getFullAXTree', () => ({
+      nodes: [
+        { nodeId: 'body', backendDOMNodeId: 1, role: { value: 'generic' }, childIds: buttons.map((b) => `n${b.id}`) },
+        ...buttons.map((b) => ({
+          nodeId: `n${b.id}`, parentId: 'body', backendDOMNodeId: b.id,
+          role: { value: b.role ?? 'button' }, name: { value: b.name },
+        })),
+      ],
+    }));
+    return ext;
+  };
+  const refByName = (snap: { refs: Map<string, { name: string }> }, name: string) =>
+    [...snap.refs].find(([, r]) => r.name === name)?.[0];
+
+  await test('identity: an insertion above keeps existing refs; the newcomer gets a new number', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons = [{ id: 10, name: 'Save' }, { id: 11, name: 'Cancel' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const identity = newBridgeIdentity();
+      const first = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const save = refByName(first, 'Save');
+      const cancel = refByName(first, 'Cancel');
+      buttons.unshift({ id: 9, name: 'Inserted' });
+      const second = await bridgeSnapshot(bridge, { interactive: true, identity });
+      assert(refByName(second, 'Save') === save, `Save moved: ${save} -> ${refByName(second, 'Save')}`);
+      assert(refByName(second, 'Cancel') === cancel, 'Cancel moved');
+      const inserted = refByName(second, 'Inserted');
+      assert(inserted && inserted !== save && inserted !== cancel, `newcomer ref ${inserted}`);
+      assert(second.text.indexOf(`@${inserted}`) < second.text.indexOf(`@${save}`), 'document order is kept, numbers are sparse');
+    });
+  });
+
+  await test('identity: a role or name change remints; removed nodes are pruned (unscoped only)', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons: Array<{ id: number; name: string; role?: string }> = [{ id: 10, name: 'Save' }, { id: 11, name: 'Go' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const identity = newBridgeIdentity();
+      const first = await bridgeSnapshot(bridge, { interactive: true, identity });
+      const save = refByName(first, 'Save');
+      buttons[0].name = 'Saved';
+      const second = await bridgeSnapshot(bridge, { interactive: true, identity });
+      assert(refByName(second, 'Saved') !== save, 'a renamed node must not keep its old ref');
+      buttons[1].role = 'link';
+      const third = await bridgeSnapshot(bridge, { identity });
+      assert(third.refs.get(refByName(first, 'Go')!) === undefined, 'a node whose role changed gets a new ref');
+      buttons.splice(0, 1);
+      await bridgeSnapshot(bridge, { identity, selector: '#main' });
+      assert(identity.byBackendNodeId.has(10), '--selector snapshots never prune');
+      await bridgeSnapshot(bridge, { identity });
+      assert(!identity.byBackendNodeId.has(10), 'an unscoped snapshot prunes nodes that left the page');
+    });
   });
 
   await test('a single extension binds on hello', async () => {

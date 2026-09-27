@@ -124,6 +124,20 @@ async function main(): Promise<void> {
     assert(!/data-ghax-ref/.test((await run(['html'])).stdout), 'snapshot must not write data-ghax-ref into the DOM');
   });
 
+  await test('bridge refs are stable across snapshots; batch skips an unneeded re-snapshot', async () => {
+    const page = `data:text/html,${encodeURIComponent('<div id="top"></div><button onclick="window.__c=(window.__c||0)+1">Keep</button>')}`;
+    await run(['goto', page]);
+    const refOf = (text: string, name: string) => new RegExp(`@(e\\d+) \\[button\\] "${name}"`).exec(text)?.[1];
+    const first = refOf((await run(['snapshot', '-i'])).stdout, 'Keep');
+    assert(first, 'Keep button not in snapshot');
+    await run(['eval', `document.getElementById('top').innerHTML='<button>New</button>'; 'ok'`]);
+    const snap = (await run(['snapshot', '-i'])).stdout;
+    assert(refOf(snap, 'Keep') === first, `Keep moved from ${first} to ${refOf(snap, 'Keep')}`);
+    const r = await run(['batch', JSON.stringify([{ cmd: 'click', args: [`@${first}`] }])]);
+    const steps = parse<Array<{ ok: boolean; autoSnapshot?: string }>>(r.stdout);
+    assert(steps[0].ok && steps[0].autoSnapshot === 'skipped', `batch step: ${r.stdout}`);
+  });
+
   // ─── Actionability guard (plan 10, C5) ───────────────────────
   // These need a real DOM, which the simulator cannot provide.
   const dataUrl = (html: string) => `data:text/html,${encodeURIComponent(html)}`;

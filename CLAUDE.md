@@ -48,9 +48,10 @@ the tool in the past.
 
 3. **Refs resolve against the daemon's last snapshot, and only on the
    tab they were taken on.** `ghax click @e3` looks up `@e3` in the
-   *last* snapshot's ref map. On the CDP transport an element keeps its
-   ref across re-snapshots of the same document (Playwright `aria-ref`),
-   but refs never survive a tab switch or navigation. The `tab` and
+   *last* snapshot's ref map. An element keeps its ref across
+   re-snapshots of the same document (Playwright `aria-ref` on CDP,
+   `ctx.bridgeIdentity` on the bridge), so numbering is sparse, but refs
+   never survive a tab switch or navigation. The `tab` and
    `new-window` handlers clear the ref map when the active page changes,
    so a stale ref from tab A can't resolve against tab B; a smoke check
    asserts this. `src/snapshot.ts` must stay the only `ariaSnapshot*`
@@ -180,8 +181,9 @@ ghax batch '[
 
 Unlike `chain` (reads stdin, N round-trips), `batch` ships the whole
 plan in one RPC. Between steps that reference `@e<n>` refs, the
-daemon auto-re-snapshots so opening a combobox mid-plan doesn't
-reindex refs out from under you. Pass `--no-auto-snapshot` for
+daemon auto-re-snapshots when the page changed (freshness marker), so
+opening a combobox mid-plan doesn't reindex refs out from under you;
+each such step reports `autoSnapshot: "skipped" | "taken"`. Pass `--no-auto-snapshot` for
 strict one-shot semantics.
 
 ### Share the browser with a user who's actively working

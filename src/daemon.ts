@@ -65,6 +65,8 @@ import {
   bridgeSnapshot,
   bridgeText,
   isStaleContextError,
+  newBridgeIdentity,
+  type BridgeIdentity,
   type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
@@ -137,6 +139,12 @@ interface Ctx {
   activePageId: string | null;
   refs: Map<string, RefEntry>;
   bridgeRefs: Map<string, BridgeRef>;
+  // backendNodeId → {ref, role, name}, so bridge refs survive re-snapshots.
+  bridgeIdentity: BridgeIdentity;
+  // Page freshness marker (`docId|mutations|href`) read just BEFORE the last
+  // snapshot. `batch` compares it to decide whether a ref step needs a
+  // re-snapshot. Null whenever the ref map is cleared.
+  lastSnapshotMarker: string | null;
   bridgeNetworkRequests: Map<string, NetworkEntry>;
   // Execution-context tracking (plan §2.5). `chrome.debugger` attaches to the
   // tab's top-level target, so we only ever see the main frame — this is NOT
@@ -917,6 +925,42 @@ function requireBridge(ctx: Ctx): Bridge {
 function clearSnapshotRefs(ctx: Ctx): void {
   ctx.refs.clear();
   ctx.bridgeRefs.clear();
+  ctx.bridgeIdentity = newBridgeIdentity();
+  ctx.lastSnapshotMarker = null;
+}
+
+/**
+ * One cheap page read that changes whenever the DOM could have moved refs:
+ * a per-document id, a MutationObserver counter (installed on first read),
+ * and the URL. Same expression on both transports.
+ *
+ * Observed: childList, characterData, and the attributes that change what
+ * the AX tree or the ref map would say (role, names, visibility, disabled,
+ * open/expanded). Class and style churn is ignored on purpose: spinners and
+ * hover effects would make the marker useless.
+ */
+const FRESHNESS_MARKER_JS = `(() => {
+  let m = window.__ghaxMark;
+  if (!m) {
+    m = window.__ghaxMark = { docId: Math.random().toString(36).slice(2), mut: 0 };
+    new MutationObserver((records) => { m.mut += records.length; }).observe(document, {
+      childList: true, characterData: true, subtree: true, attributes: true,
+      attributeFilter: ['role', 'aria-label', 'aria-hidden', 'hidden', 'disabled', 'aria-disabled', 'open', 'aria-expanded'],
+    });
+  }
+  return m.docId + '|' + m.mut + '|' + location.href;
+})()`;
+
+async function readFreshnessMarker(ctx: Ctx): Promise<string | null> {
+  try {
+    const v = ctx.bridgeMode
+      ? await bridgeEval(ctx, FRESHNESS_MARKER_JS)
+      : await (await activePage(ctx)).evaluate(FRESHNESS_MARKER_JS);
+    return typeof v === 'string' ? v : null;
+  } catch {
+    // No marker means "unknown", which batch treats as stale. Never a skip.
+    return null;
+  }
 }
 
 async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null): Promise<BridgeTab[]> {
@@ -999,22 +1043,33 @@ register('batch', async (ctx, args, opts) => {
       if (stopOnError) break;
       continue;
     }
-    // Refresh the ref map before any step that uses `@e<n>` — so the
-    // caller doesn't have to interleave manual snapshots.
+    // Refresh the ref map before any step that uses `@e<n>`, so the caller
+    // doesn't have to interleave manual snapshots. Skipped when the page's
+    // freshness marker is unchanged since the last snapshot: nothing that
+    // could move a ref has happened, and the re-snapshot was the costliest
+    // part of a ref step, especially over the bridge.
+    let autoSnap: 'skipped' | 'taken' | undefined;
     if (autoSnapshot && snapshotHandler && usesRef({ args: stepArgs, opts: stepOpts })) {
-      try {
-        // Uncapped: the ref map is what matters here, and nobody reads the text.
-        await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
-      } catch {
-        // A snapshot failure is informational — the step itself will
-        // surface the concrete "ref not found" error if it's still bad.
+      const current = ctx.lastSnapshotMarker ? await readFreshnessMarker(ctx) : null;
+      if (current !== null && current === ctx.lastSnapshotMarker) {
+        autoSnap = 'skipped';
+      } else {
+        autoSnap = 'taken';
+        try {
+          // Uncapped: the ref map is what matters here, and nobody reads the text.
+          await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
+        } catch {
+          // A snapshot failure is informational — the step itself will
+          // surface the concrete "ref not found" error if it's still bad.
+        }
       }
     }
+    const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
     try {
       const data = await handler(ctx, stepArgs, stepOpts);
-      results.push({ cmd, ok: true, data });
+      results.push({ cmd, ok: true, data, ...snapField });
     } catch (err) {
-      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err) });
+      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ...snapField });
       if (stopOnError) break;
     }
   }
@@ -1142,7 +1197,7 @@ register('tab', async (ctx, args, opts) => {
         // tabs invalidates them — otherwise `@e3` after `tab <other>` would
         // resolve against the previous tab's locator and land in the wrong
         // DOM. The CLAUDE.md invariant is explicit about this.
-        ctx.refs.clear();
+        clearSnapshotRefs(ctx);
       }
       ctx.activePageId = tid;
       await instrumentPage(ctx, p);
@@ -1225,7 +1280,7 @@ register('newWindow', async (ctx, args) => {
     // Auto-lock this tab as the active one so subsequent commands land
     // in the freshly-created window without an extra `ghax tab` step.
     // Same refs-invalidation rule as the `tab` handler.
-    if (ctx.activePageId !== id) ctx.refs.clear();
+    if (ctx.activePageId !== id) clearSnapshotRefs(ctx);
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
     return {
@@ -1868,6 +1923,10 @@ function budgetFields(b: BudgetedText): Record<string, unknown> {
 
 register('snapshot', async (ctx, _args, opts) => {
   const budget = budgetFromOpts(opts);
+  // Read BEFORE snapshotting: a mutation that lands mid-snapshot then shows
+  // up as a changed marker next time (a harmless re-snapshot), never as a
+  // false "unchanged".
+  const marker = await readFreshnessMarker(ctx);
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
@@ -1879,6 +1938,7 @@ register('snapshot', async (ctx, _args, opts) => {
       selector: opts.selector as string | undefined,
       cursorInteractive: Boolean(opts.cursorInteractive),
       dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
+      identity: ctx.bridgeIdentity,
     });
     let result = await take();
     // Same suspicious-empty guard as `text`: almost no refs while the page is
@@ -1891,6 +1951,7 @@ register('snapshot', async (ctx, _args, opts) => {
     }
     ctx.refs.clear();
     ctx.bridgeRefs = result.refs;
+    ctx.lastSnapshotMarker = marker;
     let annotatedPath: string | null = null;
     if (opts.annotate) {
       annotatedPath = (opts.output as string) || `/tmp/ghax-annotated-${Date.now()}.png`;
@@ -1917,6 +1978,7 @@ register('snapshot', async (ctx, _args, opts) => {
     dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
   });
   ctx.refs = result.refs;
+  ctx.lastSnapshotMarker = marker;
 
   let annotatedPath: string | null = null;
   if (opts.annotate) {
@@ -4347,6 +4409,8 @@ async function main() {
     activePageId: null,
     refs: new Map(),
     bridgeRefs: new Map(),
+    bridgeIdentity: newBridgeIdentity(),
+    lastSnapshotMarker: null,
     bridgeNetworkRequests: new Map(),
     bridgeMainFrameId: null,
     bridgeContexts: new Map(),

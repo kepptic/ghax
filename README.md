@@ -237,7 +237,7 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 
 - Accessibility-tree snapshots with `@e<n>` refs. Click by role and name, not brittle CSS selectors.
 - Snapshots print at most 250 refs / 32 KB by default and end with `… N more refs omitted` when they cut, so a huge page doesn't flood an agent's context. Every ref stays clickable. Narrow with `--selector`/`--depth`, or lift it with `--max-refs <n>`, `--max-chars <n>`, `--no-cap`.
-- Stable refs on the CDP transport. A ref is minted by Playwright and cached on the element, so `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
+- Stable refs on both transports. On CDP a ref is minted by Playwright and cached on the element; over the bridge the daemon keeps the same mapping itself. Either way `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
 - Shadow-DOM traversal. Chain selectors (`host >> inner`) descend into open shadow roots for custom-element apps (Lit, Shoelace, web components).
 - Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors, and Monaco-aware — routes into `monaco.editor.getEditors()`/`setValue()` when the target lives inside a `.monaco-editor` (Datto RMM, Splunk, Grafana, Postman, GitLab Web IDE).
@@ -292,7 +292,7 @@ as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
 
 ### Execution patterns
 
-- `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots between ref-using steps, so a mid-plan combobox reshuffle doesn't break later refs.
+- `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots before a ref-using step when the page changed since the last snapshot, so a mid-plan combobox reshuffle doesn't break later refs and a quiet page doesn't pay for a snapshot per step. Each ref step reports `autoSnapshot: "skipped"` or `"taken"`.
 - `ghax chain` reads the same shape from stdin for ad-hoc flows.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]` mutates the running page, measures a result, and screenshots in one call. Revert = reload.
 - `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.

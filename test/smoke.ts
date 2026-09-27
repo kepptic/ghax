@@ -781,6 +781,36 @@ c('batch runs a step sequence in one round-trip', async () => {
     `expected example.com text, got ${JSON.stringify(textStep.data).slice(0, 100)}`);
 });
 
+c('batch skips the auto re-snapshot when the page has not changed', async () => {
+  // Freshness guard: a ref step re-snapshots only when the page marker
+  // (document id, mutation count, URL) moved since the last snapshot.
+  const html = `<button onclick="window.__n=(window.__n||0)+1">Count</button>
+    <button onclick="document.body.insertAdjacentHTML('afterbegin','<p>grew</p>')">Grow</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const snap = await run(['snapshot', '-i']);
+  const count = refOf(snap.stdout, 'button', 'Count');
+  const grow = refOf(snap.stdout, 'button', 'Grow');
+  type Step = { cmd: string; ok: boolean; autoSnapshot?: string };
+  const quiet = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'click', args: [count] },
+    { cmd: 'click', args: [count] },
+  ])])).stdout);
+  assert(quiet.every((st) => st.ok), `batch failed: ${JSON.stringify(quiet)}`);
+  assert(quiet[0].autoSnapshot === 'skipped' && quiet[1].autoSnapshot === 'skipped',
+    `a click that changes no DOM should not force a re-snapshot: ${JSON.stringify(quiet)}`);
+  const busy = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'click', args: [grow] },
+    { cmd: 'click', args: [count] },
+  ])])).stdout);
+  assert(busy[0].autoSnapshot === 'skipped', `first step: ${JSON.stringify(busy)}`);
+  assert(busy[1].autoSnapshot === 'taken', `a DOM insertion must trigger a re-snapshot: ${JSON.stringify(busy)}`);
+  const n = await run(['eval', 'window.__n || 0']);
+  assert(n.stdout.trim() === '3', `Count should have been clicked 3 times, got ${n.stdout.trim()}`);
+  // No-op steps carry no autoSnapshot field at all.
+  const plain = parseJson<Step[]>((await run(['batch', JSON.stringify([{ cmd: 'wait', args: ['10'] }])])).stdout);
+  assert(!('autoSnapshot' in plain[0]), 'steps without refs report nothing');
+});
+
 c('record + replay round-trips', async () => {
   const name = `smoke-rec-${Date.now()}`;
   await run(['record', 'start', name]);
