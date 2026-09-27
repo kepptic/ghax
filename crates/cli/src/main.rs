@@ -27,11 +27,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
-    // `ghax --trace <verb> ...`: move a leading global flag behind the verb;
-    // dispatch::run strips it from wherever it lands.
+    // `ghax --trace <verb> ...`: move a leading global flag to just behind
+    // the verb (not the end, which could be past a `--` terminator);
+    // dispatch::run strips it from there.
     if argv.len() > 1 && argv[0] == "--trace" {
         let flag = argv.remove(0);
-        argv.push(flag);
+        argv.insert(1, flag);
     }
     if argv.is_empty() || matches!(argv[0].as_str(), "--help" | "-h" | "help") {
         print!("{}", help::HELP);

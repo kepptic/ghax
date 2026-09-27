@@ -2222,6 +2222,15 @@ c('GHAX_RPC_TIMEOUT bounds a call that never answers', async () => {
   await run(['goto', 'https://example.com']);
 });
 
+c('-- ends flags, so --trace (or any dash value) can be passed literally (finding 7)', async () => {
+  await run(['eval', 'window.__tv = 5; 1']);
+  const r = await run(['eval', '--trace', '--', '--window.__tv']);
+  assert(r.stdout.trim() === '4', `the value after -- must reach eval intact, got ${r.stdout.trim()}`);
+  assert(/^trace: /m.test(r.stderr), `--trace before -- is still the flag: ${r.stderr}`);
+  const lead = await run(['--trace', 'eval', '--', '--window.__tv']);
+  assert(lead.stdout.trim() === '3' && /^trace: /m.test(lead.stderr), `leading --trace with a terminator: ${lead.stdout} ${lead.stderr}`);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);
