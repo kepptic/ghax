@@ -17,6 +17,18 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   attach` for that). `ghax bridge stats` outside bridge mode exits 2 and
   points at `--trace`.
 
+### Fixed
+- **The CLI no longer re-sends a click, fill or other mutation after a lost
+  reply.** `rpc.rs` retried every verb once on any transport error,
+  including a timeout or reset after the daemon had already received the
+  command, so a slow `click` could run twice. Verbs now have a retry class:
+  reads (`status`, `tabs`, `snapshot`, `text`, `console`, ...) keep the one
+  retry; everything else, including `batch` as a whole and any verb added
+  later, is retried only when the TCP connect itself failed. The same
+  change removes reqwest's implicit 30 s client timeout, which the code
+  comment already said was not wanted: a long `wait --stable` or `perf
+  --wait` no longer dies at 30 s.
+
 ## [0.8.0] - 2026-09-23
 ### Added
 - **`ghax bridge reload`** — asks the connected bridge extension to reload

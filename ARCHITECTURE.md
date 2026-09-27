@@ -337,6 +337,15 @@ closed"`, anything matching `/disconnected/i` — into a one-liner:
 `"browser has disconnected — run \`ghax attach\` to reconnect"`. Exit
 code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 
+Between the CLI and the daemon, `rpc.rs` retries a failed request once,
+gated by `rpc::retry_class`. Reads (an explicit allowlist) retry on any
+connect, timeout, or request error. Everything else retries only when the
+TCP connect failed, because the daemon finishes a command even if the CLI
+stops waiting: a timed-out `click` may already have clicked. Unknown verbs
+default to the no-retry side. The daemon's own replay after a bridge drop
+is a separate table, `BRIDGE_RETRY_SAFE` (see
+`docs/design/plan/08-bridge-reliability.md` §2.3).
+
 ## What lives where
 
 ### Rust CLI (`crates/cli/src/`)

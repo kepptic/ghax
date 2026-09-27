@@ -40,27 +40,90 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
-    // Single-retry shim for transient-looking errors — connection
-    // refused/reset, broken pipe, request build failure — so a daemon
-    // that's briefly unresponsive (post-spawn warm-up, GC pause,
-    // mid-reload) doesn't bubble up a user-visible failure. Semantic
-    // errors (daemon answered with ok:false) are NOT retried — those
-    // are real command failures, not flake.
-    match call_once(port, cmd, &args, &opts) {
-        Ok(v) => Ok(v),
-        Err(e) => {
-            if is_transient(&e) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                call_once(port, cmd, &args, &opts)
-            } else {
-                Err(e)
-            }
-        }
+/// Whether a verb may be sent a second time after a transport failure.
+///
+/// The daemon runs a verb to completion even when the CLI stops listening, so
+/// "the response never arrived" does NOT mean "the command never ran". Only a
+/// read can be repeated blindly. A mutation is re-sent only when the request
+/// provably never reached the daemon (the TCP connect itself failed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryClass {
+    Idempotent,
+    Mutating,
+}
+
+/// Daemon RPC names safe to repeat. Anything absent, including verbs added
+/// later, is Mutating by default: forgetting to list a read costs one retry;
+/// wrongly listing a click costs a double click. `batch` is Mutating as a
+/// whole because an arbitrary prefix of its steps may already have run.
+/// `box` is left out on purpose: it scrolls before measuring, which can
+/// trigger lazy loading (same call as BRIDGE_RETRY_SAFE in src/daemon.ts and
+/// docs/design/plan/08-bridge-reliability.md §2.3).
+const IDEMPOTENT: &[&str] = &[
+    "status",
+    "tabs",
+    "find",
+    "text",
+    "html",
+    "snapshot",
+    "is",
+    "xpath",
+    "console",
+    "network",
+    "cookies",
+    "downloads",
+    "screenshot",
+    "wait",
+    "bridge.instances",
+    "bridge.stats",
+    "record.status",
+    "ext.list",
+    "ext.targets",
+    "ext.sw.logs",
+];
+
+pub fn retry_class(cmd: &str) -> RetryClass {
+    if IDEMPOTENT.contains(&cmd) {
+        RetryClass::Idempotent
+    } else {
+        RetryClass::Mutating
     }
 }
 
-fn call_once(port: u16, cmd: &str, args: &Value, opts: &Value) -> Result<Value> {
+pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
+    // No global timeout on purpose: long verbs (qa, perf, wait --stable) can
+    // run for minutes. reqwest's blocking client otherwise defaults to 30s.
+    let client = reqwest::blocking::Client::builder().timeout(None).build()?;
+    call_with(&client, port, cmd, &args, &opts)
+}
+
+/// One retry for a transport hiccup (post-spawn warm-up, GC pause,
+/// mid-reload), gated by the verb's retry class. Semantic errors (the daemon
+/// answered ok:false) are never retried: the command ran and failed.
+fn call_with(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    cmd: &str,
+    args: &Value,
+    opts: &Value,
+) -> Result<Value> {
+    match call_once(client, port, cmd, args, opts) {
+        Ok(v) => Ok(v),
+        Err(e) if should_retry(&e, retry_class(cmd)) => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            call_once(client, port, cmd, args, opts)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn call_once(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    cmd: &str,
+    args: &Value,
+    opts: &Value,
+) -> Result<Value> {
     let url = format!("http://127.0.0.1:{port}/rpc");
     let traced_opts;
     let opts = if TRACE.load(Ordering::Relaxed) {
@@ -72,9 +135,6 @@ fn call_once(port: u16, cmd: &str, args: &Value, opts: &Value) -> Result<Value> 
         opts
     };
     let body = Request { cmd, args, opts };
-    let client = reqwest::blocking::Client::builder()
-        // No global timeout: long verbs (qa, perf, snapshot with --wait) can run for minutes.
-        .build()?;
     let resp = client.post(&url).json(&body).send()?;
     let envelope: Value = resp.json()?;
     if let Some(trace) = envelope.get("trace") {
@@ -95,19 +155,22 @@ fn call_once(port: u16, cmd: &str, args: &Value, opts: &Value) -> Result<Value> 
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
 }
 
-/// Transient = transport-layer hiccup we'd retry. A daemon-side semantic
-/// failure (wrapped in `RpcError`) is never transient — it ran, it failed.
-fn is_transient(err: &anyhow::Error) -> bool {
+/// A daemon-side semantic failure (`RpcError`) is never retried. A transport
+/// failure is retried when the class allows it: Idempotent on any connect,
+/// timeout, or request error; Mutating only when the connect itself failed.
+/// A timeout or a reset after the request was written is exactly the case
+/// where a click may have landed with its reply lost.
+fn should_retry(err: &anyhow::Error, class: RetryClass) -> bool {
     if err.downcast_ref::<RpcError>().is_some() {
         return false;
     }
-    if let Some(re) = err.downcast_ref::<reqwest::Error>() {
-        // Connection refused / reset / broken pipe / timeout all look
-        // like the daemon blinked. `is_request` catches everything except
-        // a completed response.
-        return re.is_connect() || re.is_timeout() || re.is_request();
+    let Some(re) = err.downcast_ref::<reqwest::Error>() else {
+        return false;
+    };
+    match class {
+        RetryClass::Idempotent => re.is_connect() || re.is_timeout() || re.is_request(),
+        RetryClass::Mutating => re.is_connect(),
     }
-    false
 }
 
 /// One stderr line summarising a `--trace` envelope. stdout stays exactly
@@ -151,6 +214,84 @@ pub fn format_trace(trace: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_classes() {
+        for cmd in ["status", "tabs", "snapshot", "text", "bridge.stats", "ext.sw.logs"] {
+            assert_eq!(retry_class(cmd), RetryClass::Idempotent, "{cmd}");
+        }
+        for cmd in ["click", "fill", "goto", "eval", "batch", "box", "press", "brand-new-verb"] {
+            assert_eq!(retry_class(cmd), RetryClass::Mutating, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn rpc_error_is_never_retried() {
+        let err = anyhow!(RpcError { message: "nope".into(), exit_code: Some(4), hint: None });
+        assert!(!should_retry(&err, RetryClass::Idempotent));
+        assert!(!should_retry(&err, RetryClass::Mutating));
+    }
+
+    #[test]
+    fn refused_connection_is_retried_even_for_a_mutation() {
+        // Nothing listens on port 1, so the request provably never landed.
+        let client = reqwest::blocking::Client::new();
+        let err = call_once(&client, 1, "click", &json!([]), &json!({})).unwrap_err();
+        assert!(should_retry(&err, RetryClass::Mutating), "{err:?}");
+        assert!(should_retry(&err, RetryClass::Idempotent), "{err:?}");
+    }
+
+    /// A daemon that reads the request and never answers: the CLI times out
+    /// after the command was delivered. Returns (port, connections accepted).
+    fn silent_daemon() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = stream.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    #[test]
+    fn a_mutation_is_sent_once_when_the_reply_is_lost() {
+        let (port, seen) = silent_daemon();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let err = call_with(&client, port, "click", &json!(["@e1"]), &json!({})).unwrap_err();
+        assert!(!should_retry(&err, RetryClass::Mutating), "{err:?}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "click must not be re-sent");
+    }
+
+    #[test]
+    fn a_read_is_retried_once_when_the_reply_is_lost() {
+        let (port, seen) = silent_daemon();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let _ = call_with(&client, port, "tabs", &json!([]), &json!({})).unwrap_err();
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "tabs gets exactly one retry");
+    }
 
     #[test]
     fn trace_line_names_top_methods_by_time() {
