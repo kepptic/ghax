@@ -235,6 +235,34 @@ async function main(): Promise<void> {
     assert(r.code === 4 && /covered by div#overlay/.test(r.stderr), `expected covered: ${r.stderr}`);
   });
 
+  // Review finding 3: no false positives on common real-world shapes.
+  await test('guard: an opacity:0 native checkbox under its label is clickable', async () => {
+    await gotoFixture('<label style="position:relative;display:inline-block;width:80px;height:30px">'
+      + '<input id="b" type="checkbox" style="opacity:0;position:absolute;inset:0;width:100%;height:100%;margin:0">Agree</label>');
+    const r = await run(['click', '#b']);
+    assert(r.code === 0, `opacity:0 checkbox should click: ${r.stderr}`);
+    const v = await run(['eval', "String(document.getElementById('b').checked)"]);
+    assert(v.stdout.trim() === 'true', 'the checkbox should now be checked');
+  });
+
+  await test('guard: a target just under a sticky header is re-centred, not refused', async () => {
+    await gotoFixture('<header style="position:sticky;top:0;height:80px;background:#ccc;z-index:5">hdr</header>'
+      + '<div style="height:3000px"><button id="b" style="margin-top:900px" onclick="window.__s=1">Deep</button></div>');
+    await run(['eval', "window.scrollTo(0, document.getElementById('b').offsetTop - 20); 'ok'"]);
+    const r = await run(['click', '#b']);
+    assert(r.code === 0, `sticky-header target should click after re-centring: ${r.stderr}`);
+    const v = await run(['eval', 'String(window.__s || 0)']);
+    assert(v.stdout.trim() === '1', 'the button should have been clicked');
+  });
+
+  await test('guard: a display:contents button acts through its rendered child', async () => {
+    await gotoFixture('<div id="b" role="button" style="display:contents" onclick="window.__dc=1"><span>Inner</span></div>');
+    const r = await run(['click', '#b']);
+    assert(r.code === 0, `display:contents should not read as hidden: ${r.stderr}`);
+    const v = await run(['eval', 'String(window.__dc || 0)']);
+    assert(v.stdout.trim() === '1', 'the click should reach the handler');
+  });
+
   await test('goto data: fails fast and says why (Chrome blocks it for extensions)', async () => {
     const started = Date.now();
     const r = await run(['goto', 'data:text/html,x']);

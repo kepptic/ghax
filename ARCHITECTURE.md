@@ -264,8 +264,10 @@ port of Playwright's rules, not its code: `retarget('button-link')`,
 `getAriaDisabled` (native disabled, `fieldset[disabled]` minus its first
 legend, inherited `aria-disabled` through shadow hosts for the roles in
 `kAriaDisabledRoles`), `inert`, read-only for fill, and for click
-`checkVisibility`, scroll to centre, and `expectHitTarget`'s root-chain
-hit test. The function is shipped with `toString()`, so it must stay
+`checkVisibility` (no opacity check, `display:contents` via its first
+rendered child, as in Playwright's `computeBox`), scroll to centre, and
+`expectHitTarget`'s root-chain hit test, repeated once after centring
+when the first test finds a coverer (sticky headers). The function is shipped with `toString()`, so it must stay
 self-contained. A refusal is `BRIDGE_TARGET_NOT_ACTIONABLE` with a
 reason; a node that no longer exists is `BRIDGE_REF_STALE`. `--force`
 skips everything but "connected" and the rect. The Playwright path runs

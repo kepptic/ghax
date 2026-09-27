@@ -17,9 +17,11 @@
  * the source as written.
  *
  * Kinds:
- *   click    connected, not disabled/inert, visible, scrolled into view,
- *            centre inside the viewport, and the hit test at the centre
- *            lands on the (retargeted) element.
+ *   click    connected, not disabled/inert, visible (no opacity check;
+ *            display:contents via its children), scrolled into view, centre
+ *            inside the viewport, and the hit test at the centre lands on
+ *            the (retargeted) element, re-tried once after centring (sticky
+ *            headers).
  *   fill     connected, not disabled/inert, not read-only. No visibility or
  *            hit test: Monaco and hidden-but-scriptable inputs must work.
  *   upload   connected only.
@@ -170,62 +172,113 @@ export function actionability(
   if (kind === 'fill') return { ok: true };
 
   // ─── click ───
-  const visible = (e: Element): boolean => {
-    const cv = (e as Element & { checkVisibility?: (o: object) => boolean }).checkVisibility;
-    if (typeof cv === 'function') return cv.call(e, { checkOpacity: true, checkVisibilityCSS: true });
-    const s = getComputedStyle(e);
-    return s.display !== 'none' && s.visibility !== 'hidden' && e.getClientRects().length > 0;
+  // Visibility per Playwright's computeBox / computeElementStyleVisibilityVisible:
+  // checkVisibility() WITHOUT checkOpacity (an opacity:0 native checkbox
+  // under a styled label is a normal click target), and display:contents
+  // counts as visible when any child renders.
+  const textRect = (t: Node): DOMRect | null => {
+    const range = document.createRange();
+    range.selectNode(t);
+    const r = range.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
   };
-  if (!force && !visible(el)) return fail('hidden');
+  const boxOf = (e: Element): DOMRect | null => {
+    if (getComputedStyle(e).display === 'contents') {
+      // Not rendered itself: its first rendered child stands in for it.
+      for (let c = e.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 1) {
+          const r = boxOf(c as Element);
+          if (r) return r;
+        } else if (c.nodeType === 3) {
+          const r = textRect(c);
+          if (r) return r;
+        }
+      }
+      return null;
+    }
+    const cv = (e as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+    const styleVisible = typeof cv === 'function'
+      ? cv.call(e, { checkVisibilityCSS: true })
+      : getComputedStyle(e).visibility === 'visible';
+    if (!styleVisible) return null;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
+  };
   const inViewport = (r: DOMRect): boolean => {
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
     return cx >= 0 && cy >= 0 && cx < innerWidth && cy < innerHeight;
   };
-  let rect = el.getBoundingClientRect();
-  if (!inViewport(rect)) {
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
+  const scrollToCentre = () => {
+    const anchor = getComputedStyle(el).display === 'contents'
+      ? (el.firstElementChild ?? el)
+      : el;
+    anchor.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
+  };
+  let rect = boxOf(el);
+  if (!rect) {
+    if (!force) return fail('hidden');
     rect = el.getBoundingClientRect();
   }
+  let scrolled = false;
+  if (!inViewport(rect)) {
+    scrollToCentre();
+    scrolled = true;
+    rect = boxOf(el) ?? el.getBoundingClientRect();
+  }
   if (rect.width <= 0 || rect.height <= 0) return fail('hidden');
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  const point = { x, y, width: rect.width, height: rect.height };
+  const pointOf = (r: DOMRect) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height });
+  let point = pointOf(rect);
   if (force) return { ok: true, ...point, ...(retargeted ? { retargeted } : {}) };
   if (!inViewport(rect)) return fail('offscreen', point);
 
   // Hit test, per expectHitTarget: walk the chain of roots from the target up
   // to the document, then from the document down, each level's innermost hit
   // must be the next level's shadow host; the last must be the target or a
-  // descendant of it.
-  const roots: Array<Document | ShadowRoot> = [];
-  for (let p: Element | null = target; p;) {
-    const r = p.getRootNode();
-    if (r.nodeType !== 9 && r.nodeType !== 11) break;
-    roots.push(r as Document | ShadowRoot);
-    if (r.nodeType === 9) break;
-    p = (r as ShadowRoot).host;
-  }
-  let hit: Element | undefined;
-  for (let i = roots.length - 1; i >= 0; i--) {
-    const root = roots[i];
-    const els = root.elementsFromPoint(x, y);
-    const single = root.elementFromPoint(x, y);
-    // Chromium's elementsFromPoint misses a display:contents innermost hit.
-    if (single && els[0] && parentOrHost(single) === els[0] && getComputedStyle(single).display === 'contents') {
-      els.unshift(single);
+  // descendant of it. Returns null when the hit lands, else the coverer.
+  const hitTest = (x: number, y: number): string | null => {
+    const roots: Array<Document | ShadowRoot> = [];
+    for (let p: Element | null = target; p;) {
+      const r = p.getRootNode();
+      if (r.nodeType !== 9 && r.nodeType !== 11) break;
+      roots.push(r as Document | ShadowRoot);
+      if (r.nodeType === 9) break;
+      p = (r as ShadowRoot).host;
     }
-    const inner = els[0];
-    if (!inner) break;
-    hit = inner;
-    if (i && inner !== (roots[i - 1] as ShadowRoot).host) break;
+    let hit: Element | undefined;
+    for (let i = roots.length - 1; i >= 0; i--) {
+      const root = roots[i];
+      const els = root.elementsFromPoint(x, y);
+      const single = root.elementFromPoint(x, y);
+      // Chromium's elementsFromPoint misses a display:contents innermost hit.
+      if (single && els[0] && parentOrHost(single) === els[0] && getComputedStyle(single).display === 'contents') {
+        els.unshift(single);
+      }
+      const inner = els[0];
+      if (!inner) break;
+      hit = inner;
+      if (i && inner !== (roots[i - 1] as ShadowRoot).host) break;
+    }
+    const chain: Element[] = [];
+    let h: Element | null | undefined = hit;
+    while (h && h !== target) {
+      chain.push(h);
+      h = (h as Element & { assignedSlot?: Element | null }).assignedSlot || parentOrHost(h);
+    }
+    return h === target ? null : describe(chain[0] || document.documentElement);
+  };
+  let coveredBy = hitTest(point.x, point.y);
+  // A sticky header or footer covers an element near the viewport edge. Like
+  // Playwright's scroll retries, bring it to the centre once and look again
+  // before refusing.
+  if (coveredBy && !scrolled) {
+    scrollToCentre();
+    const again = boxOf(el);
+    if (again && inViewport(again)) {
+      point = pointOf(again);
+      coveredBy = hitTest(point.x, point.y);
+    }
   }
-  const chain: Element[] = [];
-  let h: Element | null | undefined = hit;
-  while (h && h !== target) {
-    chain.push(h);
-    h = (h as Element & { assignedSlot?: Element | null }).assignedSlot || parentOrHost(h);
-  }
-  if (h === target) return { ok: true, ...point, ...(retargeted ? { retargeted } : {}) };
-  return fail('covered', { ...point, coveredBy: describe(chain[0] || document.documentElement) });
+  if (!coveredBy) return { ok: true, ...point, ...(retargeted ? { retargeted } : {}) };
+  return fail('covered', { ...point, coveredBy });
 }

@@ -106,6 +106,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   click costs no extra blocking round-trips. On the CDP transport, `click`
   and `fill` pre-check inherited `aria-disabled` and `inert` and fail at
   once with the same code instead of waiting out Playwright's 30 s timeout.
+  Visibility follows Playwright's own rules, not stricter ones: no opacity
+  check (an `opacity:0` native checkbox under its styled label is a normal
+  target), `display:contents` elements act through their first rendered
+  child, and a target covered near the viewport edge (sticky header) is
+  scrolled to the centre and hit-tested again before being refused.
 - **The CLI no longer re-sends a click, fill or other mutation after a lost
   reply.** `rpc.rs` retried every verb once on any transport error,
   including a timeout or reset after the daemon had already received the
