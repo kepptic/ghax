@@ -194,8 +194,11 @@ ariaSnapshot taken in that frame (`_lastAriaSnapshotForQuery`), requires
 `resolveRef` checks `count() === 0` before acting and fails with "not
 found in the latest snapshot ... Run 'ghax snapshot' first", so a gone
 or renamed element never waits out an action timeout or lands on a
-neighbour. Iframe refs (`f<seq>e<n>`) render without `@` and are not
-registered. Because the cache semantics are undocumented, Playwright is
+neighbour. Playwright prefixes refs with `f<seq>` for iframes AND for
+the main frame once it has navigated away from a real document (it
+renumbers the main frame so old refs can't resolve in the new one). ghax
+prints and keys the `e<n>` part, keeps the full string in the `aria-ref=`
+locator, and does not register refs inside `iframe` subtrees. Because the cache semantics are undocumented, Playwright is
 pinned to an exact version and the smoke suite has checks that fail if a
 bump changes them (stable across insertion, stale after removal, modal
 scope).

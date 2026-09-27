@@ -121,8 +121,16 @@ function renderProps(n: AriaNodeJSON): string {
   return out.length ? `[${out.join(', ')}]` : '';
 }
 
-/** Playwright-minted main-frame ref. Iframe refs (`f<seq>e<n>`) render but never register. */
-const MAIN_FRAME_REF = /^e\d+$/;
+/**
+ * A Playwright-minted ref: `e<n>`, or `f<seq>e<n>`. The prefix is NOT only
+ * for iframes: Playwright renumbers the MAIN frame every time it navigates
+ * away from a real document (server/frames.ts, "Re-number the main frame"),
+ * so after the first navigation the main frame's own refs look like
+ * `f3e6`. ghax prints and stores the `e<n>` part and keeps the full string
+ * for the `aria-ref=` locator; an old ref from the previous document then
+ * points at a different `f<seq>` and fails as stale instead of resolving.
+ */
+const PW_REF = /^(?:f\d+)?(e\d+)$/;
 
 export async function snapshot(
   target: Page | Frame,
@@ -149,7 +157,9 @@ export async function snapshot(
   const refs = new Map<string, RefEntry>();
   const output: string[] = [];
 
-  const walk = (node: AriaNodeJSON | string, depth: number): void => {
+  // Iframe content renders but its refs are not registered (the ref engine
+  // can reach them, but ghax's actions and guards assume the main frame).
+  const walk = (node: AriaNodeJSON | string, depth: number, inIframe = false): void => {
     if (typeof node === 'string') {
       if (opts.interactive || opts.compact) return;
       if (opts.depth !== undefined && depth > opts.depth) return;
@@ -168,11 +178,12 @@ export async function snapshot(
       const text = node.text ?? '';
       const compactSkip = opts.compact && !isInteractive && !name && !text;
       if (withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
-        const ref = node.ref;
+        const pwRef = node.ref;
+        const short = pwRef && !inIframe ? PW_REF.exec(pwRef)?.[1] : undefined;
         let line = '  '.repeat(depth);
-        if (ref && MAIN_FRAME_REF.test(ref)) {
-          line += `@${ref} `;
-          refs.set(ref, { locator: target.locator(`aria-ref=${ref}`), role, name });
+        if (pwRef && short) {
+          line += `@${short} `;
+          refs.set(short, { locator: target.locator(`aria-ref=${pwRef}`), role, name });
         }
         line += `[${role}]`;
         if (name) line += ` ${JSON.stringify(name)}`;
@@ -183,7 +194,8 @@ export async function snapshot(
         output.push(line);
       }
     }
-    for (const child of node.children ?? []) walk(child, flatten ? depth : depth + 1);
+    const childInIframe = inIframe || role === 'iframe';
+    for (const child of node.children ?? []) walk(child, flatten ? depth : depth + 1, childInIframe);
   };
   for (const node of tree) walk(node, 0);
 

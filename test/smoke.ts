@@ -696,7 +696,9 @@ c('modal-scoped refs do not resolve outside the modal', async () => {
 });
 
 c('refs are stable across snapshots: an insertion above does not shift them', async () => {
-  const html = `<div id="top"></div><a href="#x" id="link">Target link</a>`;
+  // onclick flag, not a hash change: fragment navigation on a data: URL
+  // leaves location untouched in Chromium.
+  const html = `<div id="top"></div><a href="#x" id="link" onclick="window.__linked=1; return false">Target link</a>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   const before = await snapRef('link', 'Target link');
   await run(['eval', `document.getElementById('top').innerHTML = '<button>Inserted</button>'; 'ok'`]);
@@ -706,8 +708,8 @@ c('refs are stable across snapshots: an insertion above does not shift them', as
   const inserted = refOf(snap.stdout, 'button', 'Inserted');
   assert(inserted !== before, 'the new button must get a new number');
   await run(['click', after]);
-  const hash = await run(['eval', 'location.hash']);
-  assert(hash.stdout.trim() === '#x', `stable ref should still click the link, hash=${hash.stdout.trim()}`);
+  const linked = await run(['eval', 'String(window.__linked || 0)']);
+  assert(linked.stdout.trim() === '1', `stable ref should still click the link, __linked=${linked.stdout.trim()}`);
 });
 
 c('a ref whose element was removed fails as stale, exit 4', async () => {
