@@ -14,6 +14,8 @@
  * browser endpoint from /json/version's webSocketDebuggerUrl.
  */
 
+import { daemonCdpStats } from './cdp-stats';
+
 export type CdpTargetType =
   | 'page'
   | 'background_page'
@@ -142,10 +144,10 @@ export class CdpTarget {
     const id = this.nextId++;
     const msg: CdpMessage = { id, method, params };
     if (sessionId) msg.sessionId = sessionId;
-    return new Promise<T>((resolve, reject) => {
+    return daemonCdpStats.track(method, new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
       this.ws!.send(JSON.stringify(msg));
-    });
+    }));
   }
 
   on(listener: (ev: CdpEvent) => void): () => void {

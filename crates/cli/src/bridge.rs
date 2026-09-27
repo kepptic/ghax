@@ -16,11 +16,12 @@ use crate::output;
 use crate::rpc;
 use crate::state::{self, Config};
 
-const USAGE: &str = "Usage: ghax bridge <control|instances|use|reload> [...]\n  \
+const USAGE: &str = "Usage: ghax bridge <control|instances|use|reload|stats> [...]\n  \
 control [--active | --tab-id <n> | --stop]   point the bridge at a tab\n  \
 instances                                    list connected browsers (bound + parked)\n  \
 use <instance-id|browser|label>              bind a different browser\n  \
-reload [--timeout <ms>] [--force]            reload the bridge extension (no click in edge://extensions)";
+reload [--timeout <ms>] [--force]            reload the bridge extension (no click in edge://extensions)\n  \
+stats [--reset]                              relayed CDP calls per method since attach or last --reset";
 
 /// Exit code for `bridge reload` refusing to proceed because another agent's
 /// tab is at stake. Shares the numeric value of EXIT_NOT_ATTACHED (both are
@@ -38,6 +39,7 @@ pub fn cmd_bridge(cfg: &Config, rest: &[String]) -> Result<i32> {
         "instances" => cmd_bridge_instances(cfg, &args::parse(&rest[1..])),
         "use" => cmd_bridge_use(cfg, &args::parse(&rest[1..])),
         "reload" => cmd_bridge_reload(cfg, &args::parse(&rest[1..])),
+        "stats" => cmd_bridge_stats(cfg, &args::parse(&rest[1..])),
         other => {
             eprintln!("Unknown bridge subcommand: {other}\n\n{USAGE}");
             Ok(EXIT_USAGE)
@@ -211,6 +213,58 @@ fn cmd_bridge_reload(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
+/// `ghax bridge stats [--reset]`: relayed CDP calls per method, heaviest
+/// first. `--reset` prints the counters as they were, then zeroes them.
+fn cmd_bridge_stats(cfg: &Config, parsed: &Parsed) -> Result<i32> {
+    let reset = matches!(parsed.flags.get("reset"), Some(Value::Bool(true)));
+    let port = state::require_daemon(cfg)?;
+    let opts = json!({ "reset": reset });
+    let data = rpc::call(port, "bridge.stats", Value::Array(vec![]), opts)?;
+    if parsed.json() {
+        output::print(&data, true);
+        return Ok(EXIT_OK);
+    }
+    let since = data.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
+    let rows = stats_rows(&data);
+    let total_calls: u64 = rows.iter().map(|r| r.1).sum();
+    let total_ms: f64 = rows.iter().map(|r| r.3).sum();
+    let age_s = crate::time_util::now_ms().saturating_sub(since) / 1000;
+    println!("{total_calls} relayed CDP calls, {total_ms:.0} ms, over the last {age_s}s");
+    if !rows.is_empty() {
+        println!(
+            "{:<36} {:>7} {:>6} {:>10} {:>8} {:>8}",
+            "method", "calls", "errors", "total ms", "avg ms", "max ms"
+        );
+        for (method, calls, errors, total, max) in &rows {
+            let avg = if *calls > 0 { total / *calls as f64 } else { 0.0 };
+            println!("{method:<36} {calls:>7} {errors:>6} {total:>10.1} {avg:>8.1} {max:>8.1}");
+        }
+    }
+    if reset {
+        println!("(counters reset)");
+    }
+    Ok(EXIT_OK)
+}
+
+/// (method, calls, errors, totalMs, maxMs), heaviest total first.
+fn stats_rows(data: &Value) -> Vec<(String, u64, u64, f64, f64)> {
+    let u = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let f = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let mut rows: Vec<(String, u64, u64, f64, f64)> = data
+        .get("methods")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| {
+                    (k.clone(), u(v, "calls"), u(v, "errors"), f(v, "totalMs"), f(v, "maxMs"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rows.sort_by(|a, b| b.3.total_cmp(&a.3));
+    rows
+}
+
 fn format_extension_identity(info: &Value) -> String {
     let agent = info.get("agent").and_then(|v| v.as_str()).unwrap_or("ghax-ext");
     let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("?");
@@ -244,6 +298,17 @@ fn count_other_agent_tabs(tabs: &[Value], own_port: Option<u64>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_rows_sort_heaviest_first() {
+        let data = json!({ "since": 0, "methods": {
+            "DOM.resolveNode": { "calls": 10, "errors": 0, "totalMs": 5.0, "maxMs": 1.0 },
+            "Runtime.evaluate": { "calls": 2, "errors": 1, "totalMs": 40.0, "maxMs": 30.0 }
+        }});
+        let rows = stats_rows(&data);
+        assert_eq!(rows[0].0, "Runtime.evaluate");
+        assert_eq!(rows[1].1, 10);
+    }
 
     #[test]
     fn no_tabs_no_conflict() {

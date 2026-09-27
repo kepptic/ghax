@@ -1,21 +1,38 @@
 /**
- * Accessibility-tree snapshot with @e<n> refs.
+ * Accessibility-tree snapshot with @e<n> refs (CDP transport).
  *
- * Adapted from gstack/browse/src/snapshot.ts (MIT — Garry Tan).
+ * Originally adapted from gstack/browse/src/snapshot.ts (MIT, Garry Tan);
+ * the ref model below replaced its getByRole().nth() reconstruction.
  *
  * Flow:
- *   1. page.locator('body').ariaSnapshot() → YAML-like tree
- *   2. Parse, assign @e1, @e2, ... to interactive roles (or all roles if -i off)
- *   3. Build Playwright Locator for each ref via getByRole + nth() disambiguation
- *   4. Optional cursor-interactive pass — catches Radix dropdowns/popovers that
- *      never land in the a11y tree because they use cursor:pointer divs
- *   5. Return compact rendered tree + a Map<string, RefEntry>
+ *   1. rootLocator.ariaSnapshotJSON({ mode: 'ai' }) → a JSON tree in which
+ *      Playwright has already minted a ref (`e<n>`) for every visible node
+ *      that receives pointer events.
+ *   2. Walk it and render ghax's own line format
+ *      (`@e12 [button] "Save" [checked, expanded]: text`).
+ *   3. Each rendered ref resolves through Playwright's `aria-ref=e12`
+ *      selector engine.
+ *   4. Optional cursor-interactive pass (`@c<n>`), unchanged: catches Radix
+ *      dropdowns/popovers built from cursor:pointer divs.
  *
- * The caller stores the RefEntry map on the tab session so later
- * `click @e3` / `fill @e5 <value>` can resolve back to a Locator.
+ * Why aria-ref (plan 10, C7): Playwright caches the ref ON the element
+ * (`_ariaRef`, reused while role and name are unchanged), so the same
+ * element keeps its number across snapshots and an insertion above it does
+ * not shift it. The old getByRole+nth locators silently re-targeted the
+ * next same-named element after any DOM change. Costs: numbering is sparse
+ * (refs count every interactable node, not only the ones printed), and
+ * numbers restart on navigation.
+ *
+ * CACHE RULE: the aria-ref engine resolves only against the LAST
+ * ariaSnapshot/ariaSnapshotJSON taken in that frame (any mode, any scope;
+ * a locator-scoped snapshot makes the cache that subtree). This file must
+ * stay the daemon's single call site for either method, or refs from the
+ * user's last `ghax snapshot` stop resolving. Semi-private behaviour, hence
+ * the exact Playwright pin in package.json and the smoke checks that pin it.
  */
 
 import type { Page, Locator, Frame } from 'playwright';
+import { RefRegistry, type RefAllocator } from './ref-registry';
 
 export interface RefEntry {
   locator: Locator;
@@ -37,12 +54,21 @@ export interface SnapshotOptions {
    * a hidden ancestor. Pass `--no-dialog-scope` to force body.
    */
   dialogScope?: boolean;
+  /**
+   * Ref numbering (src/ref-registry.ts), bound to the current document. The
+   * printed `@eN` is ghax's own daemon-wide number mapped to Playwright's
+   * full `f<seq>e<n>`, never Playwright's number itself: Playwright restarts
+   * `e<n>` per document, and a reused number is a wrong-element click.
+   */
+  refs?: RefAllocator;
 }
 
 export interface SnapshotResult {
   text: string;
   refs: Map<string, RefEntry>;
   count: number;
+  /** True when rooted at --selector or a modal, i.e. not the whole page. */
+  scoped?: boolean;
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -66,120 +92,131 @@ const INTERACTIVE_ROLES = new Set([
 export const MODAL_SEL =
   '[role=dialog]:visible, [role=alertdialog]:visible, dialog[open]:visible, [aria-modal="true"]:visible';
 
-interface ParsedNode {
-  indent: number;
+/**
+ * Structural copy of Playwright's AriaNodeJSON (packages/isomorphic/
+ * ariaSnapshot.ts); the public API types the result as `Serializable`.
+ */
+interface AriaNodeJSON {
   role: string;
-  name: string | null;
-  props: string;
-  children: string;
+  name?: string;
+  checked?: boolean | 'mixed';
+  disabled?: boolean;
+  expanded?: boolean;
+  active?: boolean;
+  invalid?: boolean;
+  level?: number;
+  pressed?: boolean | 'mixed';
+  selected?: boolean;
+  ref?: string;
+  cursor?: 'pointer';
+  url?: string;
+  placeholder?: string;
+  text?: string;
+  children?: Array<AriaNodeJSON | string>;
 }
 
-function parseLine(line: string): ParsedNode | null {
-  const match = line.match(/^(\s*)-\s+(\w+)(?:\s+"([^"]*)")?(?:\s+(\[.*?\]))?\s*(?::\s*(.*))?$/);
-  if (!match) return null;
-  return {
-    indent: match[1].length,
-    role: match[2],
-    name: match[3] ?? null,
-    props: match[4] || '',
-    children: match[5]?.trim() || '',
-  };
+function renderProps(n: AriaNodeJSON): string {
+  const out: string[] = [];
+  if (n.checked === 'mixed') out.push('checked=mixed');
+  else if (n.checked) out.push('checked');
+  if (n.disabled) out.push('disabled');
+  if (n.expanded) out.push('expanded');
+  if (n.active) out.push('active');
+  if (n.invalid) out.push('invalid');
+  if (n.level) out.push(`level=${n.level}`);
+  if (n.pressed === 'mixed') out.push('pressed=mixed');
+  else if (n.pressed) out.push('pressed');
+  if (n.selected) out.push('selected');
+  if (n.placeholder) out.push(`placeholder=${JSON.stringify(n.placeholder)}`);
+  return out.length ? `[${out.join(', ')}]` : '';
 }
+
+/**
+ * A Playwright-minted ref: `e<n>`, or `f<seq>e<n>`. The prefix is NOT only
+ * for iframes: Playwright renumbers the MAIN frame every time it navigates
+ * away from a real document (server/frames.ts, "Re-number the main frame"),
+ * so after the first navigation the main frame's own refs look like `f3e6`.
+ * The full string goes into the `aria-ref=` locator; what ghax prints is a
+ * daemon-wide number from the ref registry.
+ */
+const PW_REF = /^(?:f\d+)?e\d+$/;
 
 export async function snapshot(
   target: Page | Frame,
   opts: SnapshotOptions = {},
 ): Promise<SnapshotResult> {
-  let rootLocator = opts.selector ? target.locator(opts.selector) : target.locator('body');
-  // Tracks whether the auto-detected modal scope is active. When true, the
-  // per-node locators below also need to be modal-rooted — otherwise
-  // `target.getByRole(...)` queries the entire page and a same-named button
-  // outside the modal can win the strict-mode race or, worse, silently match
-  // a hidden zombie element. (HubSpot stacks an alertdialog on top of an
-  // already-open dialog with overlapping button names — exactly this case.)
-  let modalScopeActive = false;
+  // Root: --selector, else the top-most visible modal, else body. Scoping is
+  // inherent now: a ref minted in a modal-scoped snapshot resolves only
+  // inside that snapshot's subtree, so no locator re-scoping is needed.
+  const allocator = opts.refs ?? new RefRegistry().forDoc('local');
+  let modalScoped = false;
+  let rootLocator: Locator = opts.selector ? target.locator(opts.selector) : target.locator('body');
   if (opts.selector) {
     const count = await rootLocator.count();
     if (count === 0) throw new Error(`Selector not found: ${opts.selector}`);
   } else if (opts.dialogScope !== false) {
-    // Dialog-aware walker — if a modal is open, walk from it instead of
-    // from `body`. `.last()` picks the top-most modal if a stack is open.
     const modal = target.locator(MODAL_SEL).last();
     if ((await modal.count()) > 0) {
       rootLocator = modal;
-      modalScopeActive = true;
+      modalScoped = true;
     }
   }
 
-  const ariaText = await rootLocator.ariaSnapshot();
-  if (!ariaText || ariaText.trim().length === 0) {
-    return { text: '(no accessible elements found)', refs: new Map(), count: 0 };
+  // The daemon's ONLY ariaSnapshot* call site (see CACHE RULE above).
+  const tree = await rootLocator.ariaSnapshotJSON({ mode: 'ai' }) as unknown as AriaNodeJSON[];
+  if (!Array.isArray(tree) || tree.length === 0) {
+    return { text: '(no accessible elements found)', refs: new Map(), count: 0, scoped: Boolean(opts.selector) || modalScoped };
   }
 
   const refs = new Map<string, RefEntry>();
   const output: string[] = [];
-  let refCounter = 1;
+  const alive = new Set<string>();
 
-  // Disambiguation: count role+name pairs so we can nth() duplicates
-  const roleNameCounts = new Map<string, number>();
-  const roleNameSeen = new Map<string, number>();
-
-  const nodes: ParsedNode[] = [];
-  for (const line of ariaText.split('\n')) {
-    const node = parseLine(line);
-    if (!node) continue;
-    nodes.push(node);
-    const key = `${node.role}:${node.name || ''}`;
-    roleNameCounts.set(key, (roleNameCounts.get(key) || 0) + 1);
-  }
-
-  for (const node of nodes) {
-
-    const depth = Math.floor(node.indent / 2);
-    const isInteractive = INTERACTIVE_ROLES.has(node.role);
-
-    if (opts.depth !== undefined && depth > opts.depth) continue;
-
-    // Still advance seen counter on skipped interactive-filtered nodes so locator
-    // indexing stays aligned with the ariaSnapshot document order.
-    if (opts.interactive && !isInteractive) {
-      const key = `${node.role}:${node.name || ''}`;
-      roleNameSeen.set(key, (roleNameSeen.get(key) || 0) + 1);
-      continue;
+  // Iframe content renders but its refs are not registered (the ref engine
+  // can reach them, but ghax's actions and guards assume the main frame).
+  const walk = (node: AriaNodeJSON | string, depth: number, inIframe = false): void => {
+    if (typeof node === 'string') {
+      if (opts.interactive || opts.compact) return;
+      if (opts.depth !== undefined && depth > opts.depth) return;
+      const text = node.trim();
+      if (text) output.push(`${'  '.repeat(depth)}[text]: ${text}`);
+      return;
     }
-    if (opts.compact && !isInteractive && !node.name && !node.children) continue;
-
-    const ref = `e${refCounter++}`;
-    const indent = '  '.repeat(depth);
-    const key = `${node.role}:${node.name || ''}`;
-    const seenIndex = roleNameSeen.get(key) || 0;
-    roleNameSeen.set(key, seenIndex + 1);
-    const totalCount = roleNameCounts.get(key) || 1;
-
-    // Scope locators to the same root we used for the ARIA tree:
-    //   - explicit user selector wins,
-    //   - else auto-detected modal (when active),
-    //   - else the page/frame root.
-    // Without this, the rendered tree shows modal-only nodes but locators
-    // resolve page-wide — strict-mode error or wrong-element pick.
-    const locatorScope: Page | Frame | Locator = opts.selector
-      ? target.locator(opts.selector)
-      : modalScopeActive
-        ? rootLocator
-        : target;
-    let locator: Locator = locatorScope.getByRole(node.role as any, {
-      name: node.name || undefined,
-    });
-    if (totalCount > 1) locator = locator.nth(seenIndex);
-
-    refs.set(ref, { locator, role: node.role, name: node.name || '' });
-
-    let outputLine = `${indent}@${ref} [${node.role}]`;
-    if (node.name) outputLine += ` "${node.name}"`;
-    if (node.props) outputLine += ` ${node.props}`;
-    if (node.children) outputLine += `: ${node.children}`;
-    output.push(outputLine);
-  }
+    const role = node.role;
+    const name = node.name ?? '';
+    // Every Playwright ref in the tree is alive, printed or not: an -i,
+    // --depth or --compact look (batch auto-snapshots are -i) must not make
+    // the next full snapshot renumber the elements it didn't print.
+    if (node.ref && !inIframe && PW_REF.test(node.ref)) alive.add(`p${node.ref}`);
+    // Nameless generic wrappers are layout noise; flatten them unless they
+    // are clickable (cursor:pointer), which is exactly what agents look for.
+    const flatten = (role === 'generic' && !name && node.cursor !== 'pointer') || role === 'fragment';
+    if (!flatten) {
+      const isInteractive = INTERACTIVE_ROLES.has(role);
+      const withinDepth = opts.depth === undefined || depth <= opts.depth;
+      const text = node.text ?? '';
+      const compactSkip = opts.compact && !isInteractive && !name && !text;
+      if (withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
+        const pwRef = node.ref;
+        let line = '  '.repeat(depth);
+        if (pwRef && !inIframe && PW_REF.test(pwRef)) {
+          const ref = allocator.assign('e', `p${pwRef}`, role, name);
+          line += `@${ref} `;
+          refs.set(ref, { locator: target.locator(`aria-ref=${pwRef}`), role, name });
+        }
+        line += `[${role}]`;
+        if (name) line += ` ${JSON.stringify(name)}`;
+        const props = renderProps(node);
+        if (props) line += ` ${props}`;
+        if (node.cursor === 'pointer' && !isInteractive) line += ' [cursor:pointer]';
+        if (text) line += `: ${text}`;
+        output.push(line);
+      }
+    }
+    const childInIframe = inIframe || role === 'iframe';
+    for (const child of node.children ?? []) walk(child, flatten ? depth : depth + 1, childInIframe);
+  };
+  for (const node of tree) walk(node, 0);
 
   // Auto-enable cursor scan when interactive mode is on — many React apps
   // (Radix, Headless UI) build popovers from plain divs with cursor:pointer.
@@ -326,9 +363,9 @@ export async function snapshot(
       if (cursorElements.length > 0) {
         output.push('');
         output.push('── cursor-interactive (not in ARIA tree) ──');
-        let c = 1;
         for (const elem of cursorElements) {
-          const ref = `c${c++}`;
+          alive.add(`s${elem.selector}`);
+          const ref = allocator.assign('c', `s${elem.selector}`, 'cursor-interactive', elem.text);
           const locator = target.locator(elem.selector);
           refs.set(ref, { locator, role: 'cursor-interactive', name: elem.text });
           output.push(`@${ref} [${elem.reason}] "${elem.text}"`);
@@ -351,8 +388,13 @@ export async function snapshot(
     }
   }
 
+  // Only a body-rooted snapshot sees the whole page, so only it may forget
+  // identities (a modal or --selector look must not renumber the rest).
+  if (!opts.selector && !modalScoped) allocator.prune(alive);
+
+  const scoped = Boolean(opts.selector) || modalScoped;
   if (output.length === 0) {
-    return { text: '(no interactive elements found)', refs, count: 0 };
+    return { text: '(no interactive elements found)', refs, count: 0, scoped };
   }
-  return { text: output.join('\n'), refs, count: refs.size };
+  return { text: output.join('\n'), refs, count: refs.size, scoped };
 }

@@ -181,7 +181,7 @@ ghax bridge control --tab-id <n>            # or point it at a specific tab (see
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
-Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
+Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax goto data:...` is refused over the bridge (Chrome blocks extensions from opening `data:` URLs); serve the page over http instead. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
 
 **Keeping the extension current — no click in edge://extensions.** After a `git pull` + `npm run build`, the extension's service worker is still running the OLD code and has cached the old `extension/build-info.json` for its own lifetime — `ghax version --full` will show it reporting a stale (or missing) sha until something makes it reload.
 
@@ -203,6 +203,16 @@ ghax attach --extension --browser edge   # only Edge may bind; others park
 ```
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
+
+**Why is this verb slow?** Every bridge command is a relay hop, so call count is usually the answer:
+
+```bash
+ghax snapshot -i --trace       # stderr: trace: 7 cdp calls, 41.2 ms cdp, 55.0 ms handler (bridge); top: ...
+ghax bridge stats              # per-method totals since attach, heaviest first
+ghax bridge stats --reset      # print, then zero the counters
+```
+
+`--trace` works on any command and either transport; stdout is unchanged.
 
 **Several agents, one browser.** The other axis: two agents driving *different tabs of the same real session*. Each agent gets its own daemon (its own `GHAX_STATE_FILE`, per the isolation rule below), the daemons auto-pick adjacent bridge ports, and the extension holds one connection and one debugger attachment per daemon. No browser-side configuration — the extension scans the port window the daemons allocate from.
 
@@ -226,6 +236,8 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 ### Snapshot and interact
 
 - Accessibility-tree snapshots with `@e<n>` refs. Click by role and name, not brittle CSS selectors.
+- Snapshots print at most 250 refs / 32 KB by default and end with `… N more refs omitted` when they cut, so a huge page doesn't flood an agent's context. Every ref stays clickable. Narrow with `--selector`/`--depth`, or lift it with `--max-refs <n>`, `--max-chars <n>`, `--no-cap`.
+- Stable refs on both transports. On CDP a ref is minted by Playwright and cached on the element; over the bridge the daemon keeps the same mapping itself. Either way `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
 - Shadow-DOM traversal. Chain selectors (`host >> inner`) descend into open shadow roots for custom-element apps (Lit, Shoelace, web components).
 - Framework-safe `fill`. Native-setter plus `input` event for React, explicit `blur` for Angular validators, `contenteditable` paths for Material chip inputs and rich editors, and Monaco-aware — routes into `monaco.editor.getEditors()`/`setValue()` when the target lives inside a `.monaco-editor` (Datto RMM, Splunk, Grafana, Postman, GitLab Web IDE).
@@ -250,20 +262,37 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
 - `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect.
 
+### Clicks that refuse to guess
+
+`click`, `fill` and `upload` check the target in the page before acting,
+using Playwright's rules on both transports. A cookie banner over the
+button, a disabled or `aria-disabled` control, an `inert` subtree behind a
+modal, or a hidden element fails with the reason and the element in the
+way, instead of reporting success:
+
+```
+$ ghax click @e7
+ghax: click @e7: covered by div#consent.banner "Accept cookies"
+hint: something is on top of it (div#consent.banner "Accept cookies"): dismiss it, click that instead, or pass --force
+```
+
+`--force` skips the checks. A ref whose element was re-rendered away fails
+as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
+
 ### Downloads
 
-- Attached-browser downloads behave like normal browsing: they land in the
-  real `~/Downloads` under the site-suggested filename with its extension —
-  not as extension-less GUIDs in a Playwright temp dir. (ghax re-asserts
-  sane CDP `Browser.setDownloadBehavior` after attach, undoing Playwright's
-  `connectOverCDP` hijack.)
+- Attached-browser downloads behave like normal browsing: they go wherever
+  the browser is set to save them, under the site-suggested filename with
+  its extension. ghax attaches with Playwright's `noDefaults`, so Playwright
+  no longer rewrites the download setting, and ghax itself only switches on
+  download events.
 - `ghax attach --downloads-dir <path>` redirects downloads to a chosen dir.
 - `ghax downloads [--last N]` lists captured downloads: url, filename, final
   path, state, byte counts, and timestamps.
 
 ### Execution patterns
 
-- `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots between ref-using steps, so a mid-plan combobox reshuffle doesn't break later refs.
+- `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots before a ref-using step when the page changed since the last snapshot, so a mid-plan combobox reshuffle doesn't break later refs and a quiet page doesn't pay for a snapshot per step. Each ref step reports `autoSnapshot: "skipped"` or `"taken"`.
 - `ghax chain` reads the same shape from stdin for ad-hoc flows.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]` mutates the running page, measures a result, and screenshots in one call. Revert = reload.
 - `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.

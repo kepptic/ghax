@@ -158,6 +158,14 @@ it.
 runs gives a useful error (or triggers a launch with `--launch`),
 instead of silently attaching to Edge.
 
+Playwright attaches with `connectOverCDP(url, { noDefaults: true })`.
+Without it, Playwright treats the user's existing default context like one
+it launched: it rewrites download behaviour and turns on focus and media
+emulation. The daemon's own browser-level session makes one
+`Browser.setDownloadBehavior` call at attach (`allow` + `--downloads-dir`,
+or the browser's `default`), always with `eventsEnabled` so the
+`downloads` verb gets `Browser.downloadWillBegin/Progress`.
+
 ## Ref resolution
 
 `ghax snapshot -i` builds an accessibility tree and assigns `@e<n>` refs
@@ -165,15 +173,74 @@ instead of silently attaching to Edge.
 map lives on the daemon's active tab. `ghax click @e3` looks up `@e3`
 against that map and drives a Playwright locator.
 
-Refs survive until the next snapshot — and only on the tab they were
-taken on. `tab <id>` and `new-window` clear the ref map when the active
-page changes, so a stale `@e3` from a previous tab can't silently
-resolve against the wrong DOM. If the DOM changed and you run
-`click @e3`, Playwright fails with a clear "no element" error — fix by
-re-snapshotting.
+On the CDP transport the refs are Playwright's own.
+`src/snapshot.ts` calls `rootLocator.ariaSnapshotJSON({ mode: 'ai' })`,
+which mints `e<n>` for every visible node that receives pointer events
+and caches `{role, name, ref}` on the element (`_ariaRef`, injected
+`ariaSnapshot.ts`). The next snapshot reuses the cached ref while role
+and name are unchanged, so refs are stable across re-snapshots and
+sparse in the printed output. The counter is per frame and per document,
+so it restarts on navigation. Each registered ref is the locator
+`aria-ref=e<n>`, whose engine resolves only against the LAST
+ariaSnapshot taken in that frame (`_lastAriaSnapshotForQuery`), requires
+`isConnected`, and returns at most one element. Two consequences:
+
+- `snapshot.ts` must remain the daemon's only caller of `ariaSnapshot`
+  or `ariaSnapshotJSON`. Any other call would silently replace the cache
+  and orphan the user's refs.
+- A locator-scoped snapshot (modal, `--selector`) sets the cache to that
+  subtree, so modal scoping needs no locator re-rooting any more.
+
+`resolveRef` checks `count() === 0` before acting and fails with "not
+found in the latest snapshot ... Run 'ghax snapshot' first", so a gone
+or renamed element never waits out an action timeout or lands on a
+neighbour. Playwright prefixes refs with `f<seq>` for iframes AND for
+the main frame once it has navigated away from a real document (it
+renumbers the main frame so old refs can't resolve in the new one). ghax
+prints and keys the `e<n>` part, keeps the full string in the `aria-ref=`
+locator, and does not register refs inside `iframe` subtrees. Because the cache semantics are undocumented, Playwright is
+pinned to an exact version and the smoke suite has checks that fail if a
+bump changes them (stable across insertion, stale after removal, modal
+scope).
+
+Printed numbers are ghax's own, from `ctx.refRegistry`
+(`src/ref-registry.ts`): one monotonic counter per prefix for the
+daemon's lifetime, keyed by (freshness-marker document id, transport key:
+`p<playwright ref>`, `b<backendNodeId>`, cursor ids). A tab change or
+navigation forgets identities but keeps the counters, so a number is
+never handed to a second element, and `docOf(ref)` lets `batch` refuse a
+ref minted on a document that is no longer loaded (`BRIDGE_REF_STALE`).
+
+Over the bridge the daemon keeps the same promise itself:
+the registry keys a backend node id to `{ref, role, name}`, a
+snapshot reuses the ref while role and name match and mints a new one
+otherwise, and unscoped snapshots prune ids that left the AX tree
+(`--selector` snapshots never prune). `@c` refs use the page registry's
+per-element id as their number. The map resets with the ref map.
+
+`ghax batch` skips its automatic re-snapshot when nothing could have moved
+a ref. Each snapshot first reads a freshness marker,
+`window.__ghaxMark` (per-document random id + a MutationObserver count of
+childList/characterData and the attributes behind role, name, visibility
+and state, observed in every open shadow root; roots attached later are
+found by rescanning open roots on each read and count as a change; no
+page prototype is patched) joined with `location.href`, and stores it as
+`ctx.lastSnapshotMarker` (null after a `--selector` or modal-scoped
+snapshot, whose ref map is partial). Before a ref step, batch re-reads it and
+re-snapshots only on a mismatch or a failed read. On a match it still
+rechecks each step ref's role and name (bridge:
+`Accessibility.getPartialAXTree`; CDP: the `aria-ref` locator AND
+`getByRole(role, {name, exact})`) and re-snapshots if one moved. The marker is read
+before the snapshot, so a change during the snapshot errs toward an extra
+re-snapshot. Steps report `autoSnapshot: "skipped" | "taken"`.
+
+Refs die on tab change: `tab <id>` and `new-window` clear the ref map
+when the active page changes, so a stale `@e3` from a previous tab can't
+silently resolve against the wrong DOM.
 
 `ghax batch` skips that re-snapshotting ceremony for you: when a step
-inside a batch plan references an `@e<n>` ref, the daemon auto-runs a
+inside a batch plan references an `@e<n>` ref and the page changed since
+the last snapshot (freshness marker, below), the daemon auto-runs a
 fresh snapshot first and resolves the ref against the current DOM.
 That's the main reason batch exists — on framework-heavy forms where
 an earlier step (like opening a combobox) reshuffles the ARIA tree,
@@ -186,10 +253,45 @@ element. Opt out with `--no-auto-snapshot`.
 as the new root instead of inheriting `aria-hidden="true"` from the
 outer app. `--no-dialog-scope` falls back to body-rooted.
 
+Over the bridge, `snapshot` is a constant-cost operation: three domain
+enables, one evaluate + `describeNode` (+ fire-and-forget release) to
+pick the root (`--selector`, top-most modal, or body), one
+`Accessibility.getFullAXTree`, and one evaluate for the cursor pass.
+Nothing is written into the DOM. `@e` refs keep the AX node's backend id;
+`@c` refs keep an id into `window.__ghax.nodes` in ghax's isolated world (a `WeakMap` element to
+id, so the same element keeps its id across snapshots, plus an id to
+element `Map` pruned of disconnected nodes). A cursor ref is looked up
+only when a verb acts on it; a missing registry or a disconnected node is
+`BRIDGE_REF_STALE`, never a best guess.
+
+Before acting, bridge `click`/`fill`/`upload` run `src/actionability.ts`
+in the page (one `Runtime.callFunctionOn` on the resolved node). For
+click and upload the node is resolved into ghax's isolated world
+(`bridgeIsolatedWorld`: `Page.createIsolatedWorld` once per document,
+dropped on main-frame navigation or context teardown, re-created once on a
+stale-context error), which is also where the cursor registry, root
+selection and `--selector` lookups run: the page shares the DOM with that
+world but not its JS prototypes or globals. Fill resolves in the main world
+for the page's `monaco` global. It is a
+port of Playwright's rules, not its code: `retarget('button-link')`,
+`getAriaDisabled` (native disabled, `fieldset[disabled]` minus its first
+legend, inherited `aria-disabled` through shadow hosts for the roles in
+`kAriaDisabledRoles`), `inert`, read-only for fill, and for click
+`checkVisibility` (no opacity check, `display:contents` via its first
+rendered child, as in Playwright's `computeBox`), scroll to centre, and
+`expectHitTarget`'s root-chain hit test, repeated once after centring
+when the first test finds a coverer (sticky headers). The function is shipped with `toString()`, so it must stay
+self-contained. A refusal is `BRIDGE_TARGET_NOT_ACTIONABLE` with a
+reason; a node that no longer exists is `BRIDGE_REF_STALE`. `--force`
+skips everything but "connected" and the rect. The Playwright path runs
+the same function in `precheck` mode (inherited `aria-disabled` and
+`inert` only) because Playwright's own actionability waits out its timeout
+on those two instead of failing.
+
 Shadow DOM: the cursor-interactive pass walks open shadow roots and
 emits Playwright chain selectors (`host >> inner`). This is the only
 form of selector Playwright accepts for descending into shadow trees
-as of Playwright 1.58+.
+(checked against the pinned 1.63.0).
 
 ## Extension internals
 
@@ -300,6 +402,27 @@ The daemon doesn't care whether commands arrive from fresh CLI
 invocations or from a long-running shell process. Same HTTP RPC,
 same handlers, same state.
 
+## CDP instrumentation
+
+`src/cdp-stats.ts` keeps per-method counters (`calls`, `errors`,
+`totalMs`, `maxMs`). The bridge owns one instance and records every
+command in `Bridge.send()`, so a command queued while the extension
+reconnects is counted once, wait included. `ghax bridge stats` reads it.
+
+On the CDP transport a module-level instance counts only the CDP
+sessions the daemon opens itself (`traceSend` wraps `newCDPSession` /
+`newBrowserCDPSession` results, and `CdpTarget.send` in the raw pool).
+Playwright's own protocol traffic goes through its private connection
+object and is not counted. To see it, start the daemon with Playwright's
+debug logger: `DEBUG=pw:protocol DEBUG_FILE=/tmp/pw-protocol.log ghax
+attach` (attach passes its environment through to the daemon).
+
+`--trace` is stripped from argv by the CLI and sent as `opts.trace`. The
+daemon snapshots the relevant counters before the handler runs, diffs
+after, and returns `trace: {transport, handlerMs, cdpCalls, cdpMs,
+byMethod}` beside `data` in the RPC envelope, so the printed result never
+changes. `rpc.rs` turns it into one stderr line.
+
 ## Disconnect recovery
 
 When the user closes their browser (or a scratch browser crashes),
@@ -315,6 +438,19 @@ disconnect errors — `"browser has been closed"`, `"Target page has been
 closed"`, anything matching `/disconnected/i` — into a one-liner:
 `"browser has disconnected — run \`ghax attach\` to reconnect"`. Exit
 code is `NOT_ATTACHED` so wrapper scripts can branch on it.
+
+Between the CLI and the daemon, `rpc.rs` retries a failed request once,
+gated by `rpc::retry_class_for`. Reads (an explicit allowlist) retry on a
+connect or request error, never after a timeout (the daemon is still
+running the first attempt). Everything else retries only when the
+TCP connect failed, because the daemon finishes a command even if the CLI
+stops waiting: a timed-out `click` may already have clicked. Unknown verbs
+default to the no-retry side. Every call has an HTTP timeout
+(`rpc::timeout_for`): a verb's own `--timeout` plus 30 s, else
+`GHAX_RPC_TIMEOUT` if set, else 120 s (sized up for `batch`, `perf`,
+`profile`, `ext hot-reload`). Nothing is unbounded unless asked. The daemon's own replay after a bridge drop
+is a separate table, `BRIDGE_RETRY_SAFE` (see
+`docs/design/plan/08-bridge-reliability.md` §2.3).
 
 ## What lives where
 
@@ -336,6 +472,7 @@ code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 |------|-------|---------|
 | `src/daemon.ts` | ~1700 | RPC dispatch, all daemon-side handlers, SSE endpoints, capture wiring |
 | `src/cdp-client.ts` | ~350 | Target pool, WebSocket management, raw CDP helpers |
+| `src/cdp-stats.ts` | ~100 | Per-method CDP call counters behind `bridge stats` and `--trace` |
 | `src/snapshot.ts` | ~500 | a11y tree walker, ref assignment, cursor-interactive + shadow-DOM pass |
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
 | `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |

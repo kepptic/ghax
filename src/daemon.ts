@@ -44,18 +44,28 @@ import { resolveConfig, type DaemonState, writeState, readState } from './config
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
+import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
+import { actionability } from './actionability';
+import { applySnapshotBudget, budgetFromOpts, type BudgetedText } from './snapshot-budget';
+import { RefRegistry, docIdOfMarker } from './ref-registry';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
   Bridge,
   BridgeInterrupted,
+  BridgeTypedError,
+  notActionableError,
   bridgeBox,
+  bridgeGuard,
+  bridgeReleaseHandle,
+  bridgeResolveHandle,
   bridgeCallOn,
   bridgeEvaluate,
   bridgeGoto,
   bridgeResolveSelector,
   bridgeSnapshot,
   bridgeText,
+  bridgeRefStillMatches,
   isStaleContextError,
   type BridgeExtensionInfo,
   type BridgeRef,
@@ -129,6 +139,13 @@ interface Ctx {
   activePageId: string | null;
   refs: Map<string, RefEntry>;
   bridgeRefs: Map<string, BridgeRef>;
+  // Daemon-wide ref numbering for both transports: stable per element,
+  // never reused, and remembers which document minted each ref.
+  refRegistry: RefRegistry;
+  // Page freshness marker (`docId|mutations|href`) read just BEFORE the last
+  // snapshot. `batch` compares it to decide whether a ref step needs a
+  // re-snapshot. Null whenever the ref map is cleared.
+  lastSnapshotMarker: string | null;
   bridgeNetworkRequests: Map<string, NetworkEntry>;
   // Execution-context tracking (plan §2.5). `chrome.debugger` attaches to the
   // tab's top-level target, so we only ever see the main frame — this is NOT
@@ -156,10 +173,12 @@ interface Ctx {
   // Directory downloads land in (the user's real ~/Downloads by default,
   // overridable via `ghax attach --downloads-dir`).
   downloadsDir: string;
+  // True when `ghax attach --downloads-dir` set GHAX_DOWNLOADS_DIR. Only then
+  // does the daemon override the browser's own download location.
+  downloadsDirExplicit: boolean;
   downloads: CircularBuffer<DownloadEntry>;
-  // Long-lived browser-level CDP session we own. Playwright's connectOverCDP
-  // hijacks download behaviour (allowAndName → GUID files in a temp dir);
-  // we keep this session to re-assert sane behaviour and receive events.
+  // Long-lived browser-level CDP session we own: sets download behaviour
+  // once at attach and receives the download events for `ghax downloads`.
   browserSession: CDPSession | null;
 }
 
@@ -176,6 +195,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
+  'bridge.stats',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
 
@@ -183,8 +203,8 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
  * Verbs whose ENTIRE operation can be re-run after a bridge reconnect.
  *
  * Retry is classified per *operation*, never per CDP command: a verb like
- * `snapshot` enables domains, strips old ref tags, releases an object group,
- * reads the AX tree, then writes fresh tags (see bridgeSnapshot in bridge.ts).
+ * `snapshot` enables domains, resolves a root, reads the AX tree, then
+ * registers cursor refs page-side (see bridgeSnapshot in bridge.ts).
  * Resuming from an interrupted middle command could splice two documents or
  * two ref generations together. Restarting the whole thing against a freshly
  * re-attached tab is safe; resuming a fragment is not.
@@ -230,6 +250,9 @@ function register(name: string, fn: Handler) {
         (e as any).hint = 'Verify the page with `ghax snapshot`; ghax will not replay an action that may have mutated the page.';
         throw e;
       }
+      // Already typed (stale ref, not actionable): its code and hint are the
+      // specific ones, so never let the generic message matchers re-wrap it.
+      if (err instanceof BridgeTypedError) throw err;
       // Decorate recognized failures (unattachable tab, no extension) with a
       // code + recovery hint. Unrecognized errors pass through unchanged.
       const wrapped = bridgeError(err, {
@@ -268,7 +291,7 @@ async function pageTargetId(page: Page): Promise<string | null> {
   const cached = pageTargetIds.get(page);
   if (cached) return cached;
   try {
-    const session = await page.context().newCDPSession(page);
+    const session = traceSend(await page.context().newCDPSession(page));
     const info = await session.send('Target.getTargetInfo');
     await session.detach().catch(() => undefined);
     const id = (info as any)?.targetInfo?.targetId ?? null;
@@ -876,11 +899,20 @@ async function enableBridgeDomains(ctx: Ctx): Promise<void> {
   ]).catch(() => undefined);
 }
 
-function resolveRef(ctx: Ctx, target: string, page: Page): Locator {
+async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator> {
   if (target.startsWith('@')) {
     const key = target.slice(1);
     const entry = ctx.refs.get(key);
     if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
+    // An `aria-ref=` locator matches nothing once its element is gone or
+    // renamed, or once a newer ariaSnapshot replaced Playwright's ref cache.
+    // Fail here with the same wording instead of letting an action wait out
+    // its timeout (or, for the @c selector chains, hit a different element).
+    if (await entry.locator.count() === 0) {
+      throw new Error(
+        `Ref ${target} not found in the latest snapshot (element gone, renamed, or a newer snapshot replaced it). Run 'ghax snapshot' first.`,
+      );
+    }
     return entry.locator;
   }
   return page.locator(target);
@@ -894,6 +926,100 @@ function requireBridge(ctx: Ctx): Bridge {
 function clearSnapshotRefs(ctx: Ctx): void {
   ctx.refs.clear();
   ctx.bridgeRefs.clear();
+  // Forget identities but keep the counters: a number is never reused.
+  ctx.refRegistry.clear();
+  ctx.lastSnapshotMarker = null;
+}
+
+/**
+ * One cheap page read that changes whenever the DOM could have moved refs:
+ * a per-document id, a MutationObserver counter (installed on first read),
+ * and the URL. Same expression on both transports.
+ *
+ * Observed: childList, characterData, and the attributes that change what
+ * the AX tree or the ref map would say (role, names, visibility, disabled,
+ * open/expanded). Class and style churn is ignored on purpose: spinners and
+ * hover effects would make the marker useless.
+ */
+const FRESHNESS_MARKER_JS = `(() => {
+  let m = window.__ghaxMark;
+  const fresh = !m || typeof m.mut !== 'number' || typeof m.docId !== 'string' || typeof m.watch !== 'function';
+  if (fresh) {
+    const state = { docId: Math.random().toString(36).slice(2), mut: 0 };
+    const seen = new WeakSet();
+    const obs = new MutationObserver((records) => { state.mut += records.length; });
+    const opts = {
+      childList: true, characterData: true, subtree: true, attributes: true,
+      attributeFilter: ['role', 'aria-label', 'aria-labelledby', 'aria-hidden', 'hidden', 'disabled',
+        'aria-disabled', 'open', 'aria-expanded', 'aria-pressed', 'aria-checked', 'aria-selected',
+        'value', 'title', 'alt', 'placeholder'],
+    };
+    // MutationObserver does not see into shadow roots, so each open root
+    // gets its own observation. Roots attached after install are found by
+    // rescanning on every read (no page prototype is patched: a wrapped
+    // attachShadow is visible to fingerprinting scripts in a real session).
+    // Finding one counts as a change. Closed roots are invisible here; the
+    // role+name recheck in batch backs that up.
+    state.watch = (root, counts) => {
+      if (seen.has(root)) return;
+      seen.add(root);
+      obs.observe(root, opts);
+      if (counts) state.mut++;
+    };
+    state.scan = (counts) => {
+      const walk = (root) => {
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) { state.watch(el.shadowRoot, counts); walk(el.shadowRoot); }
+        }
+      };
+      walk(document);
+    };
+    state.watch(document, false);
+    state.scan(false);
+    Object.defineProperty(window, '__ghaxMark', { value: state, configurable: true });
+    m = state;
+  } else {
+    m.scan(true);
+  }
+  return m.docId + '|' + m.mut + '|' + location.href;
+})()`;
+
+/**
+ * Belt and braces for a skipped auto-snapshot: the marker cannot see
+ * everything (closed shadow roots from before it was installed, name
+ * sources it doesn't observe), so before acting on a ref whose snapshot was
+ * trusted, confirm the element still has the role and name it was printed
+ * with. Cursor refs carry no AX identity and are not rechecked.
+ */
+async function refStillMatches(ctx: Ctx, ref: string): Promise<boolean> {
+  const key = ref.slice(1);
+  try {
+    if (ctx.bridgeMode) {
+      const entry = ctx.bridgeRefs.get(key);
+      if (!entry) return false;
+      return await bridgeRefStillMatches(requireBridge(ctx), entry);
+    }
+    const entry = ctx.refs.get(key);
+    if (!entry) return false;
+    if (entry.role === 'cursor-interactive') return true;
+    const page = await activePage(ctx);
+    const byRole = page.getByRole(entry.role as Parameters<Page['getByRole']>[0], entry.name ? { name: entry.name, exact: true } : undefined);
+    return (await entry.locator.and(byRole).count()) === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function readFreshnessMarker(ctx: Ctx): Promise<string | null> {
+  try {
+    const v = ctx.bridgeMode
+      ? await bridgeEval(ctx, FRESHNESS_MARKER_JS)
+      : await (await activePage(ctx)).evaluate(FRESHNESS_MARKER_JS);
+    return typeof v === 'string' ? v : null;
+  } catch {
+    // No marker means "unknown", which batch treats as stale. Never a skip.
+    return null;
+  }
 }
 
 async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null): Promise<BridgeTab[]> {
@@ -945,15 +1071,11 @@ register('batch', async (ctx, args, opts) => {
   const snapshotHandler = handlers.get('snapshot');
   const results: Array<Record<string, unknown>> = [];
 
-  const usesRef = (step: { args?: unknown[]; opts?: Record<string, unknown> }) => {
-    const inArgs = Array.isArray(step.args)
-      ? step.args.some((v) => typeof v === 'string' && v.startsWith('@e'))
-      : false;
-    const inOpts = step.opts
-      ? Object.values(step.opts).some((v) => typeof v === 'string' && v.startsWith('@e'))
-      : false;
-    return inArgs || inOpts;
-  };
+  const REF_ARG = /^@[ec]\d+$/;
+  const refsOf = (step: { args?: unknown[]; opts?: Record<string, unknown> }): string[] => [
+    ...(Array.isArray(step.args) ? step.args : []),
+    ...Object.values(step.opts ?? {}),
+  ].filter((v): v is string => typeof v === 'string' && REF_ARG.test(v));
 
   for (const raw of steps) {
     if (!raw || typeof raw !== 'object') {
@@ -976,21 +1098,61 @@ register('batch', async (ctx, args, opts) => {
       if (stopOnError) break;
       continue;
     }
-    // Refresh the ref map before any step that uses `@e<n>` — so the
-    // caller doesn't have to interleave manual snapshots.
-    if (autoSnapshot && snapshotHandler && usesRef({ args: stepArgs, opts: stepOpts })) {
-      try {
-        await snapshotHandler(ctx, [], { interactive: true });
-      } catch {
-        // A snapshot failure is informational — the step itself will
-        // surface the concrete "ref not found" error if it's still bad.
+    // Refresh the ref map before any step that uses `@e<n>`, so the caller
+    // doesn't have to interleave manual snapshots. Skipped when the page's
+    // freshness marker is unchanged since the last snapshot: nothing that
+    // could move a ref has happened, and the re-snapshot was the costliest
+    // part of a ref step, especially over the bridge.
+    let autoSnap: 'skipped' | 'taken' | undefined;
+    const stepRefs = refsOf({ args: stepArgs, opts: stepOpts });
+    const current = stepRefs.length > 0 ? await readFreshnessMarker(ctx) : null;
+    // A ref minted on a document that is no longer loaded must fail, never
+    // be re-resolved: after `click @e3` navigates, the plan's `@e5` meant
+    // page A's element, and an auto-snapshot of page B must not answer it.
+    const docNow = docIdOfMarker(current);
+    const foreign = docNow
+      ? stepRefs.find((r) => {
+        const d = ctx.refRegistry.docOf(r.slice(1));
+        return d !== undefined && !d.startsWith('unknown:') && d !== docNow;
+      })
+      : undefined;
+    if (foreign) {
+      results.push({
+        cmd,
+        ok: false,
+        code: 'BRIDGE_REF_STALE',
+        error: `${foreign} was taken on a page that is no longer loaded (the tab navigated since). `
+          + `Run 'ghax snapshot -i' and use a fresh ref.`,
+      });
+      if (stopOnError) break;
+      continue;
+    }
+    if (autoSnapshot && snapshotHandler && stepRefs.length > 0) {
+      let fresh = current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker;
+      if (fresh) {
+        for (const r of stepRefs) {
+          if (!(await refStillMatches(ctx, r))) { fresh = false; break; }
+        }
+      }
+      if (fresh) {
+        autoSnap = 'skipped';
+      } else {
+        autoSnap = 'taken';
+        try {
+          // Uncapped: the ref map is what matters here, and nobody reads the text.
+          await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
+        } catch {
+          // A snapshot failure is informational — the step itself will
+          // surface the concrete "ref not found" error if it's still bad.
+        }
       }
     }
+    const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
     try {
       const data = await handler(ctx, stepArgs, stepOpts);
-      results.push({ cmd, ok: true, data });
+      results.push({ cmd, ok: true, data, ...snapField });
     } catch (err) {
-      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err) });
+      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ...snapField });
       if (stopOnError) break;
     }
   }
@@ -1118,7 +1280,7 @@ register('tab', async (ctx, args, opts) => {
         // tabs invalidates them — otherwise `@e3` after `tab <other>` would
         // resolve against the previous tab's locator and land in the wrong
         // DOM. The CLAUDE.md invariant is explicit about this.
-        ctx.refs.clear();
+        clearSnapshotRefs(ctx);
       }
       ctx.activePageId = tid;
       await instrumentPage(ctx, p);
@@ -1181,7 +1343,7 @@ register('newWindow', async (ctx, args) => {
   if (!browser) throw new Error('newWindow: no browser available');
   const context = browser.contexts()[0];
   if (!context) throw new Error('newWindow: no browser context available');
-  const cdpSession = await browser.newBrowserCDPSession();
+  const cdpSession = traceSend(await browser.newBrowserCDPSession());
   try {
     // Race-free: subscribe to the "page" event BEFORE firing createTarget.
     // Playwright surfaces the new page as soon as the target becomes
@@ -1201,15 +1363,9 @@ register('newWindow', async (ctx, args) => {
     // Auto-lock this tab as the active one so subsequent commands land
     // in the freshly-created window without an extra `ghax tab` step.
     // Same refs-invalidation rule as the `tab` handler.
-    if (ctx.activePageId !== id) ctx.refs.clear();
+    if (ctx.activePageId !== id) clearSnapshotRefs(ctx);
     ctx.activePageId = id;
     await instrumentPage(ctx, newPage);
-    // Re-assert sane download behaviour. Playwright re-runs
-    // `Browser.setDownloadBehavior` (allowAndName → temp dir) whenever it
-    // initialises a browser context; a new OS-level window created via the
-    // same default context does *not* trigger that, but re-asserting here is
-    // cheap insurance against any Playwright/Chromium path that resets it.
-    await assertDownloadBehavior(ctx).catch(() => undefined);
     return {
       id,
       url: newPage.url(),
@@ -1222,17 +1378,18 @@ register('newWindow', async (ctx, args) => {
 
 // ─── Downloads ─────────────────────────────────────────────────
 //
-// Playwright's `connectOverCDP` hijacks the profile's download settings:
-// on every browser-context init it issues `Browser.setDownloadBehavior`
-// with behavior `allowAndName` and downloadPath pointed at its own temp
-// `playwright-artifacts-*` dir. Result: files land as extension-less GUIDs
-// in /var/folders/**, not `~/Downloads/report.csv`.
-//
-// We undo this by owning a long-lived browser-level CDP session and
-// re-asserting `behavior: 'allow'` (honours the site-suggested filename +
-// extension) with downloadPath = the user's real Downloads dir. 'allow'
-// (not 'allowAndName') is the key: Chromium then writes the file under its
-// real name and handles collision de-duping (`name (1).ext`) itself.
+// Without `noDefaults`, Playwright's `connectOverCDP` rewrote the profile's
+// download settings on context init (`allowAndName` into its temp
+// `playwright-artifacts-*` dir, so files landed as extension-less GUIDs) and
+// the daemon had to undo it after attach and after every new window. Since
+// Playwright 1.60, `noDefaults: true` leaves the browser's own setting alone
+// (acceptDownloads 'internal-browser-default'; crBrowser skips
+// setDownloadBehavior), so the daemon now makes ONE call at attach, on its
+// own long-lived browser session: `allow` into `--downloads-dir` when one was
+// given, else the browser's `default`, and in both cases `eventsEnabled` so
+// `Browser.downloadWillBegin/Progress` feed this verb. 'allow' (not
+// 'allowAndName') keeps the site-suggested name and Chromium's own
+// `name (1).ext` de-duping.
 register('downloads', async (ctx, _args, opts) => {
   const n = typeof opts.last === 'number' ? opts.last : Number(opts.last ?? 20);
   const limit = Number.isFinite(n) && n > 0 ? n : 20;
@@ -1663,6 +1820,22 @@ register('bridge.instances', async (ctx) => {
   };
 });
 
+// `ghax bridge stats` — per-method counters for every CDP command relayed
+// through the extension since attach (or the last --reset). The first place to
+// look when a bridge verb feels slow: the relay hop dominates, so call count is
+// usually the whole story.
+register('bridge.stats', async (ctx, _args, opts) => {
+  if (!ctx.bridgeMode || !ctx.bridge) {
+    throw new DaemonError(
+      'bridge stats requires bridge mode (`ghax attach --extension`). On the CDP transport, add --trace to a command for its CDP call count.',
+      2,
+    );
+  }
+  const snap = ctx.bridge.stats();
+  if (opts.reset === true) ctx.bridge.resetStats();
+  return { since: snap.since, reset: opts.reset === true, methods: snap.methods };
+});
+
 // `ghax bridge use <id|browser|label>` — explicit takeover. Rebinding happens
 // over live sockets (a `role` message), so neither side disconnects.
 register('bridge.use', async (ctx, args, opts) => {
@@ -1698,12 +1871,12 @@ register('screenshot', async (ctx, args, opts) => {
   const fullPage = Boolean(opts.fullPage || opts['full-page']);
   if (ctx.bridgeMode) {
     const ref = target ? await resolveBridgeTarget(ctx, target) : null;
-    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref);
+    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref, target ?? 'element');
     return { path: outPath };
   }
   const page = await activePage(ctx);
   if (target) {
-    await resolveRef(ctx, target, page).screenshot({ path: outPath });
+    await (await resolveRef(ctx, target, page)).screenshot({ path: outPath });
   } else {
     await page.screenshot({ path: outPath, fullPage });
   }
@@ -1715,11 +1888,12 @@ async function captureBridgeScreenshot(
   outPath: string,
   fullPage: boolean,
   ref: BridgeRef | null = null,
+  label = 'element',
 ): Promise<void> {
   await bridge.send('Page.enable');
   let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
   if (ref) {
-    clip = { ...(await bridgeBox(bridge, ref)), scale: 1 };
+    clip = { ...(await bridgeBox(bridge, ref, label)), scale: 1 };
   } else if (fullPage) {
     const metrics = await bridge.send('Page.getLayoutMetrics') as {
       cssContentSize?: { x?: number; y?: number; width?: number; height?: number };
@@ -1802,7 +1976,7 @@ register('box', async (ctx, args) => {
   if (!target) throw new Error('Usage: box <@ref|selector>');
   if (ctx.bridgeMode) {
     try {
-      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target));
+      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target), target);
     } catch (err) {
       if (String((err as Error)?.message ?? err).includes('element not visible')) {
         throw new Error(`${target}: element not visible or not in layout`);
@@ -1811,13 +1985,37 @@ register('box', async (ctx, args) => {
     }
   }
   const page = await activePage(ctx);
-  const locator = resolveRef(ctx, target, page);
+  const locator = await resolveRef(ctx, target, page);
   const box = await locator.first().boundingBox();
   if (!box) throw new Error(`${target}: element not visible or not in layout`);
   return box;
 });
 
+/**
+ * Budget fields for a snapshot RPC result. `count` is what was printed;
+ * `totalRefs` is every ref this snapshot found. The ref map holds all of
+ * them (the budget cuts only the text), and is replaced by the next
+ * snapshot like any other.
+ */
+function budgetFields(b: BudgetedText): Record<string, unknown> {
+  return {
+    text: b.text,
+    count: b.shownRefs,
+    totalRefs: b.totalRefs,
+    ...(b.omittedLines > 0 ? { omitted: { refs: b.omittedRefs, lines: b.omittedLines } } : {}),
+  };
+}
+
 register('snapshot', async (ctx, _args, opts) => {
+  const budget = budgetFromOpts(opts);
+  // Read BEFORE snapshotting: a mutation that lands mid-snapshot then shows
+  // up as a changed marker next time (a harmless re-snapshot), never as a
+  // false "unchanged".
+  const marker = await readFreshnessMarker(ctx);
+  // An unreadable marker gets a one-off id: its refs then never match any
+  // later document, which errs toward "stale", never toward a wrong element.
+  const docId = docIdOfMarker(marker) ?? `unknown:${crypto.randomUUID()}`;
+  const refAllocator = ctx.refRegistry.forDoc(docId);
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
@@ -1829,6 +2027,7 @@ register('snapshot', async (ctx, _args, opts) => {
       selector: opts.selector as string | undefined,
       cursorInteractive: Boolean(opts.cursorInteractive),
       dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
+      refs: refAllocator,
     });
     let result = await take();
     // Same suspicious-empty guard as `text`: almost no refs while the page is
@@ -1841,14 +2040,18 @@ register('snapshot', async (ctx, _args, opts) => {
     }
     ctx.refs.clear();
     ctx.bridgeRefs = result.refs;
+    // Only a whole-page snapshot may vouch for "unchanged since": after a
+    // --selector or modal snapshot the ref map holds that subtree only, and
+    // batch skipping its re-snapshot would turn any ref outside it into
+    // "not found".
+    ctx.lastSnapshotMarker = result.scoped ? null : marker;
     let annotatedPath: string | null = null;
     if (opts.annotate) {
       annotatedPath = (opts.output as string) || `/tmp/ghax-annotated-${Date.now()}.png`;
       await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
     }
     return {
-      text: result.text,
-      count: result.count,
+      ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
       ...(annotatedPath ? { annotatedPath } : {}),
       ...(possiblyIncomplete ? {
         possiblyIncomplete: true,
@@ -1866,8 +2069,11 @@ register('snapshot', async (ctx, _args, opts) => {
     // Default-on dialog scoping; callers opt out with --no-dialog-scope,
     // which the arg parser surfaces as `no-dialog-scope: true`.
     dialogScope: !(opts['no-dialog-scope'] || opts.noDialogScope),
+    refs: refAllocator,
   });
   ctx.refs = result.refs;
+  ctx.lastSnapshotMarker = result.scoped ? null : marker; // see the bridge branch
+
 
   let annotatedPath: string | null = null;
   if (opts.annotate) {
@@ -1876,8 +2082,7 @@ register('snapshot', async (ctx, _args, opts) => {
   }
 
   return {
-    text: result.text,
-    count: result.count,
+    ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
     ...(annotatedPath ? { annotatedPath } : {}),
   };
 });
@@ -1994,6 +2199,20 @@ async function annotateScreenshot(
   }
 }
 
+/**
+ * Playwright-path parity with the bridge guard (plan 10, settled decision 4).
+ * Playwright already refuses natively disabled and covered targets, but on
+ * an inherited aria-disabled or an inert ancestor it waits out its whole
+ * action timeout. This one evaluate turns that 30 s wait into the same typed
+ * BRIDGE_TARGET_NOT_ACTIONABLE the bridge raises. The code name is shared
+ * across transports on purpose so callers match one string.
+ */
+async function playwrightPrecheck(loc: Locator, label: string, kind: 'click' | 'fill', force: boolean): Promise<void> {
+  if (force) return;
+  const r = await loc.evaluate(actionability, { kind: 'precheck' as const, force: false });
+  if (!r.ok) throw notActionableError(label, kind, r);
+}
+
 // Click — Playwright's `loc.click()` resolves the moment the trusted mouse
 // event has been dispatched. That tells you "the click was sent" but says
 // nothing about whether the page reacted. Real-world failure mode: a
@@ -2018,6 +2237,9 @@ register('click', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   if (!target) throw new Error('Usage: click <@ref|selector>');
   const observe = opts.observe !== false && opts['no-observe'] !== true;
+  // --force skips the actionability guard (covered/disabled/hidden). Works as
+  // a batch step opt too: {"cmd":"click","args":["@e3"],"opts":{"force":true}}.
+  const force = opts.force === true;
   const observeMs = (() => {
     const raw = opts['observe-ms'] ?? opts.observeMs;
     if (raw === undefined) return 300;
@@ -2037,9 +2259,18 @@ register('click', async (ctx, args, opts) => {
       return { dialogs, url: location.href };
     })()`) as Promise<{ dialogs: number; url: string }>;
     const pre = observe ? await readState() : { dialogs: 0, url: '' };
-    const box = await bridgeBox(bridge, ref);
-    const x = box.x + box.width / 2;
-    const y = box.y + box.height / 2;
+    // One in-page call: guard, scroll into view, and the click point. A
+    // covered/disabled/hidden target fails here instead of clicking
+    // whatever sits on top of it.
+    const handle = await bridgeResolveHandle(bridge, ref, target);
+    let guard;
+    try {
+      ({ guard } = await bridgeGuard(bridge, handle, target, 'click', force));
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
+    const x = guard.x ?? 0;
+    const y = guard.y ?? 0;
     await bridge.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await bridge.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await bridge.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
@@ -2066,12 +2297,13 @@ register('click', async (ctx, args, opts) => {
   }
 
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
+  await playwrightPrecheck(loc, target, 'click', force);
 
   const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
   const preUrl = observe ? page.url() : '';
 
-  await loc.click();
+  await loc.click(force ? { force: true } : undefined);
 
   if (!observe) return { ok: true };
 
@@ -2110,15 +2342,21 @@ register('click', async (ctx, args, opts) => {
   };
 });
 
-register('fill', async (ctx, args) => {
+register('fill', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const value = String(args[1] ?? '');
   if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
+  const force = opts.force === true;
   if (ctx.bridgeMode) {
-    const result = await bridgeCallOn(
-      requireBridge(ctx),
-      await resolveBridgeTarget(ctx, target),
-      `function(v) {
+    // Guard (connected, not disabled/inert, not read-only) and the fill run
+    // in the same in-page call. No visibility or hit test on purpose: Monaco
+    // and hidden-but-scriptable inputs are legitimate fill targets.
+    const bridge = requireBridge(ctx);
+    // Main world on purpose: the Monaco path needs the page's own globals.
+    const handle = await bridgeResolveHandle(bridge, await resolveBridgeTarget(ctx, target), target, 'main');
+    let filled;
+    try {
+      filled = await bridgeGuard(bridge, handle, target, 'fill', force, { args: [value], fn: `function(v) {
         const start = this;
         const container = start.closest?.('.monaco-editor') || start.closest?.('[data-mode-id]');
         const root = container?.classList?.contains('monaco-editor') ? container : (container?.closest?.('.monaco-editor') || container);
@@ -2140,13 +2378,16 @@ register('fill', async (ctx, args) => {
         e.dispatchEvent(new Event('change', { bubbles: true }));
         e.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
         return {};
-      }`,
-      [value],
-    ) as { editor?: string } | undefined;
+      }` });
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
+    const result = filled.value as { editor?: string } | undefined;
     return result?.editor === 'monaco' ? { ok: true, editor: 'monaco' } : { ok: true };
   }
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
+  await playwrightPrecheck(loc, target, 'fill', force);
 
   // Monaco path — Datto RMM, Splunk, Grafana, Postman, and GitLab's Web IDE
   // all embed Monaco for script/query editors. Monaco renders its own
@@ -2268,7 +2509,7 @@ register('select', async (ctx, args, opts) => {
   }
 
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   const attempts: string[] = [];
 
   // ── (a) native <select> ──────────────────────────────────────
@@ -2502,9 +2743,9 @@ register('press', async (ctx, args) => {
 //
 // Bridge mode: same DOM.setFileInputFiles CDP call, just dispatched via
 // chrome.debugger instead of Playwright's local connectOverCDP transport.
-// `resolveBridgeTarget` already hands back the backendNodeId that
-// bridgeBox/bridgeCallOn use for click/fill, and DOM.setFileInputFiles
-// accepts backendNodeId directly — no objectId resolution needed. The one
+// The ref resolves to a Runtime object (the same handle click/fill use, so a
+// cursor ref works and a vanished node is BRIDGE_REF_STALE), which
+// DOM.setFileInputFiles accepts as `objectId`. The one
 // real difference from the non-bridge path: there is no Playwright to
 // resolve a relative path for you, and `path.resolve()` on the daemon side
 // would silently resolve against the DAEMON's cwd (captured when `ghax
@@ -2513,7 +2754,7 @@ register('press', async (ctx, args) => {
 // that happens to exist in the attach directory. So bridge mode requires
 // an absolute path and rejects anything else with an actionable error
 // instead of guessing.
-register('upload', async (ctx, args) => {
+register('upload', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const pathArg = String(args[1] ?? '');
   if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
@@ -2530,14 +2771,18 @@ register('upload', async (ctx, args) => {
       }
       if (!fs.existsSync(p)) throw new Error(`upload: file not found: ${p}`);
     }
-    await requireBridge(ctx).send('DOM.setFileInputFiles', {
-      backendNodeId: ref.backendNodeId,
-      files: paths,
-    });
+    const bridge = requireBridge(ctx);
+    const handle = await bridgeResolveHandle(bridge, ref, target);
+    try {
+      await bridgeGuard(bridge, handle, target, 'upload', opts.force === true);
+      await bridge.send('DOM.setFileInputFiles', { objectId: handle.objectId, files: paths });
+    } finally {
+      bridgeReleaseHandle(bridge, handle);
+    }
     return { ok: true, count: paths.length };
   }
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   await loc.setInputFiles(paths.length === 1 ? paths[0] : paths);
   return { ok: true, count: paths.length };
 });
@@ -2946,7 +3191,7 @@ register('is', async (ctx, args) => {
   const target = String(args[1] ?? '');
   if (!check || !target) throw new Error('Usage: is <visible|enabled|checked|hidden|disabled> <@ref|selector>');
   const page = await activePage(ctx);
-  const loc = resolveRef(ctx, target, page);
+  const loc = await resolveRef(ctx, target, page);
   let result: boolean;
   switch (check) {
     case 'visible':
@@ -3207,7 +3452,7 @@ async function withCdpSession<T>(
   page: Page,
   fn: (session: import('playwright').CDPSession) => Promise<T>,
 ): Promise<T> {
-  const session = await page.context().newCDPSession(page);
+  const session = traceSend(await page.context().newCDPSession(page));
   try {
     return await fn(session);
   } finally {
@@ -4005,20 +4250,19 @@ register('gesture.scroll', async (ctx, args) => {
 
 // ─── HTTP server ───────────────────────────────────────────────
 
-// Re-assert normal download behaviour on our owned browser-level CDP
-// session. Called after attach and after each new window. Uses `behavior:
-// 'allow'` so Chromium honours the site-suggested filename (with extension)
-// and writes into `ctx.downloadsDir`. No browserContextId → sets the
-// browser-level default, overriding Playwright's last per-default-context
-// write (the default context has no id, so both target the same scope and
-// last-write-wins in our favour since attach runs this after connectOverCDP).
-async function assertDownloadBehavior(ctx: Ctx): Promise<void> {
+// Set download behaviour once, at attach, on our owned browser-level CDP
+// session (see the Downloads comment above for why once is enough now). The
+// point of the call is `eventsEnabled`: without it Chromium sends no
+// download events and `ghax downloads` stays empty. With no
+// `--downloads-dir` the browser keeps its own setting ('default'), so an
+// attach no longer silently changes where the user's downloads go;
+// `ctx.downloadsDir` (~/Downloads) is then only the best guess used to
+// report finalPath.
+async function setDownloadBehavior(ctx: Ctx): Promise<void> {
   if (!ctx.browserSession) return;
-  await ctx.browserSession.send('Browser.setDownloadBehavior', {
-    behavior: 'allow',
-    downloadPath: ctx.downloadsDir,
-    eventsEnabled: true,
-  });
+  await ctx.browserSession.send('Browser.setDownloadBehavior', ctx.downloadsDirExplicit
+    ? { behavior: 'allow', downloadPath: ctx.downloadsDir, eventsEnabled: true }
+    : { behavior: 'default', eventsEnabled: true });
 }
 
 // Wire the browser-level download events into ctx.downloads. Kept on the
@@ -4221,7 +4465,11 @@ async function main() {
       log(`bridge: only '${bindFilter}' may bind — other instances will park`);
     }
   } else {
-    browser = await chromium.connectOverCDP(cdpHttpUrl!);
+    // noDefaults: attach to the user's browser without Playwright's default
+    // overrides on the existing context (download behaviour, focus
+    // emulation, media emulation). Those overrides were written for browsers
+    // Playwright launches, not a session the user keeps working in.
+    browser = await chromium.connectOverCDP(cdpHttpUrl!, { noDefaults: true });
     const contexts = browser.contexts();
     context = contexts[0] ?? (await browser.newContext());
 
@@ -4257,6 +4505,8 @@ async function main() {
     activePageId: null,
     refs: new Map(),
     bridgeRefs: new Map(),
+    refRegistry: new RefRegistry(),
+    lastSnapshotMarker: null,
     bridgeNetworkRequests: new Map(),
     bridgeMainFrameId: null,
     bridgeContexts: new Map(),
@@ -4270,6 +4520,7 @@ async function main() {
     networkListeners: new Set(),
     swLogListeners: new Map(),
     downloadsDir: resolveDownloadsDir(),
+    downloadsDirExplicit: Boolean(process.env.GHAX_DOWNLOADS_DIR?.trim()),
     downloads: new CircularBuffer<DownloadEntry>(200),
     browserSession: null,
   };
@@ -4292,16 +4543,15 @@ async function main() {
   }
 
   if (!bridgeMode && browser) {
-    // Undo Playwright's download hijack. connectOverCDP has, by now, issued
-    // `Browser.setDownloadBehavior` (allowAndName → its temp artifacts dir).
-    // Open our own browser-level CDP session, re-assert `behavior: 'allow'`
-    // with downloadPath = the real Downloads dir, and keep it alive to receive
-    // downloadWillBegin / downloadProgress events.
+    // One browser-level session for the daemon's life: enables download
+    // events (and, with --downloads-dir, points downloads there).
     try {
-      ctx.browserSession = await browser.newBrowserCDPSession();
+      ctx.browserSession = traceSend(await browser.newBrowserCDPSession());
       wireDownloadEvents(ctx);
-      await assertDownloadBehavior(ctx);
-      log(`download behavior re-asserted → allow, dir=${ctx.downloadsDir}`);
+      await setDownloadBehavior(ctx);
+      log(ctx.downloadsDirExplicit
+        ? `download behavior → allow, dir=${ctx.downloadsDir}`
+        : 'download behavior → browser default (events on)');
     } catch (err) {
       log(`WARN: failed to set download behavior: ${String(err)}`);
     }
@@ -4490,20 +4740,45 @@ async function main() {
         json(res, 400, { ok: false, error: 'Missing cmd' });
         return;
       }
+      // --trace: diff the CDP counters around this one RPC and ship the
+      // delta beside `data`, so stdout (which prints `data`) never changes.
+      // Concurrent RPCs on the same daemon would bleed into each other's
+      // numbers; one agent per daemon is the supported shape anyway.
+      const rpcOpts = { ...(body.opts ?? {}) };
+      const wantTrace = rpcOpts.trace === true;
+      delete rpcOpts.trace;
+      const stats = ctx.bridge ? ctx.bridge.cdpStats : daemonCdpStats;
+      const before = wantTrace ? stats.snapshot() : null;
+      const startedAt = performance.now();
+      const buildTrace = () => {
+        if (!before) return {};
+        const delta = diffStats(before, stats.snapshot());
+        return {
+          trace: {
+            transport: ctx.bridgeMode ? 'bridge' : 'cdp',
+            handlerMs: Math.round((performance.now() - startedAt) * 10) / 10,
+            ...delta,
+            ...(ctx.bridgeMode ? {} : { note: 'playwright-internal protocol traffic not counted' }),
+          },
+        };
+      };
       try {
-        const data = await dispatch(body.cmd, body.args ?? [], body.opts ?? {});
-        json(res, 200, { ok: true, data });
+        const data = await dispatch(body.cmd, body.args ?? [], rpcOpts);
+        json(res, 200, { ok: true, data, ...buildTrace() });
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
         const exitCode = typeof err?.exitCode === 'number' ? err.exitCode : undefined;
         const code = typeof err?.code === 'string' ? err.code : undefined;
         const hint = typeof err?.hint === 'string' ? err.hint : undefined;
+        const details = err?.details && typeof err.details === 'object' ? err.details : undefined;
         json(res, 500, {
           ok: false,
           error: err.message || String(err),
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(code !== undefined ? { code } : {}),
           ...(hint !== undefined ? { hint } : {}),
+          ...(details !== undefined ? { details } : {}),
+          ...buildTrace(),
         });
       }
       return;

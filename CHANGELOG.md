@@ -5,8 +5,174 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Added
+- **`ghax bridge stats` and a global `--trace` flag.** The bridge now counts
+  every relayed CDP command per method (calls, errors, total and max ms).
+  `ghax bridge stats` prints them heaviest first; `--reset` zeroes them.
+  `--trace` on any command prints one stderr line with that command's CDP
+  call count, CDP time, handler time and top three methods, and leaves
+  stdout (including `--json`) untouched. On the CDP transport it counts the
+  CDP sessions the daemon opens itself; Playwright's own protocol traffic is
+  not counted (use `DEBUG=pw:protocol DEBUG_FILE=/tmp/pw-protocol.log ghax
+  attach` for that). `ghax bridge stats` outside bridge mode exits 2 and
+  points at `--trace`.
+- **`--` ends flag parsing.** Everything after it is a positional value,
+  so a value that starts with dashes can finally be passed
+  (`ghax eval -- '--i'`). `--trace` is only taken as the global flag
+  before a `--`.
+- **`snapshot` has a default output budget: 250 refs / 32 KB.** A large
+  SPA used to print thousands of refs, all of which an agent pays for in
+  context before acting. Past the budget the text stops at a line
+  boundary and ends with `… N more refs omitted (use
+  --depth/--selector/--max-refs, or --no-cap)`. Only the text is cut: the
+  ref map holds every ref the snapshot found, so a ref cut from the
+  printout still clicks. `--max-refs <n>`, `--max-chars <n>`, and `--no-cap` (or
+  `--max-refs 0`) tune it. `--json` gains `totalRefs` and, when cut,
+  `omitted: {refs, lines}`; **`count` is now the number printed**, and
+  `qa` reports `totalRefs`. `batch`'s automatic re-snapshot is uncapped.
+  Same budget on both transports (`src/snapshot-budget.ts`).
 
-_No changes yet._
+### Changed
+- **A ref number is never reused within a daemon's lifetime.** Both
+  transports now take their `@e`/`@c` numbers from one daemon-wide
+  registry (`src/ref-registry.ts`) keyed by document and element, instead
+  of printing Playwright's per-document number or restarting the bridge
+  count at `e1` after a navigation. That closes a wrong-element hole in
+  `batch`: after `click @e3` navigated, the plan's `@e5` could land on the
+  new page's fifth element. A batch step whose ref was minted on a page
+  that is no longer loaded now fails with `BRIDGE_REF_STALE` instead of
+  being re-resolved.
+- **Stable `@e` refs over the bridge too, and `batch` skips needless
+  re-snapshots.** The bridge now remembers which ref it gave each backend
+  node and reuses it on the next snapshot while the node's role and name
+  are unchanged (a rename or role change gets a new number, the same rule
+  Playwright applies on the CDP transport). Cursor refs take their number
+  from the page-side registry, so `@c<n>` is stable too. Numbering is
+  sparse on both transports now; the map resets on tab change and
+  navigation, and a `--selector` snapshot never drops refs learned by a
+  wider one. Separately, every snapshot records a page freshness marker
+  (document id, a MutationObserver count of structural changes, URL), and
+  a `batch` step that uses a ref re-snapshots only when that marker moved
+  (always after a `--selector` or modal-scoped snapshot, whose ref map
+  covers only part of the page). The marker watches structure, text, and
+  the attributes that feed a role, name or state (including `value`,
+  `title`, `alt`, `placeholder`, `aria-labelledby`, `aria-pressed`,
+  `aria-checked`, `aria-selected`), inside open shadow roots too (roots
+  attached later are found by a rescan on each read; no page prototype is
+  patched, so nothing is visible to a site's fingerprinting). When it
+  says "unchanged", batch still confirms each ref's element has the role
+  and name it was printed with before trusting the old snapshot.
+  Each such step now reports `autoSnapshot: "skipped"` or `"taken"`.
+- **Stable `@e` refs on the CDP transport.** Snapshots now come from
+  Playwright's `ariaSnapshotJSON({ mode: 'ai' })` and each ref resolves
+  through its `aria-ref=` selector engine, replacing the `getByRole().nth()`
+  reconstruction. Playwright caches the ref on the element, so the same
+  element keeps its number across re-snapshots of a document and an
+  insertion above it no longer renumbers everything below. Before, a
+  re-render could quietly point `@e5` at the next same-named element.
+  Filtered looks (`-i`, `--depth`, `--compact`) keep the identities of
+  elements they don't print, so the next full snapshot doesn't renumber
+  them. Visible changes: **numbering is sparse** (Playwright counts every
+  clickable node, ghax prints the ones you asked for, so `snapshot -i` may
+  start at `@e4`), numbers restart after navigation, nameless layout
+  `generic` wrappers are flattened (clickable ones print with
+  `[cursor:pointer]`), `placeholder` shows in the props, and a ref whose
+  element was removed or renamed fails immediately with "not found in the
+  latest snapshot" instead of waiting out a Playwright timeout. Modal and
+  `--selector` scoping now come for free: a ref resolves only inside the
+  subtree it was taken from. Iframe content renders but its refs are not
+  clickable yet. The ref engine is semi-private Playwright behaviour, so
+  smoke checks pin it and Playwright is pinned to an exact version.
+- **Bridge `snapshot` costs a constant number of relayed CDP calls.** It
+  used to stamp `data-ghax-ref` on every ref (two relayed calls each) and
+  read every cursor ref back (three more each), so a 200-ref page paid
+  hundreds of WebSocket hops. It now makes the same handful of calls on
+  any page (domain enables, one root lookup, `getFullAXTree`, one cursor
+  pass, plus the batch freshness-marker read: 9 on a warm page, 2 more
+  the first time a document is seen, to set up ghax's isolated world). Cursor refs (`@c<n>`) live in a page-side registry and
+  are resolved only when a verb acts on them; a node that has gone is
+  `BRIDGE_REF_STALE`. **`data-ghax-ref` is no longer stamped on elements**;
+  use `ghax box @eN` (or `snapshot -a`) to see which element a ref is.
+
+### Fixed
+- **Bridge `goto data:...` no longer reports success while staying put.**
+  Chrome refuses extension-initiated top-level navigation to `data:` URLs,
+  so the navigation never committed; the extension's load watcher timed
+  out after 8 s and the daemon returned the unchanged tab as a successful
+  `goto`. It now fails at once with `BRIDGE_NAVIGATION_BLOCKED` and a hint
+  (serve the page over http, or set content with `eval`). A navigation
+  that CDP reports as failed (`errorText`) is also an error now
+  (`BRIDGE_NAVIGATION_FAILED`) instead of a silent success.
+- **Bridge `click` no longer clicks whatever is on top.** Over the bridge,
+  `click @e3` scrolled, read the box model and fired a mouse event at the
+  centre, so a cookie banner, a spinner overlay or a disabled button all
+  "succeeded". `click`, `fill` and `upload` now run one in-page
+  actionability check first, ported from Playwright's own rules
+  (`retarget`, `getAriaDisabled`, `expectHitTarget`): connected; not
+  disabled (native, `fieldset[disabled]` outside its legend, inherited
+  `aria-disabled` across shadow roots) or inert; for fill, not read-only;
+  for click, visible, scrolled into view, and the hit test at the centre
+  lands on the element (or the button/link it sits in) through every shadow
+  root. Failures are typed: `BRIDGE_TARGET_NOT_ACTIONABLE` names the reason
+  and, for `covered`, the element on top (`covered by div#overlay "Accept
+  cookies"`); a ref whose node is gone is `BRIDGE_REF_STALE` instead of a
+  raw CDP string. `--force` skips the checks (also as a `batch` step opt).
+  The check, the scroll and the click point come from one
+  `Runtime.callFunctionOn`, replacing the old scroll + box-model pair, so a
+  click costs no extra blocking round-trips. On the CDP transport, `click`
+  and `fill` pre-check inherited `aria-disabled` and `inert` and fail at
+  once with the same code instead of waiting out Playwright's 30 s timeout.
+  Visibility follows Playwright's own rules, not stricter ones: no opacity
+  check (an `opacity:0` native checkbox under its styled label is a normal
+  target), `display:contents` elements act through their first rendered
+  child, and a target covered near the viewport edge (sticky header) is
+  scrolled to the centre and hit-tested again before being refused.
+  The guard, the cursor-ref registry, root selection and selector lookups
+  run in a ghax-owned isolated world (`Page.createIsolatedWorld`, one per
+  document), so a page that defines `window.__ghax` or overrides
+  `getBoundingClientRect`/`elementsFromPoint` in its own world can neither
+  break snapshots nor move a click past an overlay. Fill stays in the main
+  world because it needs the page's `monaco` global.
+- **The CLI no longer re-sends a click, fill or other mutation after a lost
+  reply.** `rpc.rs` retried every verb once on any transport error,
+  including a timeout or reset after the daemon had already received the
+  command, so a slow `click` could run twice. Verbs now have a retry class:
+  reads (`status`, `tabs`, `snapshot`, `text`, `console`, ...) keep the one
+  retry; everything else, including `batch` as a whole and any verb added
+  later, is retried only when the TCP connect itself failed. A read
+  that mutates with a flag follows the flag: `bridge stats --reset` is
+  never re-sent, so a lost reply can't zero the counters twice.
+- **The CLI's daemon timeout is explicit: 120 s per call.** It used to be
+  reqwest's implicit 30 s, which cut off long `wait --stable` and `perf
+  --wait` runs. Now a call gets 120 s by default (`GHAX_RPC_TIMEOUT=<s>`,
+  `0` = none, honoured by every verb), a verb given its own `--timeout`
+  gets that plus 30 s, and the long verbs get sized defaults: `batch` 120 s
+  per step (30 min cap), `perf` its `--wait` plus 120 s, `profile` its
+  `--duration` plus 10 min, `ext hot-reload` its `--wait` plus 120 s, and
+  `wait <ms>` its own duration plus 30 s. No verb is ever retried after a
+  timeout: the daemon is still running the first attempt. A timeout
+  says which verb stalled and how to raise the limit, and is never retried
+  for a mutating verb.
+
+- **The CDP transport attaches with Playwright's `noDefaults`.**
+  `connectOverCDP` used to apply Playwright's launch-time defaults to the
+  user's existing browser context: download behaviour (files as GUIDs in a
+  temp dir), focus emulation and media emulation. The daemon undid the
+  download part after attach and after every `new-window`. It now passes
+  `noDefaults: true` and makes one `Browser.setDownloadBehavior` call at
+  attach: `allow` into `--downloads-dir` when given, otherwise the
+  browser's own setting, with download events on in both cases so `ghax
+  downloads` keeps working. Without `--downloads-dir`, attaching no longer
+  moves where the user's downloads land.
+
+### Dependencies
+- **Playwright 1.59.1 to 1.63.0, pinned exact.** The stable-ref work in
+  this release leans on Playwright's `aria-ref=` selector engine, whose
+  cache semantics are not documented, so the version is pinned (`"1.63.0"`, no caret) in
+  `package.json`, the daemon auto-bootstrap (`attach.rs`) and
+  `scripts/bootstrap-daemon-runtime.sh`. Any bump now has to be deliberate
+  and re-run the smoke checks that pin that behaviour. Node 20+ required
+  (Playwright 1.63's own floor; ghax already declared it).
 
 ## [0.8.0] - 2026-09-23
 ### Added

@@ -42,6 +42,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
+import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
+import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
+import { RefRegistry, type RefAllocator } from './ref-registry';
 
 export interface BridgeEvent {
   method: string;
@@ -91,8 +94,16 @@ export interface BridgeTab {
   controlledBy: number | null;
 }
 
+/**
+ * What a bridge `@ref` points at. AX refs carry the backend node id the AX
+ * tree already gave us. Cursor refs (`@c<n>`, elements the AX tree misses)
+ * carry `cursorId`, a key into the page-side `window.__ghax.nodes` map, and
+ * are resolved to a node only when something acts on them: tagging each one
+ * at snapshot time cost two relayed calls per ref.
+ */
 export interface BridgeRef {
-  backendNodeId: number;
+  backendNodeId: number | null;
+  cursorId?: number;
   role: string;
   name: string;
 }
@@ -101,6 +112,8 @@ export interface BridgeSnapshotResult {
   text: string;
   refs: Map<string, BridgeRef>;
   count: number;
+  /** True when rooted at --selector or a modal, i.e. not the whole page. */
+  scoped: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -340,6 +353,9 @@ export class Bridge extends EventEmitter {
   private pairFailures: number[] = [];
 
   readonly port: number;
+
+  /** Every CDP command relayed through the extension, by method. */
+  readonly cdpStats = new CdpStats();
 
   /**
    * This daemon process's identity, minted fresh on every construction.
@@ -902,6 +918,21 @@ export class Bridge extends EventEmitter {
    * otherwise → rejected immediately with install guidance.
    */
   send(method: string, params: Record<string, unknown> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
+    // Counted here rather than in dispatch() so a command queued while
+    // DEGRADED is counted once, with the reconnect wait included in its time.
+    return this.cdpStats.track(method, this.sendUntracked(method, params, timeoutMs));
+  }
+
+  /** Per-method relayed-call counters since start or the last reset. */
+  stats(): CdpStatsSnapshot {
+    return this.cdpStats.snapshot();
+  }
+
+  resetStats(): void {
+    this.cdpStats.reset();
+  }
+
+  private sendUntracked(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
     if (this._state === 'BOUND') return this.dispatch(method, params, timeoutMs);
     if (this._state === 'DEGRADED') {
       if (this.queue.length >= QUEUE_CAP) {
@@ -1180,7 +1211,7 @@ export function unwrapEvalResult(result: unknown): unknown {
 export async function bridgeEvaluate(
   bridge: Bridge,
   expression: string,
-  opts: { uniqueContextId?: string | null; timeoutMs?: number } = {},
+  opts: { uniqueContextId?: string | null; contextId?: number; timeoutMs?: number } = {},
 ): Promise<unknown> {
   const params: Record<string, unknown> = {
     expression,
@@ -1188,6 +1219,7 @@ export async function bridgeEvaluate(
     returnByValue: true,
   };
   if (opts.uniqueContextId) params.uniqueContextId = opts.uniqueContextId;
+  else if (typeof opts.contextId === 'number') params.contextId = opts.contextId;
   const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs);
   return unwrapEvalResult(result);
 }
@@ -1217,10 +1249,31 @@ export async function bridgeGoto(
   url: string,
   loadTimeoutMs = 8_000,
 ): Promise<{ url: string; title: string }> {
+  // Chrome refuses extension-initiated top-level navigation to data: URLs,
+  // through chrome.debugger's Page.navigate and chrome.tabs.update alike. The
+  // navigation never commits, the extension's load watcher times out after
+  // 8 s, and the old tab came back looking like a successful goto. Fail up
+  // front with the reason instead.
+  if (/^\s*data:/i.test(url)) {
+    throw new BridgeTypedError(
+      `goto: the bridge can't open data: URLs (Chrome blocks extension-initiated navigation to data:)`,
+      'BRIDGE_NAVIGATION_BLOCKED',
+      'serve the page over http (e.g. a local server on 127.0.0.1), or load a normal page and set its content with `ghax eval`',
+    );
+  }
   const navigation = await bridge.send('Page.navigate', {
     url,
     ghaxLoadTimeoutMs: loadTimeoutMs,
-  }) as { ghaxFinalUrl?: string; ghaxTitle?: string } | undefined;
+  }) as { ghaxFinalUrl?: string; ghaxTitle?: string; errorText?: string } | undefined;
+  // Page.navigate reports a refused or failed navigation in errorText rather
+  // than rejecting; passing it through as success hid real failures.
+  if (navigation?.errorText) {
+    throw new BridgeTypedError(
+      `goto: navigation to ${url} failed: ${navigation.errorText}`,
+      'BRIDGE_NAVIGATION_FAILED',
+      'check the URL; the tab is still on its previous page',
+    );
+  }
 
   let finalUrl = navigation?.ghaxFinalUrl || url;
   let title = navigation?.ghaxTitle || '';
@@ -1283,57 +1336,119 @@ function axProps(node: AxNode): string {
   return values.length > 0 ? `[${values.join(', ')}]` : '';
 }
 
+// ─── ghax's own isolated world (review finding 6) ──────────────────
+//
+// The cursor-ref registry, root selection, selector resolution and the
+// click/upload actionability guard run in a ghax-owned isolated world, not
+// the page's main world. There the page cannot squat `window.__ghax`, and a
+// page that overrides getBoundingClientRect / elementsFromPoint / querySelector
+// in its own world cannot move ghax's click point or hide an overlay from
+// the hit test: isolated worlds share the DOM but not JS prototypes. One
+// world per document: created on first use, forgotten on main-frame
+// navigation, context teardown, or a control change, and re-created once if
+// CDP says the context is gone. Fill stays in the main world on purpose: it
+// needs the page's own `monaco` global.
+
+interface WorldState { contextId: number | null }
+const worlds = new WeakMap<Bridge, WorldState>();
+
+function worldState(bridge: Bridge): WorldState {
+  let st = worlds.get(bridge);
+  if (st) return st;
+  const state: WorldState = { contextId: null };
+  worlds.set(bridge, state);
+  bridge.onEvent((ev) => {
+    const p = ev.params as { executionContextId?: unknown; frame?: { parentId?: unknown } };
+    if (ev.method === 'Runtime.executionContextsCleared') state.contextId = null;
+    else if (ev.method === 'Runtime.executionContextDestroyed' && p.executionContextId === state.contextId) state.contextId = null;
+    else if (ev.method === 'Page.frameNavigated' && !p.frame?.parentId) state.contextId = null;
+  });
+  bridge.on('controlled', () => { state.contextId = null; });
+  bridge.on('disconnect', () => { state.contextId = null; });
+  return state;
+}
+
+/** The execution context id of ghax's isolated world in the controlled tab. */
+export async function bridgeIsolatedWorld(bridge: Bridge): Promise<number> {
+  const st = worldState(bridge);
+  if (st.contextId !== null) return st.contextId;
+  const tree = await bridge.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } };
+  const frameId = tree.frameTree?.frame?.id;
+  if (!frameId) throw new Error('bridge: no main frame to create the ghax isolated world in');
+  const res = await bridge.send('Page.createIsolatedWorld', {
+    frameId,
+    worldName: 'ghax',
+    grantUniveralAccess: true,
+  }) as { executionContextId?: number };
+  if (typeof res.executionContextId !== 'number') {
+    throw new Error('bridge: Page.createIsolatedWorld returned no execution context');
+  }
+  st.contextId = res.executionContextId;
+  return st.contextId;
+}
+
+/** Run `fn` in the isolated world, re-creating it once if it went stale. */
+async function inWorld<T>(bridge: Bridge, fn: (contextId: number) => Promise<T>): Promise<T> {
+  try {
+    return await fn(await bridgeIsolatedWorld(bridge));
+  } catch (err) {
+    if (!isStaleContextError(err)) throw err;
+    worldState(bridge).contextId = null;
+    return await fn(await bridgeIsolatedWorld(bridge));
+  }
+}
+
 async function runtimeObjectFor(
   bridge: Bridge,
   expression: string,
-): Promise<{ objectId: string; backendNodeId: number } | null> {
+  contextId?: number,
+): Promise<{ objectId: string; backendNodeId: number; nodeName: string } | null> {
   const evaluated = await bridge.send('Runtime.evaluate', {
     expression,
     returnByValue: false,
+    ...(typeof contextId === 'number' ? { contextId } : {}),
   }) as { result?: { objectId?: string; subtype?: string } };
   const objectId = evaluated.result?.objectId;
   if (!objectId || evaluated.result?.subtype === 'null') return null;
   try {
     const described = await bridge.send('DOM.describeNode', { objectId }) as {
-      node?: { backendNodeId?: number };
+      node?: { backendNodeId?: number; nodeName?: string };
     };
     const backendNodeId = described.node?.backendNodeId;
-    return typeof backendNodeId === 'number' ? { objectId, backendNodeId } : null;
+    return typeof backendNodeId === 'number'
+      ? { objectId, backendNodeId, nodeName: String(described.node?.nodeName ?? '') }
+      : null;
   } catch {
     await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
     return null;
   }
 }
 
-async function tagBackendNode(bridge: Bridge, backendNodeId: number, ref: string): Promise<boolean> {
-  try {
-    const resolved = await bridge.send('DOM.resolveNode', {
-      backendNodeId,
-      objectGroup: 'ghax-refs',
-    }) as { object?: { objectId?: string } };
-    const objectId = resolved.object?.objectId;
-    if (!objectId) return false;
-    await bridge.send('Runtime.callFunctionOn', {
-      objectId,
-      functionDeclaration: `function(ref) {
-        if (this && this.nodeType === Node.ELEMENT_NODE) this.setAttribute('data-ghax-ref', ref);
-        return true;
-      }`,
-      arguments: [{ value: ref }],
-      returnByValue: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
+/**
+ * Page-side cursor-ref registry, installed once per document. Elements get a
+ * stable numeric id from a WeakMap (so re-snapshots reuse it) and live in
+ * `nodes` until they disconnect. Ported from jev-ultrafast's snapshot.js.
+ */
+const CURSOR_REGISTRY_JS = `const reg = (window.__ghax ||= { ids: new WeakMap(), nodes: new Map(), next: 1 });
+  for (const [id, e] of reg.nodes) if (!e.isConnected) reg.nodes.delete(id);
+  const cursorId = (e) => {
+    let id = reg.ids.get(e);
+    if (id === undefined) { id = reg.next++; reg.ids.set(e, id); }
+    reg.nodes.set(id, e);
+    return id;
+  };`;
 
 /**
- * Build the bridge snapshot from Chromium's own accessibility tree. Every
- * emitted ref keeps the AX node's backendDOMNodeId and is also tagged in the
- * page DOM for human inspection/debugging. The backend id is the resolver;
- * the attribute is not relied on for interaction and therefore survives
- * selector changes caused by React rerenders better than a CSS path.
+ * Build the bridge snapshot from Chromium's own accessibility tree.
+ *
+ * Cost is a constant number of relayed CDP calls however large the page is
+ * (three domain enables, one evaluate + describeNode + release for the root,
+ * one getFullAXTree, one cursor-pass evaluate): the old version tagged every
+ * ref in the DOM (`data-ghax-ref`, two calls per ref) and read every cursor
+ * ref back (three more each). Refs resolve from the backend node id (AX) or
+ * the page-side registry (cursor) only when a verb acts on them. The
+ * `data-ghax-ref` attribute is gone; `ghax box @eN` answers "which element
+ * is this" instead.
  */
 export async function bridgeSnapshot(
   bridge: Bridge,
@@ -1344,62 +1459,56 @@ export async function bridgeSnapshot(
     selector?: string;
     cursorInteractive?: boolean;
     dialogScope?: boolean;
+    /**
+     * Ref numbering (src/ref-registry.ts): the daemon passes its registry
+     * bound to the current document, so a number is never reused. Omitted =
+     * a private registry numbering from e1.
+     */
+    refs?: RefAllocator;
   } = {},
 ): Promise<BridgeSnapshotResult> {
+  const allocator = opts.refs ?? new RefRegistry().forDoc('local');
   await bridge.send('Runtime.enable');
   await bridge.send('DOM.enable');
   await bridge.send('Accessibility.enable');
-  await bridgeEvaluate(bridge, `(() => {
-    const walk = (root) => {
-      for (const el of root.querySelectorAll('*')) {
-        el.removeAttribute('data-ghax-ref');
-        if (el.shadowRoot) walk(el.shadowRoot);
-      }
-    };
-    walk(document);
-  })()`).catch(() => undefined);
-  await bridge.send('Runtime.releaseObjectGroup', { objectGroup: 'ghax-refs' }).catch(() => undefined);
 
-  let rootBackendNodeId: number | null = null;
-  if (opts.selector) {
-    const root = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(opts.selector)})`);
-    if (!root) throw new Error(`Selector not found: ${opts.selector}`);
-    rootBackendNodeId = root.backendNodeId;
-    await bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
-  } else if (opts.dialogScope !== false) {
-    const modal = await runtimeObjectFor(bridge, `(() => {
+  // Root selection in ONE evaluate: --selector, else the top-most visible
+  // modal (unless --no-dialog-scope), else body.
+  const selectorJs = opts.selector ? JSON.stringify(opts.selector) : 'null';
+  const root = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `(() => {
+    const sel = ${selectorJs};
+    if (sel) return document.querySelector(sel);
+    if (${opts.dialogScope !== false}) {
       const selectors = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
       const visible = [...document.querySelectorAll(selectors)].filter((el) => {
         const s = getComputedStyle(el); const r = el.getBoundingClientRect();
         return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
       });
-      return visible.at(-1) || document.body;
-    })()`);
-    if (modal) {
-      rootBackendNodeId = modal.backendNodeId;
-      await bridge.send('Runtime.releaseObject', { objectId: modal.objectId }).catch(() => undefined);
+      if (visible.length) return visible.at(-1);
     }
-  }
-  if (rootBackendNodeId === null) {
-    const body = await runtimeObjectFor(bridge, 'document.body');
-    if (body) {
-      rootBackendNodeId = body.backendNodeId;
-      await bridge.send('Runtime.releaseObject', { objectId: body.objectId }).catch(() => undefined);
-    }
-  }
+    return document.body;
+  })()`, cid));
+  if (!root && opts.selector) throw new Error(`Selector not found: ${opts.selector}`);
+  const rootBackendNodeId = root ? root.backendNodeId : null;
+  // Anything but <body> means --selector or a modal won: not the whole page.
+  const scoped = Boolean(opts.selector) || (root !== null && root.nodeName.toUpperCase() !== 'BODY');
+  if (root) void bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
 
   const result = await bridge.send('Accessibility.getFullAXTree', {}) as { nodes?: AxNode[] };
   const nodes = result.nodes ?? [];
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
-  let root = rootBackendNodeId === null
+  let axRoot = rootBackendNodeId === null
     ? undefined
     : nodes.find((n) => n.backendDOMNodeId === rootBackendNodeId);
-  root ??= nodes.find((n) => !n.parentId) ?? nodes[0];
+  axRoot ??= nodes.find((n) => !n.parentId) ?? nodes[0];
 
   const refs = new Map<string, BridgeRef>();
   const output: string[] = [];
-  let nextRef = 1;
-  const walk = async (node: AxNode, depth: number): Promise<void> => {
+  // A node keeps its ref while role and name hold (Playwright's rule); the
+  // registry never hands the same number to a different element.
+  const refFor = (backendNodeId: number, role: string, name: string): string =>
+    allocator.assign('e', `b${backendNodeId}`, role, name);
+  const walk = (node: AxNode, depth: number): void => {
     const role = axRole(node);
     const rawRole = String(node.role?.value ?? '');
     const axName = String(node.name?.value ?? '');
@@ -1414,8 +1523,7 @@ export async function bridgeSnapshot(
     const compactSkip = Boolean(opts.compact && !isInteractive && !name);
     if (!skipStructural && withinDepth && !compactSkip && (!opts.interactive || isInteractive)) {
       if (typeof node.backendDOMNodeId === 'number') {
-        const ref = `e${nextRef++}`;
-        await tagBackendNode(bridge, node.backendDOMNodeId, ref);
+        const ref = refFor(node.backendDOMNodeId, role, name);
         refs.set(ref, { backendNodeId: node.backendDOMNodeId, role, name });
         let line = `${'  '.repeat(Math.max(0, depth))}@${ref} [${role}]`;
         if (name) line += ` ${JSON.stringify(name)}`;
@@ -1427,16 +1535,19 @@ export async function bridgeSnapshot(
     }
     for (const childId of node.childIds ?? []) {
       const child = byId.get(childId);
-      if (child) await walk(child, skipStructural ? depth : depth + 1);
+      if (child) walk(child, skipStructural ? depth : depth + 1);
     }
   };
-  if (root) await walk(root, -1);
+  if (axRoot) walk(axRoot, -1);
+  const alive = new Set<string>();
+  for (const n of nodes) if (typeof n.backendDOMNodeId === 'number') alive.add(`b${n.backendDOMNodeId}`);
 
   const wantCursor = opts.cursorInteractive || (opts.interactive && !opts.compact);
   if (wantCursor) {
-    const cursor = await bridgeEvaluate(bridge, `(() => {
+    const cursor = await inWorld(bridge, (contextId) => bridgeEvaluate(bridge, `(() => {
+      ${CURSOR_REGISTRY_JS}
       const standard = new Set(['A','BUTTON','INPUT','SELECT','TEXTAREA','SUMMARY','DETAILS']);
-      const out = []; let n = 1;
+      const out = [];
       const walk = (root, inShadow) => {
         for (const el of root.querySelectorAll('*')) {
           const style = getComputedStyle(el);
@@ -1444,67 +1555,255 @@ export async function bridgeSnapshot(
           const tabindex = el.hasAttribute('tabindex') && Number(el.getAttribute('tabindex')) >= 0;
           if (visible && !standard.has(el.tagName) && !el.hasAttribute('role') &&
               (style.cursor === 'pointer' || el.hasAttribute('onclick') || tabindex)) {
-            const ref = 'c' + n++;
-            el.setAttribute('data-ghax-ref', ref);
             const reasons = [];
             if (inShadow) reasons.push('shadow');
             if (style.cursor === 'pointer') reasons.push('cursor:pointer');
             if (el.hasAttribute('onclick')) reasons.push('onclick');
             if (tabindex) reasons.push('tabindex=' + el.getAttribute('tabindex'));
-            out.push({ ref, text: (el.innerText || el.tagName.toLowerCase()).trim().slice(0, 80), reason: reasons.join(', ') });
+            out.push({ cursorId: cursorId(el), text: (el.innerText || el.tagName.toLowerCase()).trim().slice(0, 80), reason: reasons.join(', ') });
           }
           if (el.shadowRoot) walk(el.shadowRoot, true);
         }
       };
       walk(document, false);
       return out;
-    })()`) as Array<{ ref: string; text: string; reason: string }>;
+    })()`, { contextId })) as Array<{ cursorId: number; text: string; reason: string }>;
     if (cursor.length > 0) {
       output.push('', '── cursor-interactive (not in ARIA tree) ──');
-      for (const item of cursor) {
-        const object = await runtimeObjectFor(bridge, `(() => {
-          const find = (root) => {
-            const hit = root.querySelector('[data-ghax-ref="${item.ref}"]');
-            if (hit) return hit;
-            for (const el of root.querySelectorAll('*')) if (el.shadowRoot) { const nested = find(el.shadowRoot); if (nested) return nested; }
-            return null;
-          };
-          return find(document);
-        })()`);
-        if (!object) continue;
-        refs.set(item.ref, { backendNodeId: object.backendNodeId, role: 'cursor-interactive', name: item.text });
-        await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
-        output.push(`@${item.ref} [${item.reason}] ${JSON.stringify(item.text)}`);
-      }
+      cursor.forEach((item) => {
+        // The page registry id is stable per element but restarts at 1 in a
+        // new document, so it is a key, never the printed number.
+        alive.add(`k${item.cursorId}`);
+        const ref = allocator.assign('c', `k${item.cursorId}`, 'cursor-interactive', item.text);
+        refs.set(ref, { backendNodeId: null, cursorId: item.cursorId, role: 'cursor-interactive', name: item.text });
+        output.push(`@${ref} [${item.reason}] ${JSON.stringify(item.text)}`);
+      });
     }
   }
+
+  // Forget nodes that left the document. getFullAXTree is the whole page
+  // even for a modal-scoped walk, but a --selector snapshot is left alone so
+  // a narrow look never costs refs from the wider one (settled decision 5).
+  if (!opts.selector) allocator.prune(alive);
 
   if (output.length === 0) {
     return {
       text: opts.interactive ? '(no interactive elements found)' : '(no accessible elements found)',
       refs,
       count: 0,
+      scoped,
     };
   }
-  return { text: output.join('\n'), refs, count: refs.size };
+  return { text: output.join('\n'), refs, count: refs.size, scoped };
+}
+
+/**
+ * Does the node behind an AX ref still have the role and name it was
+ * printed with? One `Accessibility.getPartialAXTree` call; cursor refs
+ * (no backend id) are not rechecked.
+ */
+export async function bridgeRefStillMatches(bridge: Bridge, ref: BridgeRef): Promise<boolean> {
+  if (ref.backendNodeId === null) return true;
+  const res = await bridge.send('Accessibility.getPartialAXTree', {
+    backendNodeId: ref.backendNodeId,
+    fetchRelatives: false,
+  }) as { nodes?: AxNode[] };
+  const node = (res.nodes ?? []).find((n) => n.backendDOMNodeId === ref.backendNodeId) ?? res.nodes?.[0];
+  if (!node || node.ignored) return false;
+  const rawRole = String(node.role?.value ?? '');
+  const name = rawRole === 'StaticText' || rawRole === 'LineBreak' ? '' : String(node.name?.value ?? '');
+  return axRole(node) === ref.role && name === ref.name;
 }
 
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */
 export async function bridgeResolveSelector(bridge: Bridge, selector: string): Promise<BridgeRef> {
-  const object = await runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`);
+  const object = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`, cid));
   if (!object) throw new Error(`Selector not found: ${selector}`);
   await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
   return { backendNodeId: object.backendNodeId, role: '', name: '' };
 }
 
+// ─── Typed action errors (plan 10, C5) ──────────────────────────────
+
+/**
+ * An error with a machine-readable `code` and a recovery `hint`, thrown by
+ * the helpers below and passed through the daemon's bridge error wrapper
+ * untouched. `details` rides along in the RPC envelope.
+ */
+export class BridgeTypedError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly hint: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+  }
+}
+
+/** What CDP says when a backend node id no longer maps to a live node. */
+const STALE_NODE_RE = /no node with given id|could not find node|does not belong to the document|node with given id does not exist/i;
+
+export function isStaleNodeError(err: unknown): boolean {
+  return STALE_NODE_RE.test((err as { message?: string } | null)?.message ?? String(err));
+}
+
+export function staleRefError(label: string): BridgeTypedError {
+  const hint = label.startsWith('@')
+    ? `the element behind ${label} is gone (re-render or navigation). Run 'ghax snapshot -i' and use a fresh ref.`
+    : `the element matched by ${label} is gone (re-render or navigation). Re-run the command.`;
+  return new BridgeTypedError(`${label}: element is gone`, 'BRIDGE_REF_STALE', hint);
+}
+
+const NOT_ACTIONABLE_HINTS: Record<string, (r: ActionabilityResult) => string> = {
+  covered: (r) => `something is on top of it (${r.coveredBy ?? 'unknown'}): dismiss it, click that instead, or pass --force`,
+  disabled: () => 'it is disabled; wait for it to enable or pick another ref',
+  inert: () => 'it sits inside an inert subtree (usually behind an open modal); close the modal or pick another ref',
+  readonly: () => 'it is read-only; pick an editable field or pass --force',
+  hidden: () => 're-snapshot; it is not visible at its current position',
+  offscreen: () => 're-snapshot; it is not visible at its current position',
+  detached: () => "re-snapshot with 'ghax snapshot -i'; the element left the document",
+};
+
+export function notActionableError(label: string, kind: string, r: ActionabilityResult): BridgeTypedError {
+  const reason = r.reason ?? 'unknown';
+  const what = r.retargeted ? `${label} (via ${r.retargeted})` : label;
+  const msg = reason === 'covered'
+    ? `${kind} ${what}: covered by ${r.coveredBy ?? 'another element'}`
+    : `${kind} ${what}: not actionable (${reason})`;
+  const hint = (NOT_ACTIONABLE_HINTS[reason] ?? (() => 'pass --force to act anyway'))(r);
+  return new BridgeTypedError(msg, 'BRIDGE_TARGET_NOT_ACTIONABLE', hint, {
+    reason,
+    ...(r.coveredBy ? { coveredBy: r.coveredBy } : {}),
+    ...(r.retargeted ? { retargeted: r.retargeted } : {}),
+  });
+}
+
+export interface BridgeHandle {
+  objectId: string;
+  /** Null for a cursor ref: nothing downstream needs it, so it isn't fetched. */
+  backendNodeId: number | null;
+}
+
+/**
+ * Resolve a ref to a live Runtime object. The one place a stale backend node
+ * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
+ */
+export async function bridgeResolveHandle(
+  bridge: Bridge,
+  ref: BridgeRef,
+  label = 'element',
+  /** 'isolated' (default): ghax's own world. 'main': the page's, for fill. */
+  world: 'isolated' | 'main' = 'isolated',
+): Promise<BridgeHandle> {
+  let backendNodeId = ref.backendNodeId;
+  if (backendNodeId === null) {
+    // Cursor ref: look it up in ghax's registry, which lives in the isolated
+    // world where the page can't reach it. A missing registry (new document),
+    // a registry of the wrong shape, or a disconnected node is a stale ref,
+    // never a guess.
+    const id = Number(ref.cursorId);
+    const evaluated = await inWorld(bridge, (contextId) => bridge.send('Runtime.evaluate', {
+      expression: `(() => { const r = window.__ghax; const n = r && r.nodes instanceof Map ? r.nodes.get(${id}) : null; return n && n.isConnected ? n : null; })()`,
+      returnByValue: false,
+      contextId,
+    })) as { result?: { objectId?: string; subtype?: string } };
+    const objectId = evaluated.result?.objectId;
+    if (!objectId || evaluated.result?.subtype === 'null') throw staleRefError(label);
+    if (world === 'isolated') return { objectId, backendNodeId: null };
+    // Main-world handle wanted: hop through the backend id.
+    const described = await bridge.send('DOM.describeNode', { objectId }) as { node?: { backendNodeId?: number } };
+    void bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    if (typeof described.node?.backendNodeId !== 'number') throw staleRefError(label);
+    backendNodeId = described.node.backendNodeId;
+  }
+  const resolveIn = (executionContextId?: number) => bridge.send('DOM.resolveNode', {
+    backendNodeId,
+    ...(typeof executionContextId === 'number' ? { executionContextId } : {}),
+  }) as Promise<{ object?: { objectId?: string } }>;
+  let resolved: { object?: { objectId?: string } };
+  try {
+    resolved = world === 'isolated' ? await inWorld(bridge, resolveIn) : await resolveIn();
+  } catch (err) {
+    if (isStaleNodeError(err)) throw staleRefError(label);
+    throw err;
+  }
+  const objectId = resolved.object?.objectId;
+  if (!objectId) throw staleRefError(label);
+  return { objectId, backendNodeId };
+}
+
+/** Fire-and-forget: the caller never waits on a release. */
+export function bridgeReleaseHandle(bridge: Bridge, handle: BridgeHandle): void {
+  void bridge.send('Runtime.releaseObject', { objectId: handle.objectId }).catch(() => undefined);
+}
+
+const ACTIONABILITY_SRC = actionability.toString();
+
+/**
+ * ONE `Runtime.callFunctionOn` that checks the element and, for click,
+ * scrolls it into view and returns the click point. It replaces the old
+ * scrollIntoViewIfNeeded + getBoxModel pair, so a guarded click costs no
+ * more round-trips than an unguarded one did. `then` runs a second function
+ * on the same element in the same call when the guard passes (fill).
+ */
+export async function bridgeGuard(
+  bridge: Bridge,
+  handle: BridgeHandle,
+  label: string,
+  kind: ActionabilityKind,
+  force: boolean,
+  then?: { fn: string; args: unknown[] },
+): Promise<{ guard: ActionabilityResult; value?: unknown }> {
+  const functionDeclaration = `function(kind, force, ...rest) {
+    const guard = (${ACTIONABILITY_SRC})(this, { kind, force });
+    if (!guard.ok) return { guard };
+    ${then ? `return { guard, value: (${then.fn}).apply(this, rest) };` : 'return { guard };'}
+  }`;
+  let raw: unknown;
+  try {
+    raw = await bridge.send('Runtime.callFunctionOn', {
+      objectId: handle.objectId,
+      functionDeclaration,
+      arguments: [kind, force, ...(then?.args ?? [])].map((value) => ({ value })),
+      awaitPromise: true,
+      returnByValue: true,
+    });
+  } catch (err) {
+    if (isStaleNodeError(err) || /cannot find object with id|could not find object/i.test(String((err as Error)?.message ?? err))) {
+      throw staleRefError(label);
+    }
+    throw err;
+  }
+  const out = unwrapEvalResult(raw) as { guard?: ActionabilityResult; value?: unknown } | undefined;
+  const guard = out?.guard;
+  if (!guard) throw new Error(`${kind} ${label}: actionability check returned nothing`);
+  if (!guard.ok) {
+    if (guard.reason === 'detached') throw staleRefError(label);
+    throw notActionableError(label, kind, guard);
+  }
+  return { guard, ...(out && 'value' in out ? { value: out.value } : {}) };
+}
+
 export async function bridgeBox(
   bridge: Bridge,
   ref: BridgeRef,
+  label = 'element',
 ): Promise<{ x: number; y: number; width: number; height: number }> {
-  await bridge.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: ref.backendNodeId }).catch(() => undefined);
-  const model = await bridge.send('DOM.getBoxModel', { backendNodeId: ref.backendNodeId }) as {
-    model?: { border?: number[]; content?: number[] };
-  };
+  // AX refs address the node by backend id directly; cursor refs need the
+  // page-side registry lookup first.
+  const handle = ref.backendNodeId === null ? await bridgeResolveHandle(bridge, ref, label) : null;
+  const target = handle ? { objectId: handle.objectId } : { backendNodeId: ref.backendNodeId };
+  let model: { model?: { border?: number[]; content?: number[] } };
+  try {
+    await bridge.send('DOM.scrollIntoViewIfNeeded', target).catch(() => undefined);
+    model = await bridge.send('DOM.getBoxModel', target) as typeof model;
+  } catch (err) {
+    if (isStaleNodeError(err)) throw staleRefError(label);
+    throw err;
+  } finally {
+    if (handle) bridgeReleaseHandle(bridge, handle);
+  }
   const quad = model.model?.border ?? model.model?.content;
   if (!quad || quad.length < 8) throw new Error('element not visible or not in layout');
   const xs = [quad[0], quad[2], quad[4], quad[6]];
@@ -1519,15 +1818,12 @@ export async function bridgeCallOn(
   ref: BridgeRef,
   functionDeclaration: string,
   args: unknown[] = [],
+  label = 'element',
 ): Promise<unknown> {
-  const resolved = await bridge.send('DOM.resolveNode', { backendNodeId: ref.backendNodeId }) as {
-    object?: { objectId?: string };
-  };
-  const objectId = resolved.object?.objectId;
-  if (!objectId) throw new Error('element no longer exists. Run \'ghax snapshot\' again.');
+  const handle = await bridgeResolveHandle(bridge, ref, label, 'main');
   try {
     const result = await bridge.send('Runtime.callFunctionOn', {
-      objectId,
+      objectId: handle.objectId,
       functionDeclaration,
       arguments: args.map((value) => ({ value })),
       awaitPromise: true,
@@ -1535,6 +1831,6 @@ export async function bridgeCallOn(
     });
     return unwrapEvalResult(result);
   } finally {
-    await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+    bridgeReleaseHandle(bridge, handle);
   }
 }

@@ -294,6 +294,17 @@ reliability release should not.
 **Auto-retry is the single easiest way to make this project worse.** The
 table is the deliverable, not the retry machinery.
 
+**Rust-side half (added 2026-09-27, plan 10 C2).** The table above governs
+the daemon's replay after a bridge drop. The CLI had its own, older retry:
+`rpc.rs` re-sent any verb once on any transport error, including a timeout
+or a reset *after* the request reached the daemon, which is a lost reply,
+not a lost command. `rpc::retry_class_for` now splits verbs into `Idempotent`
+(an allowlist of reads, mirroring the `safe` row plus the buffer readers)
+and `Mutating` (everything else, `batch` included, and unknown verbs by
+default). Mutating verbs are re-sent only when the TCP connect failed, the
+one case where the request provably never arrived. `box` stays Mutating on
+both sides for the lazy-loading reason given in the `never` row.
+
 ### 2.4 Multi-browser: one port, registry, parked rivals
 
 Rejected: **port-per-browser** (the port is a `chrome.storage.local`

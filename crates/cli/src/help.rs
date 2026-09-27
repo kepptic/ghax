@@ -22,6 +22,15 @@ Connection:
   detach
   restart
 
+Bridge (after attach --extension):
+  bridge control [--active | --tab-id <n> | --stop]  # point the bridge at a tab
+  bridge instances                    # connected browsers, bound + parked
+  bridge use <instance-id|browser|label>
+                                      # bind a different browser
+  bridge reload [--timeout <ms>] [--force]
+                                      # reload the extension, no click needed
+  bridge stats [--reset]              # relayed CDP calls per method since attach
+
 Tab:
   tabs [--browser <id|edge|chrome|label>]
                                   # bridge: --browser lists another connected
@@ -40,10 +49,16 @@ Tab:
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
-  click <@ref|selector>
-  fill <@ref|selector> <value>              # Monaco-aware: routes into
+           [--max-refs <n>] [--max-chars <n>] [--no-cap]
+                                  # prints at most 250 refs / 32 KB by default and
+                                  #   ends with "… N more refs omitted"; every ref
+                                  #   stays clickable. --max-refs 0 = --no-cap.
+  click <@ref|selector> [--force]           # refuses covered, disabled, inert,
+                                             #   hidden targets; --force skips that
+  fill <@ref|selector> <value> [--force]    # Monaco-aware: routes into
                                              #   monaco.editor.getEditors() when
-                                             #   the target is inside a Monaco editor
+                                             #   the target is inside a Monaco editor.
+                                             #   Refuses disabled/read-only fields.
   select <@ref|selector> <value>            # by visible text, falling back to value attr
   select <@ref|selector> --index <n>        # by 0-based position
   select <@ref|selector> --by-value <val>   # explicit value semantics
@@ -130,4 +145,10 @@ Dev workflow:
   update [--check] [--to vX.Y.Z]    # install latest GitHub release (or check only)
 
 Add --json for machine-readable output on any command.
+Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
+  0 = none); verbs with their own --timeout get that plus 30 s; batch gets
+  120 s per step.
+Put -- before a value that starts with a dash (ghax eval -- '--i').
+Add --trace to any command for a one-line CDP call summary on stderr
+  (count, time, heaviest methods). stdout is unchanged.
 "#;

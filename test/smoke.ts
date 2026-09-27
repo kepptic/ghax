@@ -84,6 +84,24 @@ function parseJson<T = unknown>(out: string): T {
   }
 }
 
+/**
+ * The `@eN` ref printed for a role (and optional name) in snapshot output.
+ * Refs are Playwright-minted and sparse since the aria-ref switch, so the
+ * first interactive element is no longer guaranteed to be `@e1`.
+ */
+function refOf(snapshotText: string, role: string, name?: string): string {
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`@(e\\d+) \\[${esc(role)}\\]${name === undefined ? '' : ` ${esc(JSON.stringify(name))}`}`);
+  const m = re.exec(snapshotText);
+  if (!m) fail(`no [${role}]${name ? ` "${name}"` : ''} ref in snapshot:\n${snapshotText.slice(0, 400)}`);
+  return `@${m[1]}`;
+}
+
+async function snapRef(role: string, name?: string, extra: string[] = []): Promise<string> {
+  const snap = await run(['snapshot', '-i', ...extra]);
+  return refOf(snap.stdout, role, name);
+}
+
 const checks: Array<{ name: string; fn: () => Promise<void> }> = [];
 const c = (name: string, fn: () => Promise<void>) => checks.push({ name, fn });
 
@@ -542,9 +560,9 @@ c('snapshot cursor scan pierces open shadow DOM', async () => {
 c('click @e<n> resolves against the last snapshot', async () => {
   // Need a fresh snapshot because viewport/responsive don't touch refs,
   // but click resolves the last ref map regardless of subsequent commands.
-  await run(['snapshot', '-i']);
-  // example.com has one link — @e1.
-  await run(['click', '@e1']);
+  // example.com has one link.
+  const link = await snapRef('link');
+  await run(['click', link]);
   // After clicking the link, URL should have changed from example.com home.
   const r = await run(['eval', 'location.href']);
   assert(r.stdout.trim() !== 'https://example.com/', `click @e1 should navigate away: ${r.stdout}`);
@@ -561,8 +579,7 @@ c('click reports dialogDismissed when a modal closes', async () => {
   `;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--json']);
+  const r = await run(['click', await snapRef('button', 'OK'), '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean; preDialogCount: number; postDialogCount: number }>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(data.dialogDismissed === true, `expected dialogDismissed=true, got ${JSON.stringify(data)}`);
@@ -576,8 +593,7 @@ c('click reports dialogDismissed=false when nothing changes', async () => {
   const html = `<button id="b" onclick="void 0">noop</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--observe-ms', '100', '--json']);
+  const r = await run(['click', await snapRef('button', 'noop'), '--observe-ms', '100', '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean; urlChanged: boolean }>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(data.dialogDismissed === false, `expected dialogDismissed=false, got ${JSON.stringify(data)}`);
@@ -590,11 +606,46 @@ c('click --no-observe skips post-click observation', async () => {
   const html = `<button>x</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--no-observe', '--json']);
+  const r = await run(['click', await snapRef('button', 'x'), '--no-observe', '--json']);
   const data = parseJson<Record<string, unknown>>(r.stdout);
   assert(data.ok === true, 'click should return ok');
   assert(!('dialogDismissed' in data) && !('urlChanged' in data), `expected no observation fields, got keys=${Object.keys(data)}`);
+});
+
+c('click refuses an inherited aria-disabled target fast, --force clicks it', async () => {
+  // Playwright alone would wait out its 30 s action timeout here. The
+  // precheck (src/actionability.ts, kind 'precheck') refuses immediately with
+  // the same typed code the bridge guard uses.
+  const html = `<div aria-disabled="true"><div role="button" id="b" onclick="window.__hit=(window.__hit||0)+1">Go</div></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const started = Date.now();
+  const r = await run(['click', '#b'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(Date.now() - started < 10_000, 'refusal should be immediate, not a Playwright timeout');
+  assert(/not actionable \(disabled\)/.test(r.stderr), `expected a disabled refusal: ${r.stderr}`);
+  assert(/hint: it is disabled/.test(r.stderr), `expected the disabled hint: ${r.stderr}`);
+  const forced = await run(['click', '#b', '--force', '--json']);
+  assert(parseJson<{ ok: boolean }>(forced.stdout).ok === true, `--force click should succeed: ${forced.stdout}`);
+  const hit = await run(['eval', 'window.__hit || 0']);
+  assert(hit.stdout.trim() === '1', `--force should have clicked once, __hit=${hit.stdout.trim()}`);
+});
+
+c('click refuses a target inside an inert subtree', async () => {
+  const html = `<main inert><button id="b">Behind modal</button></main>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['click', '#b'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/not actionable \(inert\)/.test(r.stderr), `expected an inert refusal: ${r.stderr}`);
+});
+
+c('fill refuses an aria-disabled textbox unless --force', async () => {
+  const html = `<div aria-disabled="true"><input id="t" aria-label="Name"></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['fill', '#t', 'x'], { allowFailure: true });
+  assert(r.exitCode === 4 && /not actionable \(disabled\)/.test(r.stderr), `fill should refuse: ${r.stderr}`);
+  await run(['fill', '#t', 'forced', '--force']);
+  const v = await run(['eval', "document.getElementById('t').value"]);
+  assert(v.stdout.trim() === 'forced', `--force fill should land, got ${v.stdout.trim()}`);
 });
 
 c('snapshot scopes locators to the auto-detected modal', async () => {
@@ -617,8 +668,7 @@ c('snapshot scopes locators to the auto-detected modal', async () => {
   `;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   await run(['wait', '200']);
-  await run(['snapshot', '-i']);
-  const r = await run(['click', '@e1', '--json']);
+  const r = await run(['click', await snapRef('button', 'Confirm'), '--json']);
   const data = parseJson<{ ok: boolean; dialogDismissed: boolean }>(r.stdout);
   assert(data.ok === true, `click should not error under strict-mode: ${JSON.stringify(data)}`);
   assert(data.dialogDismissed === true, `expected modal button to dismiss the dialog, got ${JSON.stringify(data)}`);
@@ -626,6 +676,98 @@ c('snapshot scopes locators to the auto-detected modal', async () => {
   const which = await run(['eval', 'JSON.stringify({inside: !!window.__inside, outside: !!window.__outside})']);
   const flags = parseJson<{ inside: boolean; outside: boolean }>(which.stdout);
   assert(flags.inside === true && flags.outside === false, `expected inside-button click, got ${JSON.stringify(flags)}`);
+});
+
+c('modal-scoped refs do not resolve outside the modal', async () => {
+  // A page-wide snapshot mints a ref for the outside button; a modal-scoped
+  // snapshot then replaces both ghax's ref map and Playwright's aria-ref
+  // cache, so the old ref must fail cleanly, never land on the page.
+  const html = `
+    <button id="outside" onclick="window.__outside=true">Outside</button>
+    <div role="dialog" aria-modal="true"><button id="inside">Inside</button></div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const outside = await snapRef('button', 'Outside', ['--no-dialog-scope']);
+  const modalSnap = await run(['snapshot', '-i']);
+  assert(!modalSnap.stdout.includes('"Outside"'), `modal scope should hide the outside button:\n${modalSnap.stdout}`);
+  const r = await run(['click', outside], { allowFailure: true });
+  assert(r.exitCode === 4 && /Run 'ghax snapshot' first/.test(r.stderr), `old ref should fail: exit=${r.exitCode} ${r.stderr}`);
+  const flag = await run(['eval', 'String(!!window.__outside)']);
+  assert(flag.stdout.trim() === 'false', 'the outside button must not have been clicked');
+});
+
+c('an -i or --depth snapshot does not renumber elements it did not print', async () => {
+  const html = `<h2>Section title</h2><nav aria-label="Outer"><ul><li><a href="#d">Deep link</a></li></ul></nav>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const full = (await run(['snapshot'])).stdout;
+  const heading = refOf(full, 'heading', 'Section title');
+  const deep = refOf(full, 'link', 'Deep link');
+  await run(['snapshot', '-i']);        // heading not printed
+  await run(['snapshot', '-d', '0']);   // deep link not printed
+  const again = (await run(['snapshot'])).stdout;
+  assert(refOf(again, 'heading', 'Section title') === heading, `heading renumbered after -i: ${heading} -> ${refOf(again, 'heading', 'Section title')}`);
+  assert(refOf(again, 'link', 'Deep link') === deep, `link renumbered after -d 0: ${deep} -> ${refOf(again, 'link', 'Deep link')}`);
+});
+
+c('refs are stable across snapshots: an insertion above does not shift them', async () => {
+  // onclick flag, not a hash change: fragment navigation on a data: URL
+  // leaves location untouched in Chromium.
+  const html = `<div id="top"></div><a href="#x" id="link" onclick="window.__linked=1; return false">Target link</a>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const before = await snapRef('link', 'Target link');
+  await run(['eval', `document.getElementById('top').innerHTML = '<button>Inserted</button>'; 'ok'`]);
+  const snap = await run(['snapshot', '-i']);
+  const after = refOf(snap.stdout, 'link', 'Target link');
+  assert(after === before, `link ref moved from ${before} to ${after} after an insertion above it`);
+  const inserted = refOf(snap.stdout, 'button', 'Inserted');
+  assert(inserted !== before, 'the new button must get a new number');
+  await run(['click', after]);
+  const linked = await run(['eval', 'String(window.__linked || 0)']);
+  assert(linked.stdout.trim() === '1', `stable ref should still click the link, __linked=${linked.stdout.trim()}`);
+});
+
+c('a ref whose element was removed fails as stale, exit 4', async () => {
+  const html = `<button id="gone">Vanish</button><button>Stay</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const ref = await snapRef('button', 'Vanish');
+  await run(['eval', `document.getElementById('gone').remove(); 'ok'`]);
+  const started = Date.now();
+  const r = await run(['click', ref], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/not found in the latest snapshot/.test(r.stderr), `expected the stale-ref message: ${r.stderr}`);
+  assert(Date.now() - started < 10_000, 'stale ref must fail fast, not wait out the action timeout');
+});
+
+c('snapshot -d limits depth', async () => {
+  const html = `<nav aria-label="Outer"><ul><li><a href="#deep">Deep link</a></li></ul></nav>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const full = await run(['snapshot']);
+  assert(/"Deep link"/.test(full.stdout), `full snapshot should include the deep link:\n${full.stdout}`);
+  const shallow = await run(['snapshot', '-d', '0']);
+  assert(/\[navigation\] "Outer"/.test(shallow.stdout), `depth 0 keeps the top level:\n${shallow.stdout}`);
+  assert(!/"Deep link"/.test(shallow.stdout), `depth 0 must drop nested nodes:\n${shallow.stdout}`);
+});
+
+c('snapshot caps at 250 refs by default and says what it cut', async () => {
+  const html = Array.from({ length: 300 }, (_, i) => `<button>btn ${i}</button>`).join('');
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  type Snap = { text: string; count: number; totalRefs: number; omitted?: { refs: number; lines: number } };
+  const def = parseJson<Snap>((await run(['snapshot', '-i', '--json'])).stdout);
+  assert(def.count === 250 && def.totalRefs === 300, `default: count ${def.count} total ${def.totalRefs}`);
+  assert(def.omitted?.refs === 50, `omitted: ${JSON.stringify(def.omitted)}`);
+  assert(/… 50 more refs omitted \(use --depth\/--selector\/--max-refs, or --no-cap\)$/.test(def.text), 'marker is the last line');
+  const ten = parseJson<Snap>((await run(['snapshot', '-i', '--max-refs', '10', '--json'])).stdout);
+  assert(ten.count === 10 && ten.totalRefs === 300, `--max-refs 10: ${ten.count}`);
+  const all = parseJson<Snap>((await run(['snapshot', '-i', '--no-cap', '--json'])).stdout);
+  assert(all.count === 300 && !all.omitted, `--no-cap: ${all.count}`);
+  const zero = parseJson<Snap>((await run(['snapshot', '-i', '--max-refs', '0', '--json'])).stdout);
+  assert(zero.count === 300, `--max-refs 0: ${zero.count}`);
+  const chars = parseJson<Snap>((await run(['snapshot', '-i', '--max-chars', '2000', '--json'])).stdout);
+  assert(chars.text.split('\n').slice(0, -1).join('\n').length <= 2000, 'char cap honoured');
+  // The ref map is never cut: a ref printed only by --no-cap still clicks.
+  const last = refOf(all.text, 'button', 'btn 299');
+  await run(['snapshot', '-i']);
+  const click = await run(['click', last, '--json']);
+  assert(parseJson<{ ok: boolean }>(click.stdout).ok, 'a ref beyond the printed cap must still resolve');
 });
 
 c('chain executes multiple steps', async () => {
@@ -652,6 +794,116 @@ c('batch runs a step sequence in one round-trip', async () => {
   const textStep = results[2];
   assert(typeof textStep.data === 'string' && (textStep.data as string).toLowerCase().includes('example'),
     `expected example.com text, got ${JSON.stringify(textStep.data).slice(0, 100)}`);
+});
+
+c('batch skips the auto re-snapshot when the page has not changed', async () => {
+  // Freshness guard: a ref step re-snapshots only when the page marker
+  // (document id, mutation count, URL) moved since the last snapshot.
+  const html = `<button onclick="window.__n=(window.__n||0)+1">Count</button>
+    <button onclick="document.body.insertAdjacentHTML('afterbegin','<p>grew</p>')">Grow</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const snap = await run(['snapshot', '-i']);
+  const count = refOf(snap.stdout, 'button', 'Count');
+  const grow = refOf(snap.stdout, 'button', 'Grow');
+  type Step = { cmd: string; ok: boolean; autoSnapshot?: string };
+  const quiet = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'click', args: [count] },
+    { cmd: 'click', args: [count] },
+  ])])).stdout);
+  assert(quiet.every((st) => st.ok), `batch failed: ${JSON.stringify(quiet)}`);
+  assert(quiet[0].autoSnapshot === 'skipped' && quiet[1].autoSnapshot === 'skipped',
+    `a click that changes no DOM should not force a re-snapshot: ${JSON.stringify(quiet)}`);
+  const busy = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'click', args: [grow] },
+    { cmd: 'click', args: [count] },
+  ])])).stdout);
+  assert(busy[0].autoSnapshot === 'skipped', `first step: ${JSON.stringify(busy)}`);
+  assert(busy[1].autoSnapshot === 'taken', `a DOM insertion must trigger a re-snapshot: ${JSON.stringify(busy)}`);
+  const n = await run(['eval', 'window.__n || 0']);
+  assert(n.stdout.trim() === '3', `Count should have been clicked 3 times, got ${n.stdout.trim()}`);
+  // No-op steps carry no autoSnapshot field at all.
+  const plain = parseJson<Step[]>((await run(['batch', JSON.stringify([{ cmd: 'wait', args: ['10'] }])])).stdout);
+  assert(!('autoSnapshot' in plain[0]), 'steps without refs report nothing');
+});
+
+c('batch refuses a ref from a page the tab navigated away from (never clicks page B)', async () => {
+  // Review finding 1: [snapshot, navigate, click old-ref] used to resolve the
+  // old number against page B. Numbers are daemon-wide and never reused, and
+  // a ref minted on another document fails as BRIDGE_REF_STALE.
+  const pageA = `data:text/html,${encodeURIComponent('<button onclick="window.__a=1">Go</button><button>Other</button>')}`;
+  const pageB = `data:text/html,${encodeURIComponent('<button>Other</button><button onclick="window.__b=1">Go</button>')}`;
+  await run(['goto', pageA]);
+  const oldRef = await snapRef('button', 'Go');
+  const r = await run(['batch', JSON.stringify([
+    { cmd: 'snapshot', opts: { interactive: true } },
+    { cmd: 'goto', args: [pageB] },
+    { cmd: 'click', args: [oldRef] },
+  ])], { allowFailure: true });
+  assert(r.exitCode === 4, `batch should exit 4, got ${r.exitCode}: ${r.stdout}`);
+  const steps = parseJson<Array<{ ok: boolean; code?: string; error?: string }>>(r.stdout);
+  assert(steps[2] && steps[2].ok === false && steps[2].code === 'BRIDGE_REF_STALE',
+    `click of the old ref must fail as stale: ${JSON.stringify(steps[2])}`);
+  const b = await run(['eval', 'String(window.__b || 0)']);
+  assert(b.stdout.trim() === '0', 'page B\'s button must not have been clicked');
+  const fresh = await snapRef('button', 'Go');
+  assert(Number(fresh.slice(2)) > Number(oldRef.slice(2)), `page B must get a new number, got ${fresh} after ${oldRef}`);
+});
+
+c('batch re-snapshots after a --selector snapshot instead of skipping (finding 4)', async () => {
+  const html = `<form id="f"><button type="button">Inside</button></form>
+    <button onclick="window.__out=1">Outside</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const outside = await snapRef('button', 'Outside');
+  await run(['snapshot', '-i', '-s', '#f']);   // ref map now holds the form only
+  const r = await run(['batch', JSON.stringify([{ cmd: 'click', args: [outside] }])]);
+  const steps = parseJson<Array<{ ok: boolean; autoSnapshot?: string; error?: string }>>(r.stdout);
+  assert(steps[0].ok && steps[0].autoSnapshot === 'taken', `scoped snapshot must not vouch for the page: ${r.stdout}`);
+  const v = await run(['eval', 'String(window.__out || 0)']);
+  assert(v.stdout.trim() === '1', 'the outside button should have been clicked');
+});
+
+c('batch notices changes the old marker missed: shadow roots and name attributes (finding 5)', async () => {
+  type Step = { cmd: string; ok: boolean; autoSnapshot?: string };
+  // 1. A mutation inside an open shadow root now moves the marker.
+  const shadow = `<div id="h"></div><button onclick="window.__k=(window.__k||0)+1">Keep</button>
+    <script>document.getElementById('h').attachShadow({ mode: 'open' }).innerHTML = '<span>old</span>';</script>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(shadow)}`]);
+  const keep = await snapRef('button', 'Keep');
+  const s1 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('h').shadowRoot.innerHTML = '<button>new</button>'; 'ok'"] },
+    { cmd: 'click', args: [keep] },
+  ])])).stdout);
+  assert(s1[1].autoSnapshot === 'taken', `a shadow-root mutation must force a re-snapshot: ${JSON.stringify(s1)}`);
+  // 1b. No page prototype is patched (fingerprinting would see it), and a
+  // shadow root attached AFTER the snapshot is still noticed (rescan on read).
+  const native = await run(['eval', "String(Element.prototype.attachShadow.toString().includes('[native code]'))"]);
+  assert(native.stdout.trim() === 'true', 'attachShadow must stay native after a snapshot');
+  const late = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["const d = document.createElement('div'); document.body.prepend(d); 'ok'"] },
+    { cmd: 'snapshot', opts: { interactive: true } },
+    { cmd: 'eval', args: ["document.body.firstElementChild.attachShadow({ mode: 'open' }).innerHTML = '<b>x</b>'; 'ok'"] },
+    { cmd: 'click', args: [keep] },
+  ])])).stdout);
+  assert(late[3].autoSnapshot === 'taken', `a shadow root attached after the snapshot must force a re-snapshot: ${JSON.stringify(late)}`);
+  // 2. aria-pressed is now observed.
+  const pressed = `<button id="p" aria-pressed="false">Toggle</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(pressed)}`]);
+  const toggle = await snapRef('button', 'Toggle');
+  const s2 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('p').setAttribute('aria-pressed', 'true'); 'ok'"] },
+    { cmd: 'click', args: [toggle] },
+  ])])).stdout);
+  assert(s2[1].autoSnapshot === 'taken', `aria-pressed must move the marker: ${JSON.stringify(s2)}`);
+  // 3. Belt and braces: an attribute the marker ignores (input type) changes
+  // the role; the role+name recheck refuses to trust the old snapshot.
+  const typed = `<input id="i" type="button" value="Go">`;
+  await run(['goto', `data:text/html,${encodeURIComponent(typed)}`]);
+  const go = await snapRef('button', 'Go');
+  const s3 = parseJson<Step[]>((await run(['batch', JSON.stringify([
+    { cmd: 'eval', args: ["document.getElementById('i').type = 'checkbox'; 'ok'"] },
+    { cmd: 'click', args: [go] },
+  ])], { allowFailure: true })).stdout);
+  assert(s3[1].autoSnapshot === 'taken', `a role change must fail the recheck: ${JSON.stringify(s3)}`);
 });
 
 c('record + replay round-trips', async () => {
@@ -859,18 +1111,16 @@ c('box returns {x, y, width, height} for a selector', async () => {
 
 c('box also resolves @e<n> refs from the last snapshot', async () => {
   await run(['goto', 'https://example.com']);
-  await run(['snapshot', '-i']);
-  const r = await run(['box', '@e1', '--json']);
+  const r = await run(['box', await snapRef('link'), '--json']);
   const box = parseJson<{ width: number }>(r.stdout);
   assert(box.width > 0, 'ref box missing width');
 });
 
 c('is <check> asserts element state', async () => {
   await run(['goto', 'https://example.com']);
-  await run(['snapshot', '-i']);
-  const r = await run(['is', 'visible', '@e1', '--json']);
+  const r = await run(['is', 'visible', await snapRef('link'), '--json']);
   const data = parseJson<{ check: string; target: string; result: boolean }>(r.stdout);
-  assert(data.check === 'visible' && data.result === true, `is visible @e1 → ${JSON.stringify(data)}`);
+  assert(data.check === 'visible' && data.result === true, `is visible <link ref> → ${JSON.stringify(data)}`);
 });
 
 c('storage local round-trips set/get/remove', async () => {
@@ -1893,11 +2143,12 @@ c('gif renders a GIF from a recording (if ffmpeg available)', async () => {
 });
 
 c('downloads land in --downloads-dir with the site-suggested name', async () => {
-  // Regression guard for the connectOverCDP download hijack: Playwright
-  // sets `Browser.setDownloadBehavior` to allowAndName + its temp artifacts
-  // dir, so downloads used to land as extension-less GUIDs in /var/folders.
-  // The daemon re-asserts `behavior: 'allow'` with our downloadPath, so
-  // files land under their real name in the configured dir.
+  // Regression guard for the old connectOverCDP download hijack (files
+  // landing as extension-less GUIDs in /var/folders). The daemon now attaches
+  // with `noDefaults: true`, so Playwright leaves download behaviour alone,
+  // and sets `allow` + our downloadPath exactly once at attach. The
+  // new-window below is deliberate: the old code re-asserted the behaviour
+  // there, and this proves one attach-time call is enough.
   //
   // Runs on an ISOLATED daemon (own state file + own window) so it never
   // disturbs the shared suite daemon or the user's real ~/Downloads.
@@ -1954,6 +2205,54 @@ c('bridge reload errors clearly when the daemon is not in bridge mode', async ()
     /requires bridge mode/i.test(r.stderr + r.stdout),
     `expected a clear bridge-mode error, got exit=${r.exitCode} stdout=${r.stdout} stderr=${r.stderr}`,
   );
+});
+
+c('bridge stats errors clearly when not in bridge mode', async () => {
+  const r = await run(['bridge', 'stats'], { allowFailure: true });
+  assert(r.exitCode === 2, `expected exit 2, got ${r.exitCode} stderr=${r.stderr}`);
+  assert(
+    /requires bridge mode/i.test(r.stderr) && /--trace/.test(r.stderr),
+    `expected a bridge-mode error pointing at --trace, got: ${r.stderr}`,
+  );
+});
+
+c('--trace prints a trace line on stderr and leaves stdout alone', async () => {
+  const plain = await run(['eval', '1 + 1', '--json']);
+  const traced = await run(['eval', '--trace', '1 + 1', '--json']);
+  assert(traced.stdout === plain.stdout, `stdout changed under --trace: ${plain.stdout} vs ${traced.stdout}`);
+  assert(
+    /^trace: \d+ cdp calls, [\d.]+ ms cdp, [\d.]+ ms handler \(cdp\)/m.test(traced.stderr),
+    `expected a trace line on stderr, got: ${traced.stderr}`,
+  );
+  assert(!/^trace:/m.test(plain.stderr), `no trace line expected without the flag: ${plain.stderr}`);
+  // A leading global flag works too.
+  const leading = await run(['--trace', 'tabs', '--json']);
+  assert(/^trace: /m.test(leading.stderr), `leading --trace ignored: ${leading.stderr}`);
+});
+
+c('GHAX_RPC_TIMEOUT bounds a call that never answers', async () => {
+  const prev = process.env.GHAX_RPC_TIMEOUT;
+  process.env.GHAX_RPC_TIMEOUT = '2';
+  try {
+    const started = Date.now();
+    const r = await run(['eval', 'new Promise(() => {})'], { allowFailure: true });
+    assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+    assert(/did not answer `eval` within 2s/.test(r.stderr) && /GHAX_RPC_TIMEOUT/.test(r.stderr), `message: ${r.stderr}`);
+    assert(Date.now() - started < 8000, 'should give up near the 2 s limit');
+  } finally {
+    if (prev === undefined) delete process.env.GHAX_RPC_TIMEOUT; else process.env.GHAX_RPC_TIMEOUT = prev;
+  }
+  // The daemon is still healthy afterwards.
+  await run(['goto', 'https://example.com']);
+});
+
+c('-- ends flags, so --trace (or any dash value) can be passed literally (finding 7)', async () => {
+  await run(['eval', 'window.__tv = 5; 1']);
+  const r = await run(['eval', '--trace', '--', '--window.__tv']);
+  assert(r.stdout.trim() === '4', `the value after -- must reach eval intact, got ${r.stdout.trim()}`);
+  assert(/^trace: /m.test(r.stderr), `--trace before -- is still the flag: ${r.stderr}`);
+  const lead = await run(['--trace', 'eval', '--', '--window.__tv']);
+  assert(lead.stdout.trim() === '3' && /^trace: /m.test(lead.stderr), `leading --trace with a terminator: ${lead.stdout} ${lead.stderr}`);
 });
 
 c('detach shuts the daemon', async () => {

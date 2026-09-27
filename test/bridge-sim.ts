@@ -20,7 +20,19 @@
  */
 
 import { WebSocket } from 'ws';
-import { Bridge, BridgeInterrupted, isStaleContextError } from '../src/bridge';
+import {
+  Bridge,
+  BridgeInterrupted,
+  BridgeTypedError,
+  bridgeGuard,
+  bridgeReleaseHandle,
+  bridgeResolveHandle,
+  bridgeRefStillMatches,
+  bridgeSnapshot,
+  isStaleContextError,
+} from '../src/bridge';
+import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
+import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
@@ -65,6 +77,20 @@ class FakeExt {
   swallow = new Set<string>();
   /** Methods to answer with an error reply, keyed by the `phase` to report. */
   failWithPhase = new Map<string, string>();
+  /**
+   * Scripted CDP answers: return value becomes `result`; a throw becomes an
+   * error reply with that message. Lets sims drive snapshot/guard code paths
+   * that need real-looking results, not `{echoed}`.
+   */
+  replies = new Map<string, (params: any) => unknown>([
+    // ghax's isolated world (finding 6): one frame, one world per "document".
+    ['Page.getFrameTree', () => ({ frameTree: { frame: { id: 'main-frame' } } })],
+    ['Page.createIsolatedWorld', () => ({ executionContextId: 700 + (++this.worldsCreated) })],
+  ]);
+  /** How many isolated worlds this fake has created. */
+  worldsCreated = 0;
+  /** Params of every CDP command received, in order. */
+  sent: Array<{ method: string; params: any }> = [];
   private pingTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -180,7 +206,17 @@ class FakeExt {
     }
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       this.received.push(msg.method);
+      this.sent.push({ method: msg.method, params: msg.params ?? {} });
       if (this.swallow.has(msg.method)) return; // in flight forever
+      const reply = this.replies.get(msg.method);
+      if (reply) {
+        try {
+          this.send({ id: msg.id, result: reply(msg.params ?? {}) });
+        } catch (err) {
+          this.send({ id: msg.id, error: { message: (err as Error).message, phase: 'dispatch' } });
+        }
+        return;
+      }
       const phase = this.failWithPhase.get(msg.method);
       if (phase) {
         this.send({ id: msg.id, error: { message: 'Detached while handling command.', phase } });
@@ -351,6 +387,382 @@ async function main(): Promise<void> {
         !(caught instanceof BridgeInterrupted),
         'an attach-phase failure must NOT claim the action may have landed',
       );
+    });
+  });
+
+  await test('stats: per-method counters and reset', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-stats');
+      await ext.connect();
+      await until(() => bridge.connected, 'bridge to connect');
+      await bridge.send('DOM.resolveNode', {});
+      await bridge.send('DOM.resolveNode', {});
+      await bridge.send('Runtime.evaluate', {});
+      ext.failWithPhase.set('DOM.getBoxModel', 'attach');
+      await bridge.send('DOM.getBoxModel', {}).catch(() => undefined);
+      await sleep(5);
+      const s = bridge.stats();
+      assert(s.methods['DOM.resolveNode']?.calls === 2, `resolveNode calls: ${JSON.stringify(s.methods)}`);
+      assert(s.methods['Runtime.evaluate']?.calls === 1, 'evaluate counted once');
+      assert(s.methods['DOM.getBoxModel']?.errors === 1, 'a failed call counts as an error');
+      assert(s.methods['DOM.resolveNode'].totalMs >= 0 && s.methods['DOM.resolveNode'].maxMs >= 0, 'timings present');
+      bridge.resetStats();
+      const after = bridge.stats();
+      assert(Object.keys(after.methods).length === 0, 'reset clears every method');
+      assert(after.since >= s.since, 'reset moves the since marker');
+    });
+  });
+
+  // ─── Actionability guard (plan 10, C5) ─────────────────────────
+  // The in-page logic needs a real DOM (bridge-live covers it); these pin the
+  // daemon side: CDP failure shapes map to typed errors, the guard verdict
+  // becomes BRIDGE_TARGET_NOT_ACTIONABLE naming the coverer, --force is
+  // carried into the page, and a guarded click stays at three relayed calls.
+  const guardedExt = async (port: number, verdict: Record<string, unknown>) => {
+    const ext = new FakeExt(port, 'inst-guard');
+    ext.replies.set('DOM.resolveNode', () => ({ object: { objectId: 'obj-1' } }));
+    ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: verdict } } }));
+    ext.replies.set('Runtime.releaseObject', () => ({}));
+    await ext.connect();
+    return ext;
+  };
+
+  await test('guard: a gone backend node becomes BRIDGE_REF_STALE', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-stale');
+      ext.replies.set('DOM.resolveNode', () => { throw new Error('No node with given id found'); });
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: unknown = null;
+      await bridgeResolveHandle(bridge, { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
+        .catch((e) => { caught = e; });
+      assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
+      const e = caught as BridgeTypedError;
+      assert(e.code === 'BRIDGE_REF_STALE', `code ${e.code}`);
+      assert(/@e3 is gone/.test(e.hint) && /snapshot -i/.test(e.hint), `hint: ${e.hint}`);
+    });
+  });
+
+  await test('guard: covered target names the coverer and suggests --force', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, {
+        ok: false, reason: 'covered', coveredBy: 'div#overlay "Accept cookies"', x: 10, y: 10, width: 5, height: 5,
+      });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
+      let caught: unknown = null;
+      await bridgeGuard(bridge, h, '@e7', 'click', false).catch((e) => { caught = e; });
+      bridgeReleaseHandle(bridge, h);
+      assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
+      const e = caught as BridgeTypedError;
+      assert(e.code === 'BRIDGE_TARGET_NOT_ACTIONABLE', `code ${e.code}`);
+      assert(e.message.includes('div#overlay'), `message should name the coverer: ${e.message}`);
+      assert(/--force/.test(e.hint) && e.hint.includes('div#overlay'), `hint: ${e.hint}`);
+      assert(e.details?.reason === 'covered', `details: ${JSON.stringify(e.details)}`);
+      await sleep(10);
+      const worldSetup = new Set(['Page.getFrameTree', 'Page.createIsolatedWorld']);
+      assert(
+        ext.received.filter((m) => !worldSetup.has(m)).join(',') === 'DOM.resolveNode,Runtime.callFunctionOn,Runtime.releaseObject',
+        `a guarded click costs resolve + one in-page call + release, got ${ext.received.join(',')}`,
+      );
+      const resolve = ext.sent.find((c) => c.method === 'DOM.resolveNode');
+      assert(typeof resolve?.params.executionContextId === 'number', 'the guard handle must live in the ghax isolated world');
+    });
+  });
+
+  await test('guard: disabled and detached map to the right codes', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, { ok: false, reason: 'disabled' });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
+      let caught: any = null;
+      await bridgeGuard(bridge, h, '@e2', 'click', false).catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_TARGET_NOT_ACTIONABLE' && /disabled/.test(caught.hint), `disabled: ${caught?.hint}`);
+      ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
+      caught = null;
+      await bridgeGuard(bridge, h, '@e2', 'fill', false).catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
+    });
+  });
+
+  await test('guard: --force is carried into the in-page call', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, { ok: true, x: 40, y: 20, width: 80, height: 40 });
+      await until(() => bridge.connected, 'bind');
+      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
+      const { guard } = await bridgeGuard(bridge, h, '@e1', 'click', true);
+      assert(guard.x === 40 && guard.y === 20, `click point from the guard: ${JSON.stringify(guard)}`);
+      const call = ext.sent.find((c) => c.method === 'Runtime.callFunctionOn');
+      assert(call, 'no callFunctionOn sent');
+      assert(call.params.arguments[0].value === 'click', `kind arg: ${JSON.stringify(call.params.arguments)}`);
+      assert(call.params.arguments[1].value === true, 'force must reach the page');
+      assert(/function actionability\(/.test(call.params.functionDeclaration), 'guard source must be inlined');
+    });
+  });
+
+  // ─── Snapshot cost (plan 10, C6) ──────────────────────────────
+  /** A fake page: body (backend 1) with `n` buttons (backend 100+i). */
+  const snapshotExt = (port: number, n: number, cursorItems: number) => {
+    const ext = new FakeExt(port, 'inst-snap');
+    for (const m of ['Runtime.enable', 'DOM.enable', 'Accessibility.enable', 'Runtime.releaseObject']) {
+      ext.replies.set(m, () => ({}));
+    }
+    const liveCursor = new Set<number>(Array.from({ length: cursorItems }, (_, i) => i + 1));
+    ext.replies.set('Runtime.evaluate', (p) => {
+      const expr = String(p.expression ?? '');
+      if (expr.includes('nodes.get(')) {
+        const id = Number(/nodes\.get\((\d+)\)/.exec(expr)?.[1]);
+        return liveCursor.has(id)
+          ? { result: { type: 'object', subtype: 'node', objectId: `cursor-${id}` } }
+          : { result: { type: 'object', subtype: 'null', value: null } };
+      }
+      if (p.returnByValue === false) return { result: { type: 'object', subtype: 'node', objectId: 'root' } };
+      // Cursor pass.
+      return { result: { value: [...liveCursor].map((id) => ({ cursorId: id, text: `div ${id}`, reason: 'cursor:pointer' })) } };
+    });
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'BODY' } }));
+    ext.replies.set('Accessibility.getFullAXTree', () => ({
+      nodes: [
+        { nodeId: 'root', role: { value: 'RootWebArea' }, childIds: ['body'] },
+        {
+          nodeId: 'body', parentId: 'root', backendDOMNodeId: 1, role: { value: 'generic' },
+          childIds: Array.from({ length: n }, (_, i) => `b${i}`),
+        },
+        ...Array.from({ length: n }, (_, i) => ({
+          nodeId: `b${i}`, parentId: 'body', backendDOMNodeId: 100 + i,
+          role: { value: 'button' }, name: { value: `Button ${i}` },
+        })),
+      ],
+    }));
+    return { ext, liveCursor };
+  };
+
+  await test('snapshot: a 40-button page costs a constant number of relayed calls', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext } = snapshotExt(port, 40, 3);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      bridge.resetStats();
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      await sleep(10);
+      const buttons = [...snap.refs.keys()].filter((k) => k.startsWith('e'));
+      assert(buttons.length === 40, `expected 40 @e refs, got ${buttons.length}`);
+      assert(snap.refs.get('c1')?.cursorId === 1, 'cursor refs carry the registry id');
+      const calls = Object.values(bridge.stats().methods).reduce((n, m) => n + m.calls, 0);
+      assert(calls <= 10, `snapshot should be <= 10 relayed calls, got ${calls}: ${ext.received.join(',')}`);
+      assert(!ext.received.includes('DOM.resolveNode'), 'no per-ref resolveNode (no DOM tagging)');
+      assert(ext.received.filter((m) => m === 'DOM.describeNode').length === 1, 'only the root is described');
+    });
+  });
+
+  await test('snapshot: cursor refs resolve lazily, and a gone node is BRIDGE_REF_STALE', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext, liveCursor } = snapshotExt(port, 2, 2);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const c2 = snap.refs.get('c2')!;
+      const h = await bridgeResolveHandle(bridge, c2, '@c2');
+      assert(h.objectId === 'cursor-2', `resolved to ${h.objectId}`);
+      liveCursor.delete(2);
+      let caught: any = null;
+      await bridgeResolveHandle(bridge, c2, '@c2').catch((e) => { caught = e; });
+      assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
+    });
+  });
+
+  // ─── Snapshot budget (plan 10, C8) ────────────────────────────
+  await test('budget: a 300-button bridge snapshot prints 250 refs and an omitted marker', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext } = snapshotExt(port, 300, 0);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      assert(snap.refs.size === 300, `ref map keeps every ref, got ${snap.refs.size}`);
+      const b = applySnapshotBudget(snap.text.split('\n'), budgetFromOpts({}));
+      assert(b.shownRefs === DEFAULT_MAX_REFS && b.totalRefs === 300, `shown ${b.shownRefs} / total ${b.totalRefs}`);
+      const last = b.text.split('\n').at(-1) ?? '';
+      assert(last === '… 50 more refs omitted (use --depth/--selector/--max-refs, or --no-cap)', `marker: ${last}`);
+      assert(b.omittedRefs === 50 && b.omittedLines === 50, `omitted ${JSON.stringify(b)}`);
+    });
+  });
+
+  await test('budget: --max-refs, --max-chars, --no-cap and --max-refs 0', async () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `@e${i + 1} [button] "b${i}"`);
+    lines.push('', '── cursor-interactive (not in ARIA tree) ──', '@c1 [cursor:pointer] "x"');
+    const ten = applySnapshotBudget(lines, budgetFromOpts({ 'max-refs': '10' }));
+    assert(ten.shownRefs === 10 && ten.totalRefs === 301, `max-refs 10: ${ten.shownRefs}/${ten.totalRefs}`);
+    assert(!ten.text.includes('cursor-interactive'), 'the cursor section comes after the AX refs, so it is cut first');
+    const chars = applySnapshotBudget(lines, budgetFromOpts({ 'max-chars': '2000' }));
+    const body = chars.text.split('\n').slice(0, -1).join('\n');
+    assert(body.length <= 2000, `kept text ${body.length} > 2000`);
+    assert(/more refs omitted/.test(chars.text), 'char cap also writes the marker');
+    for (const opts of [{ 'no-cap': true }, { 'max-refs': '0' }, { maxRefs: 0 }]) {
+      const all = applySnapshotBudget(lines, budgetFromOpts(opts));
+      assert(all.shownRefs === 301 && all.omittedLines === 0, `${JSON.stringify(opts)} should not cap`);
+      assert(!/omitted/.test(all.text), 'no marker when nothing was cut');
+    }
+    const small = applySnapshotBudget(['@e1 [link] "a"'], budgetFromOpts({}));
+    assert(small.text === '@e1 [link] "a"' && small.omittedLines === 0, 'small pages are untouched');
+  });
+
+  // ─── Stable bridge refs (plan 10, C9) ─────────────────────────
+  /** A page whose button list the test edits between snapshots. */
+  const mutablePage = (port: number, buttons: Array<{ id: number; name: string; role?: string }>) => {
+    const ext = new FakeExt(port, 'inst-ident');
+    for (const m of ['Runtime.enable', 'DOM.enable', 'Accessibility.enable', 'Runtime.releaseObject']) {
+      ext.replies.set(m, () => ({}));
+    }
+    ext.replies.set('Runtime.evaluate', (p) => (p.returnByValue === false
+      ? { result: { type: 'object', subtype: 'node', objectId: 'root' } }
+      : { result: { value: [] } }));
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'BODY' } }));
+    ext.replies.set('Accessibility.getFullAXTree', () => ({
+      nodes: [
+        { nodeId: 'body', backendDOMNodeId: 1, role: { value: 'generic' }, childIds: buttons.map((b) => `n${b.id}`) },
+        ...buttons.map((b) => ({
+          nodeId: `n${b.id}`, parentId: 'body', backendDOMNodeId: b.id,
+          role: { value: b.role ?? 'button' }, name: { value: b.name },
+        })),
+      ],
+    }));
+    return ext;
+  };
+  const refByName = (snap: { refs: Map<string, { name: string }> }, name: string) =>
+    [...snap.refs].find(([, r]) => r.name === name)?.[0];
+
+  await test('identity: an insertion above keeps existing refs; the newcomer gets a new number', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons = [{ id: 10, name: 'Save' }, { id: 11, name: 'Cancel' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const registry = new RefRegistry();
+      const identity = registry.forDoc('doc-a');
+      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const save = refByName(first, 'Save');
+      const cancel = refByName(first, 'Cancel');
+      buttons.unshift({ id: 9, name: 'Inserted' });
+      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      assert(refByName(second, 'Save') === save, `Save moved: ${save} -> ${refByName(second, 'Save')}`);
+      assert(refByName(second, 'Cancel') === cancel, 'Cancel moved');
+      const inserted = refByName(second, 'Inserted');
+      assert(inserted && inserted !== save && inserted !== cancel, `newcomer ref ${inserted}`);
+      assert(second.text.indexOf(`@${inserted}`) < second.text.indexOf(`@${save}`), 'document order is kept, numbers are sparse');
+    });
+  });
+
+  await test('identity: a role or name change remints; removed nodes are pruned (unscoped only)', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons: Array<{ id: number; name: string; role?: string }> = [{ id: 10, name: 'Save' }, { id: 11, name: 'Go' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const registry = new RefRegistry();
+      const identity = registry.forDoc('doc-a');
+      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const save = refByName(first, 'Save');
+      buttons[0].name = 'Saved';
+      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      assert(refByName(second, 'Saved') !== save, 'a renamed node must not keep its old ref');
+      buttons[1].role = 'link';
+      const third = await bridgeSnapshot(bridge, { refs: identity });
+      assert(third.refs.get(refByName(first, 'Go')!) === undefined, 'a node whose role changed gets a new ref');
+      buttons.splice(0, 1);
+      const held = registry.size;
+      await bridgeSnapshot(bridge, { refs: identity, selector: '#main' });
+      assert(registry.size === held, '--selector snapshots never prune');
+      await bridgeSnapshot(bridge, { refs: identity });
+      assert(registry.size === held - 1, `an unscoped snapshot prunes nodes that left the page (${held} -> ${registry.size})`);
+    });
+  });
+
+  await test('identity: numbers are never reused after a navigation (finding 1)', async () => {
+    await withBridge(async (bridge, port) => {
+      const buttons = [{ id: 10, name: 'Buy' }, { id: 11, name: 'Delete account' }];
+      const ext = mutablePage(port, buttons);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const registry = new RefRegistry();
+      const pageA = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-a') });
+      const aRefs = [...pageA.refs.keys()];
+      // Navigation: the daemon clears identities (clearSnapshotRefs) but the
+      // new document reuses the SAME backend node ids and even the same names.
+      registry.clear();
+      buttons[0].name = 'Delete account';
+      buttons[1].name = 'Buy';
+      const pageB = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-b') });
+      const num = (r: string) => Number(r.slice(1));
+      const maxA = Math.max(...aRefs.map(num));
+      for (const r of pageB.refs.keys()) assert(num(r) > maxA, `page B reused ${r} (page A went up to e${maxA})`);
+      for (const r of aRefs) {
+        assert(!pageB.refs.has(r), `${r} from page A must not resolve on page B`);
+        assert(registry.docOf(r) === 'doc-a', `${r} should remember it was minted on doc-a`);
+      }
+      assert(docIdOfMarker('doc-b|3|https://x/') === 'doc-b' && docIdOfMarker(null) === null, 'marker parsing');
+    });
+  });
+
+  await test('snapshot: reports whether it covered the whole page (finding 4)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = mutablePage(port, [{ id: 10, name: 'Save' }]);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      assert((await bridgeSnapshot(bridge, {})).scoped === false, 'a body-rooted snapshot is not scoped');
+      assert((await bridgeSnapshot(bridge, { selector: '#form' })).scoped === true, '--selector is scoped');
+      ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'DIALOG' } }));
+      assert((await bridgeSnapshot(bridge, {})).scoped === true, 'a modal-rooted snapshot is scoped');
+    });
+  });
+
+  await test('recheck: a skipped snapshot is re-verified by role and name (finding 5)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-recheck');
+      let ax = { role: 'button', name: 'Save' };
+      ext.replies.set('Accessibility.getPartialAXTree', (p) => ({
+        nodes: [{ nodeId: 'n', backendDOMNodeId: p.backendNodeId, role: { value: ax.role }, name: { value: ax.name } }],
+      }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const ref = { backendNodeId: 42, role: 'button', name: 'Save' };
+      assert(await bridgeRefStillMatches(bridge, ref), 'same role and name should match');
+      ax = { role: 'button', name: 'Delete' };
+      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a rename must not match');
+      ax = { role: 'checkbox', name: 'Save' };
+      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a role change must not match');
+      assert(await bridgeRefStillMatches(bridge, { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
+    });
+  });
+
+  await test('isolated world: created once per document, re-created after navigation (finding 6)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-world');
+      ext.replies.set('DOM.resolveNode', () => ({ object: { objectId: 'o' } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const ref = { backendNodeId: 5, role: 'button', name: 'Go' };
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(ext.worldsCreated === 1, `one world per document, got ${ext.worldsCreated}`);
+      const ctxIds = ext.sent.filter((c) => c.method === 'DOM.resolveNode').map((c) => c.params.executionContextId);
+      assert(ctxIds.every((id) => id === 701), `both resolves in world 701: ${ctxIds}`);
+      // Main-frame navigation drops the world; the next use makes a new one.
+      ext.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'main-frame' } } });
+      await sleep(20);
+      await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(Number(ext.worldsCreated) === 2, 'navigation must re-create the world');
+      // A main-world handle (fill) does not use the isolated world at all.
+      await bridgeResolveHandle(bridge, ref, '@e1', 'main');
+      const last = ext.sent.filter((c) => c.method === 'DOM.resolveNode').at(-1);
+      assert(last?.params.executionContextId === undefined, 'main-world resolve carries no context id');
+      // A stale context is re-created once, transparently.
+      let fail = true;
+      ext.replies.set('DOM.resolveNode', (p) => {
+        if (fail && p.executionContextId) { fail = false; throw new Error('Cannot find context with specified id'); }
+        return { object: { objectId: 'o2' } };
+      });
+      const h = await bridgeResolveHandle(bridge, ref, '@e1');
+      assert(h.objectId === 'o2' && Number(ext.worldsCreated) === 3, `stale world should be rebuilt: ${ext.worldsCreated}`);
     });
   });
 
