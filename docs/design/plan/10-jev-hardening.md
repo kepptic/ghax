@@ -152,3 +152,14 @@ Store {ref, role, name} per backendNodeId and remint when role or name changed (
 
 ### Caps
 Implement on the new JSON renderer's line array and on bridgeSnapshot via shared src/snapshot-budget.ts.
+
+---
+
+## Implementation notes (deviations found in the code)
+
+- C2: `box` is Mutating on the Rust side too (the plan listed it as idempotent), matching `BRIDGE_RETRY_SAFE` and 08 §2.3: it scrolls before measuring. The same commit sets `.timeout(None)` on the blocking reqwest client: its implicit 30 s default contradicted the code comment and, with the old retry, turned a slow verb into a second full run.
+- C5: the guard's click point comes from `getBoundingClientRect` in the same call. `Runtime.releaseObject` is fire-and-forget, so a guarded click is resolve + one in-page call + a non-blocking release. The implicit-role table deciding whether `aria-disabled` applies is a simplified subset of Playwright's `getAriaRole`. `disabled` is checked on both the element and its button/link retarget.
+- C6: cursor handles skip `DOM.describeNode` (nothing downstream needs the backend id); `bridgeBox` uses the objectId for them.
+- C7: nameless `generic` nodes are flattened unless `cursor: 'pointer'`; `-d` is applied by ghax's own renderer (Playwright's `depth` counts the generic wrappers `mode: 'ai'` adds). `resolveRef` is now async and its count check also applies to `is`, so `is hidden @eN` on a removed element errors instead of answering.
+- C9: cursor refs are numbered by the page registry id (`c<id>`), which makes them stable without extra bookkeeping.
+- The repo's Rust sources are not rustfmt-clean at baseline (`cargo fmt` rewrites 19 files), so no repo-wide `cargo fmt` was run; new Rust code follows the existing style.
