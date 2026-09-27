@@ -83,7 +83,14 @@ const IDEMPOTENT: &[&str] = &[
     "ext.sw.logs",
 ];
 
-pub fn retry_class(cmd: &str) -> RetryClass {
+/// Per-call class: some reads mutate with a flag. `bridge stats --reset`
+/// prints and zeroes the counters, so a retry after a lost reply would
+/// report a second, empty window.
+pub fn retry_class_for(cmd: &str, opts: &Value) -> RetryClass {
+    let flag = |k: &str| matches!(opts.get(k), Some(Value::Bool(true)));
+    if cmd == "bridge.stats" && flag("reset") {
+        return RetryClass::Mutating;
+    }
     if IDEMPOTENT.contains(&cmd) {
         RetryClass::Idempotent
     } else {
@@ -162,7 +169,7 @@ fn call_with(
 ) -> Result<Value> {
     match call_once(client, port, cmd, args, opts) {
         Ok(v) => Ok(v),
-        Err(e) if should_retry(&e, retry_class(cmd)) => {
+        Err(e) if should_retry(&e, retry_class_for(cmd, opts)) => {
             std::thread::sleep(std::time::Duration::from_millis(50));
             call_once(client, port, cmd, args, opts)
         }
@@ -275,11 +282,30 @@ mod tests {
     #[test]
     fn retry_classes() {
         for cmd in ["status", "tabs", "snapshot", "text", "bridge.stats", "ext.sw.logs"] {
-            assert_eq!(retry_class(cmd), RetryClass::Idempotent, "{cmd}");
+            assert_eq!(retry_class_for(cmd, &json!({})), RetryClass::Idempotent, "{cmd}");
         }
         for cmd in ["click", "fill", "goto", "eval", "batch", "box", "press", "brand-new-verb"] {
-            assert_eq!(retry_class(cmd), RetryClass::Mutating, "{cmd}");
+            assert_eq!(retry_class_for(cmd, &json!({})), RetryClass::Mutating, "{cmd}");
         }
+    }
+
+    #[test]
+    fn a_resetting_stats_call_is_mutating() {
+        assert_eq!(retry_class_for("bridge.stats", &json!({})), RetryClass::Idempotent);
+        assert_eq!(retry_class_for("bridge.stats", &json!({ "reset": false })), RetryClass::Idempotent);
+        assert_eq!(retry_class_for("bridge.stats", &json!({ "reset": true })), RetryClass::Mutating);
+    }
+
+    #[test]
+    fn a_lost_reply_to_stats_reset_is_not_retried() {
+        let (port, seen) = silent_daemon();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let reset = json!({ "reset": true });
+        let _ = call_with(&client, port, "bridge.stats", &json!([]), &reset).unwrap_err();
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "stats --reset must be sent once");
     }
 
     #[test]

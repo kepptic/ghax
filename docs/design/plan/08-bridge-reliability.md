@@ -298,7 +298,7 @@ table is the deliverable, not the retry machinery.
 the daemon's replay after a bridge drop. The CLI had its own, older retry:
 `rpc.rs` re-sent any verb once on any transport error, including a timeout
 or a reset *after* the request reached the daemon, which is a lost reply,
-not a lost command. `rpc::retry_class` now splits verbs into `Idempotent`
+not a lost command. `rpc::retry_class_for` now splits verbs into `Idempotent`
 (an allowlist of reads, mirroring the `safe` row plus the buffer readers)
 and `Mutating` (everything else, `batch` included, and unknown verbs by
 default). Mutating verbs are re-sent only when the TCP connect failed, the

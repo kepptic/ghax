@@ -134,7 +134,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   command, so a slow `click` could run twice. Verbs now have a retry class:
   reads (`status`, `tabs`, `snapshot`, `text`, `console`, ...) keep the one
   retry; everything else, including `batch` as a whole and any verb added
-  later, is retried only when the TCP connect itself failed.
+  later, is retried only when the TCP connect itself failed. A read
+  that mutates with a flag follows the flag: `bridge stats --reset` is
+  never re-sent, so a lost reply can't zero the counters twice.
 - **The CLI's daemon timeout is explicit: 120 s per call.** It used to be
   reqwest's implicit 30 s, which cut off long `wait --stable` and `perf
   --wait` runs. Now a call gets 120 s by default (`GHAX_RPC_TIMEOUT=<s>`,
