@@ -112,10 +112,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   command, so a slow `click` could run twice. Verbs now have a retry class:
   reads (`status`, `tabs`, `snapshot`, `text`, `console`, ...) keep the one
   retry; everything else, including `batch` as a whole and any verb added
-  later, is retried only when the TCP connect itself failed. The same
-  change removes reqwest's implicit 30 s client timeout, which the code
-  comment already said was not wanted: a long `wait --stable` or `perf
-  --wait` no longer dies at 30 s.
+  later, is retried only when the TCP connect itself failed.
+- **The CLI's daemon timeout is explicit: 120 s per call.** It used to be
+  reqwest's implicit 30 s, which cut off long `wait --stable` and `perf
+  --wait` runs. Now a call gets 120 s by default (`GHAX_RPC_TIMEOUT=<s>`,
+  `0` = none), a verb given its own `--timeout` gets that plus 30 s, and
+  `perf`, `profile`, `batch` and `ext hot-reload` are unbounded. A timeout
+  says which verb stalled and how to raise the limit, and is never retried
+  for a mutating verb.
 
 - **The CDP transport attaches with Playwright's `noDefaults`.**
   `connectOverCDP` used to apply Playwright's launch-time defaults to the

@@ -145,6 +145,8 @@ Dev workflow:
   update [--check] [--to vX.Y.Z]    # install latest GitHub release (or check only)
 
 Add --json for machine-readable output on any command.
+Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
+  0 = none); verbs with their own --timeout get that plus 30 s.
 Add --trace to any command for a one-line CDP call summary on stderr
   (count, time, heaviest methods). stdout is unchanged.
 "#;

@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Set by the global `--trace` flag (stripped from argv in dispatch::run so
 /// it can sit anywhere on the line without swallowing a positional).
@@ -90,11 +91,63 @@ pub fn retry_class(cmd: &str) -> RetryClass {
     }
 }
 
+/// Default per-call budget. Long enough for any ordinary verb, short enough
+/// that a page stuck on an alert or an `eval` of a never-settling promise
+/// doesn't hang the CLI forever. Override with GHAX_RPC_TIMEOUT (seconds,
+/// 0 = no limit).
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 120;
+/// Added to a verb's own `--timeout` so the daemon's answer (which may be a
+/// truthful "timed out") arrives before the CLI gives up.
+const OWN_TIMEOUT_MARGIN_SECS: u64 = 30;
+/// Verbs whose run time is set by the user (durations, waits, whole plans),
+/// so no default cap applies.
+const UNBOUNDED: &[&str] = &["perf", "profile", "batch", "ext.hot-reload"];
+
+/// The HTTP timeout for one call. `env` is GHAX_RPC_TIMEOUT's value.
+pub fn timeout_for(cmd: &str, opts: &Value, env: Option<&str>) -> Option<Duration> {
+    let own_ms = ["timeout", "timeoutMs"].iter().find_map(|k| match opts.get(*k) {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    });
+    if let Some(ms) = own_ms {
+        return Some(Duration::from_millis(ms) + Duration::from_secs(OWN_TIMEOUT_MARGIN_SECS));
+    }
+    if UNBOUNDED.contains(&cmd) {
+        return None;
+    }
+    let secs = env
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
 pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
-    // No global timeout on purpose: long verbs (qa, perf, wait --stable) can
-    // run for minutes. reqwest's blocking client otherwise defaults to 30s.
-    let client = reqwest::blocking::Client::builder().timeout(None).build()?;
-    call_with(&client, port, cmd, &args, &opts)
+    let env = std::env::var("GHAX_RPC_TIMEOUT").ok();
+    let timeout = timeout_for(cmd, &opts, env.as_deref());
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
+    call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
+}
+
+/// Turn a bare reqwest timeout into an error that says what to do.
+fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> anyhow::Error {
+    let timed_out = err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false);
+    match (timed_out, timeout) {
+        (true, Some(t)) => anyhow!(RpcError {
+            message: format!("daemon did not answer `{cmd}` within {}s", t.as_secs()),
+            exit_code: Some(4),
+            hint: Some(
+                "the page may be stuck on a dialog or a promise that never settles; the command \
+                 may still be running. Raise the limit with GHAX_RPC_TIMEOUT=<seconds> (0 = none)."
+                    .into(),
+            ),
+        }),
+        _ => err,
+    }
 }
 
 /// One retry for a transport hiccup (post-spawn warm-up, GC pause,
@@ -218,7 +271,6 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
-    use std::time::Duration;
 
     #[test]
     fn retry_classes() {
@@ -268,6 +320,38 @@ mod tests {
             }
         });
         (port, seen)
+    }
+
+    #[test]
+    fn timeouts_default_env_own_and_unbounded() {
+        let none = json!({});
+        assert_eq!(timeout_for("click", &none, None), Some(Duration::from_secs(120)));
+        assert_eq!(timeout_for("eval", &none, Some("5")), Some(Duration::from_secs(5)));
+        assert_eq!(timeout_for("eval", &none, Some("0")), None);
+        assert_eq!(timeout_for("eval", &none, Some("junk")), Some(Duration::from_secs(120)));
+        for cmd in ["perf", "profile", "batch", "ext.hot-reload"] {
+            assert_eq!(timeout_for(cmd, &none, None), None, "{cmd}");
+        }
+        let own = json!({ "timeout": "600000" });
+        assert_eq!(timeout_for("wait", &own, None), Some(Duration::from_secs(630)));
+        let own_ms = json!({ "timeoutMs": 45000 });
+        assert_eq!(timeout_for("bridge.reload", &own_ms, Some("1")), Some(Duration::from_secs(75)));
+    }
+
+    #[test]
+    fn a_timed_out_mutation_is_not_retried_and_says_why() {
+        let (port, seen) = silent_daemon();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let err = call_with(&client, port, "fill", &json!(["@e1", "x"]), &json!({})).unwrap_err();
+        assert!(err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false));
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "a timed-out fill must not be re-sent");
+        let explained = explain_timeout(err, "fill", Some(Duration::from_millis(200)));
+        let rpc = explained.downcast_ref::<RpcError>().expect("typed timeout error");
+        assert!(rpc.message.contains("did not answer `fill`"), "{}", rpc.message);
+        assert!(rpc.hint.as_deref().unwrap_or("").contains("GHAX_RPC_TIMEOUT"));
     }
 
     #[test]

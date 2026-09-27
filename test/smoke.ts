@@ -2160,6 +2160,22 @@ c('--trace prints a trace line on stderr and leaves stdout alone', async () => {
   assert(/^trace: /m.test(leading.stderr), `leading --trace ignored: ${leading.stderr}`);
 });
 
+c('GHAX_RPC_TIMEOUT bounds a call that never answers', async () => {
+  const prev = process.env.GHAX_RPC_TIMEOUT;
+  process.env.GHAX_RPC_TIMEOUT = '2';
+  try {
+    const started = Date.now();
+    const r = await run(['eval', 'new Promise(() => {})'], { allowFailure: true });
+    assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+    assert(/did not answer `eval` within 2s/.test(r.stderr) && /GHAX_RPC_TIMEOUT/.test(r.stderr), `message: ${r.stderr}`);
+    assert(Date.now() - started < 8000, 'should give up near the 2 s limit');
+  } finally {
+    if (prev === undefined) delete process.env.GHAX_RPC_TIMEOUT; else process.env.GHAX_RPC_TIMEOUT = prev;
+  }
+  // The daemon is still healthy afterwards.
+  await run(['goto', 'https://example.com']);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);
