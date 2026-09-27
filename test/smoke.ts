@@ -732,6 +732,29 @@ c('snapshot -d limits depth', async () => {
   assert(!/"Deep link"/.test(shallow.stdout), `depth 0 must drop nested nodes:\n${shallow.stdout}`);
 });
 
+c('snapshot caps at 250 refs by default and says what it cut', async () => {
+  const html = Array.from({ length: 300 }, (_, i) => `<button>btn ${i}</button>`).join('');
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  type Snap = { text: string; count: number; totalRefs: number; omitted?: { refs: number; lines: number } };
+  const def = parseJson<Snap>((await run(['snapshot', '-i', '--json'])).stdout);
+  assert(def.count === 250 && def.totalRefs === 300, `default: count ${def.count} total ${def.totalRefs}`);
+  assert(def.omitted?.refs === 50, `omitted: ${JSON.stringify(def.omitted)}`);
+  assert(/… 50 more refs omitted \(use --depth\/--selector\/--max-refs, or --no-cap\)$/.test(def.text), 'marker is the last line');
+  const ten = parseJson<Snap>((await run(['snapshot', '-i', '--max-refs', '10', '--json'])).stdout);
+  assert(ten.count === 10 && ten.totalRefs === 300, `--max-refs 10: ${ten.count}`);
+  const all = parseJson<Snap>((await run(['snapshot', '-i', '--no-cap', '--json'])).stdout);
+  assert(all.count === 300 && !all.omitted, `--no-cap: ${all.count}`);
+  const zero = parseJson<Snap>((await run(['snapshot', '-i', '--max-refs', '0', '--json'])).stdout);
+  assert(zero.count === 300, `--max-refs 0: ${zero.count}`);
+  const chars = parseJson<Snap>((await run(['snapshot', '-i', '--max-chars', '2000', '--json'])).stdout);
+  assert(chars.text.split('\n').slice(0, -1).join('\n').length <= 2000, 'char cap honoured');
+  // The ref map is never cut: a ref printed only by --no-cap still clicks.
+  const last = refOf(all.text, 'button', 'btn 299');
+  await run(['snapshot', '-i']);
+  const click = await run(['click', last, '--json']);
+  assert(parseJson<{ ok: boolean }>(click.stdout).ok, 'a ref beyond the printed cap must still resolve');
+});
+
 c('chain executes multiple steps', async () => {
   const steps = JSON.stringify([
     { cmd: 'goto', args: ['https://example.com'] },

@@ -16,6 +16,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not counted (use `DEBUG=pw:protocol DEBUG_FILE=/tmp/pw-protocol.log ghax
   attach` for that). `ghax bridge stats` outside bridge mode exits 2 and
   points at `--trace`.
+- **`snapshot` has a default output budget: 250 refs / 32 KB.** A large
+  SPA used to print thousands of refs, all of which an agent pays for in
+  context before acting. Past the budget the text stops at a line
+  boundary and ends with `… N more refs omitted (use
+  --depth/--selector/--max-refs, or --no-cap)`. Only the text is cut: the
+  ref map keeps every ref, so a ref from a narrower or uncapped snapshot
+  still clicks. `--max-refs <n>`, `--max-chars <n>`, and `--no-cap` (or
+  `--max-refs 0`) tune it. `--json` gains `totalRefs` and, when cut,
+  `omitted: {refs, lines}`; **`count` is now the number printed**, and
+  `qa` reports `totalRefs`. `batch`'s automatic re-snapshot is uncapped.
+  Same budget on both transports (`src/snapshot-budget.ts`).
 
 ### Changed
 - **Stable `@e` refs on the CDP transport.** Snapshots now come from

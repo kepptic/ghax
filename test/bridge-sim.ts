@@ -30,6 +30,7 @@ import {
   bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
+import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
@@ -557,6 +558,41 @@ async function main(): Promise<void> {
       await bridgeResolveHandle(bridge, c2, '@c2').catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
+  });
+
+  // ─── Snapshot budget (plan 10, C8) ────────────────────────────
+  await test('budget: a 300-button bridge snapshot prints 250 refs and an omitted marker', async () => {
+    await withBridge(async (bridge, port) => {
+      const { ext } = snapshotExt(port, 300, 0);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      assert(snap.refs.size === 300, `ref map keeps every ref, got ${snap.refs.size}`);
+      const b = applySnapshotBudget(snap.text.split('\n'), budgetFromOpts({}));
+      assert(b.shownRefs === DEFAULT_MAX_REFS && b.totalRefs === 300, `shown ${b.shownRefs} / total ${b.totalRefs}`);
+      const last = b.text.split('\n').at(-1) ?? '';
+      assert(last === '… 50 more refs omitted (use --depth/--selector/--max-refs, or --no-cap)', `marker: ${last}`);
+      assert(b.omittedRefs === 50 && b.omittedLines === 50, `omitted ${JSON.stringify(b)}`);
+    });
+  });
+
+  await test('budget: --max-refs, --max-chars, --no-cap and --max-refs 0', async () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `@e${i + 1} [button] "b${i}"`);
+    lines.push('', '── cursor-interactive (not in ARIA tree) ──', '@c1 [cursor:pointer] "x"');
+    const ten = applySnapshotBudget(lines, budgetFromOpts({ 'max-refs': '10' }));
+    assert(ten.shownRefs === 10 && ten.totalRefs === 301, `max-refs 10: ${ten.shownRefs}/${ten.totalRefs}`);
+    assert(!ten.text.includes('cursor-interactive'), 'the cursor section comes after the AX refs, so it is cut first');
+    const chars = applySnapshotBudget(lines, budgetFromOpts({ 'max-chars': '2000' }));
+    const body = chars.text.split('\n').slice(0, -1).join('\n');
+    assert(body.length <= 2000, `kept text ${body.length} > 2000`);
+    assert(/more refs omitted/.test(chars.text), 'char cap also writes the marker');
+    for (const opts of [{ 'no-cap': true }, { 'max-refs': '0' }, { maxRefs: 0 }]) {
+      const all = applySnapshotBudget(lines, budgetFromOpts(opts));
+      assert(all.shownRefs === 301 && all.omittedLines === 0, `${JSON.stringify(opts)} should not cap`);
+      assert(!/omitted/.test(all.text), 'no marker when nothing was cut');
+    }
+    const small = applySnapshotBudget(['@e1 [link] "a"'], budgetFromOpts({}));
+    assert(small.text === '@e1 [link] "a"' && small.omittedLines === 0, 'small pages are untouched');
   });
 
   await test('a single extension binds on hello', async () => {

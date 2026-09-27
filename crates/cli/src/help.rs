@@ -49,6 +49,10 @@ Tab:
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
+           [--max-refs <n>] [--max-chars <n>] [--no-cap]
+                                  # prints at most 250 refs / 32 KB by default and
+                                  #   ends with "… N more refs omitted"; every ref
+                                  #   stays clickable. --max-refs 0 = --no-cap.
   click <@ref|selector> [--force]           # refuses covered, disabled, inert,
                                              #   hidden targets; --force skips that
   fill <@ref|selector> <value> [--force]    # Monaco-aware: routes into

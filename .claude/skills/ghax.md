@@ -214,6 +214,8 @@ ghax html [<selector>]                   # innerHTML
 # Snapshot + interact (the @ref workflow)
 ghax snapshot -i                         # interactive-only a11y tree with @e refs
 ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
+ghax snapshot -i -s '#main'              # narrow when the output ends "… N more refs omitted"
+ghax snapshot -i --no-cap                # or lift the 250-ref / 32 KB default budget
 ghax click @e3                           # click by ref (refuses covered/disabled targets)
 ghax click @e3 --force                   # skip the actionability checks
 ghax fill @e5 "hello"                    # React-safe input fill

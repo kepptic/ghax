@@ -367,7 +367,12 @@ pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
                 // ── Snapshot ──
                 let snap_opts = if annotate { json!({ "interactive": true, "annotate": true }) } else { json!({ "interactive": true }) };
                 let snap_res = rpc::call(port, "snapshot", json!([]), snap_opts).unwrap_or(Value::Null);
-                let ref_count = snap_res.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                // `totalRefs` since the snapshot cap: `count` is only what was printed.
+                let ref_count = snap_res
+                    .get("totalRefs")
+                    .or_else(|| snap_res.get("count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let annotated_path = snap_res.get("annotatedPath").and_then(|v| v.as_str()).map(str::to_string);
 
                 // ── Screenshot ──

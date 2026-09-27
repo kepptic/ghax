@@ -46,6 +46,7 @@ import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import { actionability } from './actionability';
+import { applySnapshotBudget, budgetFromOpts, type BudgetedText } from './snapshot-budget';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -1002,7 +1003,8 @@ register('batch', async (ctx, args, opts) => {
     // caller doesn't have to interleave manual snapshots.
     if (autoSnapshot && snapshotHandler && usesRef({ args: stepArgs, opts: stepOpts })) {
       try {
-        await snapshotHandler(ctx, [], { interactive: true });
+        // Uncapped: the ref map is what matters here, and nobody reads the text.
+        await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
       } catch {
         // A snapshot failure is informational — the step itself will
         // surface the concrete "ref not found" error if it's still bad.
@@ -1851,7 +1853,21 @@ register('box', async (ctx, args) => {
   return box;
 });
 
+/**
+ * Budget fields for a snapshot RPC result. `count` is what was printed;
+ * `totalRefs` is the whole tree (and the whole ref map, which is never cut).
+ */
+function budgetFields(b: BudgetedText): Record<string, unknown> {
+  return {
+    text: b.text,
+    count: b.shownRefs,
+    totalRefs: b.totalRefs,
+    ...(b.omittedLines > 0 ? { omitted: { refs: b.omittedRefs, lines: b.omittedLines } } : {}),
+  };
+}
+
 register('snapshot', async (ctx, _args, opts) => {
+  const budget = budgetFromOpts(opts);
   if (ctx.bridgeMode) {
     const bridge = requireBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
@@ -1881,8 +1897,7 @@ register('snapshot', async (ctx, _args, opts) => {
       await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
     }
     return {
-      text: result.text,
-      count: result.count,
+      ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
       ...(annotatedPath ? { annotatedPath } : {}),
       ...(possiblyIncomplete ? {
         possiblyIncomplete: true,
@@ -1910,8 +1925,7 @@ register('snapshot', async (ctx, _args, opts) => {
   }
 
   return {
-    text: result.text,
-    count: result.count,
+    ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
     ...(annotatedPath ? { annotatedPath } : {}),
   };
 });
