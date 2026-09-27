@@ -184,6 +184,10 @@ export async function snapshot(
     }
     const role = node.role;
     const name = node.name ?? '';
+    // Every Playwright ref in the tree is alive, printed or not: an -i,
+    // --depth or --compact look (batch auto-snapshots are -i) must not make
+    // the next full snapshot renumber the elements it didn't print.
+    if (node.ref && !inIframe && PW_REF.test(node.ref)) alive.add(`p${node.ref}`);
     // Nameless generic wrappers are layout noise; flatten them unless they
     // are clickable (cursor:pointer), which is exactly what agents look for.
     const flatten = (role === 'generic' && !name && node.cursor !== 'pointer') || role === 'fragment';
@@ -196,7 +200,6 @@ export async function snapshot(
         const pwRef = node.ref;
         let line = '  '.repeat(depth);
         if (pwRef && !inIframe && PW_REF.test(pwRef)) {
-          alive.add(`p${pwRef}`);
           const ref = allocator.assign('e', `p${pwRef}`, role, name);
           line += `@${ref} `;
           refs.set(ref, { locator: target.locator(`aria-ref=${pwRef}`), role, name });

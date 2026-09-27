@@ -695,6 +695,19 @@ c('modal-scoped refs do not resolve outside the modal', async () => {
   assert(flag.stdout.trim() === 'false', 'the outside button must not have been clicked');
 });
 
+c('an -i or --depth snapshot does not renumber elements it did not print', async () => {
+  const html = `<h2>Section title</h2><nav aria-label="Outer"><ul><li><a href="#d">Deep link</a></li></ul></nav>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const full = (await run(['snapshot'])).stdout;
+  const heading = refOf(full, 'heading', 'Section title');
+  const deep = refOf(full, 'link', 'Deep link');
+  await run(['snapshot', '-i']);        // heading not printed
+  await run(['snapshot', '-d', '0']);   // deep link not printed
+  const again = (await run(['snapshot'])).stdout;
+  assert(refOf(again, 'heading', 'Section title') === heading, `heading renumbered after -i: ${heading} -> ${refOf(again, 'heading', 'Section title')}`);
+  assert(refOf(again, 'link', 'Deep link') === deep, `link renumbered after -d 0: ${deep} -> ${refOf(again, 'link', 'Deep link')}`);
+});
+
 c('refs are stable across snapshots: an insertion above does not shift them', async () => {
   // onclick flag, not a hash change: fragment navigation on a data: URL
   // leaves location untouched in Chromium.

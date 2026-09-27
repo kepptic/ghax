@@ -70,7 +70,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   element keeps its number across re-snapshots of a document and an
   insertion above it no longer renumbers everything below. Before, a
   re-render could quietly point `@e5` at the next same-named element.
-  Visible changes: **numbering is sparse** (Playwright counts every
+  Filtered looks (`-i`, `--depth`, `--compact`) keep the identities of
+  elements they don't print, so the next full snapshot doesn't renumber
+  them. Visible changes: **numbering is sparse** (Playwright counts every
   clickable node, ghax prints the ones you asked for, so `snapshot -i` may
   start at `@e4`), numbers restart after navigation, nameless layout
   `generic` wrappers are flattened (clickable ones print with
