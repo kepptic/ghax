@@ -112,6 +112,8 @@ export interface BridgeSnapshotResult {
   text: string;
   refs: Map<string, BridgeRef>;
   count: number;
+  /** True when rooted at --selector or a modal, i.e. not the whole page. */
+  scoped: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -1336,7 +1338,7 @@ function axProps(node: AxNode): string {
 async function runtimeObjectFor(
   bridge: Bridge,
   expression: string,
-): Promise<{ objectId: string; backendNodeId: number } | null> {
+): Promise<{ objectId: string; backendNodeId: number; nodeName: string } | null> {
   const evaluated = await bridge.send('Runtime.evaluate', {
     expression,
     returnByValue: false,
@@ -1345,10 +1347,12 @@ async function runtimeObjectFor(
   if (!objectId || evaluated.result?.subtype === 'null') return null;
   try {
     const described = await bridge.send('DOM.describeNode', { objectId }) as {
-      node?: { backendNodeId?: number };
+      node?: { backendNodeId?: number; nodeName?: string };
     };
     const backendNodeId = described.node?.backendNodeId;
-    return typeof backendNodeId === 'number' ? { objectId, backendNodeId } : null;
+    return typeof backendNodeId === 'number'
+      ? { objectId, backendNodeId, nodeName: String(described.node?.nodeName ?? '') }
+      : null;
   } catch {
     await bridge.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
     return null;
@@ -1421,6 +1425,8 @@ export async function bridgeSnapshot(
   })()`);
   if (!root && opts.selector) throw new Error(`Selector not found: ${opts.selector}`);
   const rootBackendNodeId = root ? root.backendNodeId : null;
+  // Anything but <body> means --selector or a modal won: not the whole page.
+  const scoped = Boolean(opts.selector) || (root !== null && root.nodeName.toUpperCase() !== 'BODY');
   if (root) void bridge.send('Runtime.releaseObject', { objectId: root.objectId }).catch(() => undefined);
 
   const result = await bridge.send('Accessibility.getFullAXTree', {}) as { nodes?: AxNode[] };
@@ -1520,9 +1526,10 @@ export async function bridgeSnapshot(
       text: opts.interactive ? '(no interactive elements found)' : '(no accessible elements found)',
       refs,
       count: 0,
+      scoped,
     };
   }
-  return { text: output.join('\n'), refs, count: refs.size };
+  return { text: output.join('\n'), refs, count: refs.size, scoped };
 }
 
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */

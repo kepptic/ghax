@@ -212,7 +212,7 @@ never handed to a second element, and `docOf(ref)` lets `batch` refuse a
 ref minted on a document that is no longer loaded (`BRIDGE_REF_STALE`).
 
 Over the bridge the daemon keeps the same promise itself:
-`ctx.bridgeIdentity` maps backend node id to `{ref, role, name}`, a
+the registry keys a backend node id to `{ref, role, name}`, a
 snapshot reuses the ref while role and name match and mints a new one
 otherwise, and unscoped snapshots prune ids that left the AX tree
 (`--selector` snapshots never prune). `@c` refs use the page registry's
@@ -223,7 +223,8 @@ a ref. Each snapshot first reads a freshness marker,
 `window.__ghaxMark` (per-document random id + a MutationObserver count of
 childList/characterData and role/name/visibility/disabled/expanded
 attribute changes) joined with `location.href`, and stores it as
-`ctx.lastSnapshotMarker`. Before a ref step, batch re-reads it and
+`ctx.lastSnapshotMarker` (null after a `--selector` or modal-scoped
+snapshot, whose ref map is partial). Before a ref step, batch re-reads it and
 re-snapshots only on a mismatch or a failed read. The marker is read
 before the snapshot, so a change during the snapshot errs toward an extra
 re-snapshot. Steps report `autoSnapshot: "skipped" | "taken"`.

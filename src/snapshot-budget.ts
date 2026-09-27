@@ -8,8 +8,10 @@
  * so the reader knows to narrow with --selector/--depth rather than assume
  * the page ends there.
  *
- * Only the TEXT is cut. The ref map keeps every ref, so an agent that saw
- * `@e812` in an earlier, narrower snapshot can still act on it.
+ * Only the TEXT is cut. The ref map still holds every ref this snapshot
+ * found, so a ref cut from the printout (or seen in an earlier `--no-cap`
+ * or `--selector` look at the same, unchanged elements) still resolves.
+ * The map itself is replaced by the next snapshot, as always.
  */
 
 export const DEFAULT_MAX_REFS = 250;

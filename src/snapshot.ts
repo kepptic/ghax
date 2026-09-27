@@ -67,6 +67,8 @@ export interface SnapshotResult {
   text: string;
   refs: Map<string, RefEntry>;
   count: number;
+  /** True when rooted at --selector or a modal, i.e. not the whole page. */
+  scoped?: boolean;
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -163,7 +165,7 @@ export async function snapshot(
   // The daemon's ONLY ariaSnapshot* call site (see CACHE RULE above).
   const tree = await rootLocator.ariaSnapshotJSON({ mode: 'ai' }) as unknown as AriaNodeJSON[];
   if (!Array.isArray(tree) || tree.length === 0) {
-    return { text: '(no accessible elements found)', refs: new Map(), count: 0 };
+    return { text: '(no accessible elements found)', refs: new Map(), count: 0, scoped: Boolean(opts.selector) || modalScoped };
   }
 
   const refs = new Map<string, RefEntry>();
@@ -387,8 +389,9 @@ export async function snapshot(
   // identities (a modal or --selector look must not renumber the rest).
   if (!opts.selector && !modalScoped) allocator.prune(alive);
 
+  const scoped = Boolean(opts.selector) || modalScoped;
   if (output.length === 0) {
-    return { text: '(no interactive elements found)', refs, count: 0 };
+    return { text: '(no interactive elements found)', refs, count: 0, scoped };
   }
-  return { text: output.join('\n'), refs, count: refs.size };
+  return { text: output.join('\n'), refs, count: refs.size, scoped };
 }

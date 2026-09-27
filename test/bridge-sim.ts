@@ -510,7 +510,7 @@ async function main(): Promise<void> {
       // Cursor pass.
       return { result: { value: [...liveCursor].map((id) => ({ cursorId: id, text: `div ${id}`, reason: 'cursor:pointer' })) } };
     });
-    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1 } }));
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'BODY' } }));
     ext.replies.set('Accessibility.getFullAXTree', () => ({
       nodes: [
         { nodeId: 'root', role: { value: 'RootWebArea' }, childIds: ['body'] },
@@ -606,7 +606,7 @@ async function main(): Promise<void> {
     ext.replies.set('Runtime.evaluate', (p) => (p.returnByValue === false
       ? { result: { type: 'object', subtype: 'node', objectId: 'root' } }
       : { result: { value: [] } }));
-    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1 } }));
+    ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'BODY' } }));
     ext.replies.set('Accessibility.getFullAXTree', () => ({
       nodes: [
         { nodeId: 'body', backendDOMNodeId: 1, role: { value: 'generic' }, childIds: buttons.map((b) => `n${b.id}`) },
@@ -690,6 +690,18 @@ async function main(): Promise<void> {
         assert(registry.docOf(r) === 'doc-a', `${r} should remember it was minted on doc-a`);
       }
       assert(docIdOfMarker('doc-b|3|https://x/') === 'doc-b' && docIdOfMarker(null) === null, 'marker parsing');
+    });
+  });
+
+  await test('snapshot: reports whether it covered the whole page (finding 4)', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = mutablePage(port, [{ id: 10, name: 'Save' }]);
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      assert((await bridgeSnapshot(bridge, {})).scoped === false, 'a body-rooted snapshot is not scoped');
+      assert((await bridgeSnapshot(bridge, { selector: '#form' })).scoped === true, '--selector is scoped');
+      ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'DIALOG' } }));
+      assert((await bridgeSnapshot(bridge, {})).scoped === true, 'a modal-rooted snapshot is scoped');
     });
   });
 

@@ -1929,7 +1929,9 @@ register('box', async (ctx, args) => {
 
 /**
  * Budget fields for a snapshot RPC result. `count` is what was printed;
- * `totalRefs` is the whole tree (and the whole ref map, which is never cut).
+ * `totalRefs` is every ref this snapshot found. The ref map holds all of
+ * them (the budget cuts only the text), and is replaced by the next
+ * snapshot like any other.
  */
 function budgetFields(b: BudgetedText): Record<string, unknown> {
   return {
@@ -1974,7 +1976,11 @@ register('snapshot', async (ctx, _args, opts) => {
     }
     ctx.refs.clear();
     ctx.bridgeRefs = result.refs;
-    ctx.lastSnapshotMarker = marker;
+    // Only a whole-page snapshot may vouch for "unchanged since": after a
+    // --selector or modal snapshot the ref map holds that subtree only, and
+    // batch skipping its re-snapshot would turn any ref outside it into
+    // "not found".
+    ctx.lastSnapshotMarker = result.scoped ? null : marker;
     let annotatedPath: string | null = null;
     if (opts.annotate) {
       annotatedPath = (opts.output as string) || `/tmp/ghax-annotated-${Date.now()}.png`;
@@ -2002,7 +2008,8 @@ register('snapshot', async (ctx, _args, opts) => {
     refs: refAllocator,
   });
   ctx.refs = result.refs;
-  ctx.lastSnapshotMarker = marker;
+  ctx.lastSnapshotMarker = result.scoped ? null : marker; // see the bridge branch
+
 
   let annotatedPath: string | null = null;
   if (opts.annotate) {

@@ -49,8 +49,8 @@ the tool in the past.
 3. **Refs resolve against the daemon's last snapshot, and only on the
    tab they were taken on.** `ghax click @e3` looks up `@e3` in the
    *last* snapshot's ref map. An element keeps its ref across
-   re-snapshots of the same document (Playwright `aria-ref` on CDP,
-   `ctx.bridgeIdentity` on the bridge), so numbering is sparse, but refs
+   re-snapshots of the same document (daemon-wide `ctx.refRegistry`,
+   numbers never reused), so numbering is sparse, but refs
    never survive a tab switch or navigation. The `tab` and
    `new-window` handlers clear the ref map when the active page changes,
    so a stale ref from tab A can't resolve against tab B; a smoke check

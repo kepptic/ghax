@@ -21,8 +21,8 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   context before acting. Past the budget the text stops at a line
   boundary and ends with `… N more refs omitted (use
   --depth/--selector/--max-refs, or --no-cap)`. Only the text is cut: the
-  ref map keeps every ref, so a ref from a narrower or uncapped snapshot
-  still clicks. `--max-refs <n>`, `--max-chars <n>`, and `--no-cap` (or
+  ref map holds every ref the snapshot found, so a ref cut from the
+  printout still clicks. `--max-refs <n>`, `--max-chars <n>`, and `--no-cap` (or
   `--max-refs 0`) tune it. `--json` gains `totalRefs` and, when cut,
   `omitted: {refs, lines}`; **`count` is now the number printed**, and
   `qa` reports `totalRefs`. `batch`'s automatic re-snapshot is uncapped.
@@ -48,7 +48,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   navigation, and a `--selector` snapshot never drops refs learned by a
   wider one. Separately, every snapshot records a page freshness marker
   (document id, a MutationObserver count of structural changes, URL), and
-  a `batch` step that uses a ref re-snapshots only when that marker moved.
+  a `batch` step that uses a ref re-snapshots only when that marker moved
+  (always after a `--selector` or modal-scoped snapshot, whose ref map
+  covers only part of the page).
   Each such step now reports `autoSnapshot: "skipped"` or `"taken"`.
 - **Stable `@e` refs on the CDP transport.** Snapshots now come from
   Playwright's `ariaSnapshotJSON({ mode: 'ai' })` and each ref resolves

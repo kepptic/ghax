@@ -836,6 +836,19 @@ c('batch refuses a ref from a page the tab navigated away from (never clicks pag
   assert(Number(fresh.slice(2)) > Number(oldRef.slice(2)), `page B must get a new number, got ${fresh} after ${oldRef}`);
 });
 
+c('batch re-snapshots after a --selector snapshot instead of skipping (finding 4)', async () => {
+  const html = `<form id="f"><button type="button">Inside</button></form>
+    <button onclick="window.__out=1">Outside</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const outside = await snapRef('button', 'Outside');
+  await run(['snapshot', '-i', '-s', '#f']);   // ref map now holds the form only
+  const r = await run(['batch', JSON.stringify([{ cmd: 'click', args: [outside] }])]);
+  const steps = parseJson<Array<{ ok: boolean; autoSnapshot?: string; error?: string }>>(r.stdout);
+  assert(steps[0].ok && steps[0].autoSnapshot === 'taken', `scoped snapshot must not vouch for the page: ${r.stdout}`);
+  const v = await run(['eval', 'String(window.__out || 0)']);
+  assert(v.stdout.trim() === '1', 'the outside button should have been clicked');
+});
+
 c('record + replay round-trips', async () => {
   const name = `smoke-rec-${Date.now()}`;
   await run(['record', 'start', name]);
