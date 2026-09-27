@@ -29,6 +29,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   comment already said was not wanted: a long `wait --stable` or `perf
   --wait` no longer dies at 30 s.
 
+### Dependencies
+- **Playwright 1.59.1 to 1.63.0, pinned exact.** The stable-ref work in
+  this release leans on Playwright's `aria-ref=` selector engine, whose
+  cache semantics are not documented, so the version is pinned (`"1.63.0"`, no caret) in
+  `package.json`, the daemon auto-bootstrap (`attach.rs`) and
+  `scripts/bootstrap-daemon-runtime.sh`. Any bump now has to be deliberate
+  and re-run the smoke checks that pin that behaviour. Node 20+ required
+  (Playwright 1.63's own floor; ghax already declared it).
+
 ## [0.8.0] - 2026-09-23
 ### Added
 - **`ghax bridge reload`** — asks the connected bridge extension to reload

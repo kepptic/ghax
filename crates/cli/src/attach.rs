@@ -1132,7 +1132,7 @@ fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
 // Daemon runtime dep versions. Keep in sync with package.json — the build
 // wedges these into the auto-bootstrap fallback when no sibling
 // package.json is present in the install dir.
-const PLAYWRIGHT_VERSION: &str = "^1.58.2";
+const PLAYWRIGHT_VERSION: &str = "1.63.0";
 const SOURCE_MAP_VERSION: &str = "^0.7.6";
 const WS_VERSION: &str = "^8.18.1";
 
