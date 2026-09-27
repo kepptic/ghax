@@ -440,8 +440,9 @@ closed"`, anything matching `/disconnected/i` — into a one-liner:
 code is `NOT_ATTACHED` so wrapper scripts can branch on it.
 
 Between the CLI and the daemon, `rpc.rs` retries a failed request once,
-gated by `rpc::retry_class_for`. Reads (an explicit allowlist) retry on any
-connect, timeout, or request error. Everything else retries only when the
+gated by `rpc::retry_class_for`. Reads (an explicit allowlist) retry on a
+connect or request error, never after a timeout (the daemon is still
+running the first attempt). Everything else retries only when the
 TCP connect failed, because the daemon finishes a command even if the CLI
 stops waiting: a timed-out `click` may already have clicked. Unknown verbs
 default to the no-retry side. Every call has an HTTP timeout

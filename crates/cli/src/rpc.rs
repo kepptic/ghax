@@ -127,6 +127,13 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
     if let Some(ms) = num(opts.get("timeout")).or_else(|| num(opts.get("timeoutMs"))) {
         return Some(Duration::from_millis(ms) + margin);
     }
+    // `wait <ms>` IS its own duration: a 5-minute wait must not be cut at
+    // the default budget.
+    if cmd == "wait" {
+        if let Some(ms) = num(args.get(0)) {
+            return Some(Duration::from_millis(ms) + margin);
+        }
+    }
     if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()) {
         return if secs == 0 { None } else { Some(Duration::from_secs(secs)) };
     }
@@ -229,11 +236,12 @@ fn call_once(
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
 }
 
-/// A daemon-side semantic failure (`RpcError`) is never retried. A transport
-/// failure is retried when the class allows it: Idempotent on any connect,
-/// timeout, or request error; Mutating only when the connect itself failed.
-/// A timeout or a reset after the request was written is exactly the case
-/// where a click may have landed with its reply lost.
+/// A daemon-side semantic failure (`RpcError`) is never retried, and
+/// neither is a TIMEOUT, for any verb: the daemon keeps running a command
+/// the CLI stopped waiting for, so a retried read runs twice at once (a long
+/// `wait` would stack a second wait on the first). Otherwise: Mutating only
+/// when the connect itself failed (the request provably never arrived);
+/// Idempotent also on a request error such as a reset.
 fn should_retry(err: &anyhow::Error, class: RetryClass) -> bool {
     if err.downcast_ref::<RpcError>().is_some() {
         return false;
@@ -241,8 +249,11 @@ fn should_retry(err: &anyhow::Error, class: RetryClass) -> bool {
     let Some(re) = err.downcast_ref::<reqwest::Error>() else {
         return false;
     };
+    if re.is_timeout() {
+        return false;
+    }
     match class {
-        RetryClass::Idempotent => re.is_connect() || re.is_timeout() || re.is_request(),
+        RetryClass::Idempotent => re.is_connect() || re.is_request(),
         RetryClass::Mutating => re.is_connect(),
     }
 }
@@ -419,14 +430,54 @@ mod tests {
     }
 
     #[test]
-    fn a_read_is_retried_once_when_the_reply_is_lost() {
-        let (port, seen) = silent_daemon();
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_millis(200))
-            .build()
-            .unwrap();
+    fn nothing_is_retried_after_a_timeout() {
+        for cmd in ["tabs", "wait", "click"] {
+            let (port, seen) = silent_daemon();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let err = call_with(&client, port, cmd, &json!([]), &json!({})).unwrap_err();
+            assert!(err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false));
+            assert_eq!(seen.load(Ordering::SeqCst), 1, "{cmd} must not be re-sent after a timeout");
+        }
+    }
+
+    /// A daemon that reads the request and hangs up without answering.
+    fn hangup_daemon() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                drop(stream);
+            }
+        });
+        (port, seen)
+    }
+
+    #[test]
+    fn a_read_is_retried_once_on_a_hangup_but_a_mutation_is_not() {
+        let client = reqwest::blocking::Client::new();
+        let (port, seen) = hangup_daemon();
         let _ = call_with(&client, port, "tabs", &json!([]), &json!({})).unwrap_err();
-        assert_eq!(seen.load(Ordering::SeqCst), 2, "tabs gets exactly one retry");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "tabs gets exactly one retry after a hangup");
+        let (port, seen) = hangup_daemon();
+        let _ = call_with(&client, port, "click", &json!(["@e1"]), &json!({})).unwrap_err();
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "click is never re-sent after a hangup");
+    }
+
+    #[test]
+    fn a_positional_wait_is_its_own_timeout() {
+        let got = timeout_for("wait", &json!(["300000"]), &json!({}), None);
+        assert_eq!(got, Some(Duration::from_secs(330)));
+        let sel = timeout_for("wait", &json!(["#ready"]), &json!({}), None);
+        assert_eq!(sel, Some(Duration::from_secs(120)), "a selector wait keeps the default");
     }
 
     #[test]

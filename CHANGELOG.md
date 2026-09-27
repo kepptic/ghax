@@ -146,7 +146,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `0` = none, honoured by every verb), a verb given its own `--timeout`
   gets that plus 30 s, and the long verbs get sized defaults: `batch` 120 s
   per step (30 min cap), `perf` its `--wait` plus 120 s, `profile` its
-  `--duration` plus 10 min, `ext hot-reload` its `--wait` plus 120 s. A timeout
+  `--duration` plus 10 min, `ext hot-reload` its `--wait` plus 120 s, and
+  `wait <ms>` its own duration plus 30 s. No verb is ever retried after a
+  timeout: the daemon is still running the first attempt. A timeout
   says which verb stalled and how to raise the limit, and is never retried
   for a mutating verb.
 
