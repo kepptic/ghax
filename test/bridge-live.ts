@@ -22,6 +22,8 @@
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -66,8 +68,36 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * Fixture pages come from a throwaway local HTTP server, not data: URLs.
+ * Chrome refuses extension-initiated top-level navigation to data: (both
+ * chrome.debugger Page.navigate and chrome.tabs.update), so over the bridge
+ * a data: goto never commits; the daemon now rejects it up front.
+ */
+let fixtureOrigin = '';
+function startFixtureServer(): Promise<() => void> {
+  const server = createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://127.0.0.1');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(`<!doctype html><meta charset="utf-8"><body>${u.searchParams.get('html') ?? ''}</body>`);
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
+    fixtureOrigin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    resolve(() => server.close());
+  }));
+}
+const fixture = (html: string) => `${fixtureOrigin}/page?html=${encodeURIComponent(html)}`;
+
+/** goto a fixture and fail loudly if the tab didn't actually land there. */
+async function gotoFixture(html: string): Promise<void> {
+  const r = await run(['goto', fixture(html), '--json']);
+  const g = parse<{ url: string }>(r.stdout);
+  assert(g.url.startsWith(fixtureOrigin), `fixture did not load, tab is on ${g.url}: ${r.stderr}`);
+}
+
 async function main(): Promise<void> {
   console.log('bridge-live: driving the real extension bridge\n');
+  const stopFixtures = await startFixtureServer();
 
   // Confirm we're actually talking to a bridge daemon with a controlled tab.
   const status = await run(['status', '--json']);
@@ -115,9 +145,9 @@ async function main(): Promise<void> {
   });
 
   await test('snapshot -i costs a constant number of relayed calls (--trace)', async () => {
-    const many = `data:text/html,${encodeURIComponent(Array.from({ length: 150 }, (_, i) => `<button>b${i}</button>`).join(''))}`;
-    await run(['goto', many]);
-    const r = await run(['snapshot', '-i', '--trace']);
+    await gotoFixture(Array.from({ length: 150 }, (_, i) => `<button>b${i}</button>`).join(''));
+    const r = await run(['snapshot', '-i', '--no-cap', '--trace']);
+    assert((r.stdout.match(/@e\d+ \[button\]/g) ?? []).length === 150, 'all 150 buttons should be in the snapshot');
     const m = /trace: (\d+) cdp calls/.exec(r.stderr);
     assert(m, `no trace line: ${r.stderr}`);
     assert(Number(m[1]) <= 10, `150-button snapshot took ${m[1]} relayed calls`);
@@ -125,8 +155,7 @@ async function main(): Promise<void> {
   });
 
   await test('bridge refs are stable across snapshots; batch skips an unneeded re-snapshot', async () => {
-    const page = `data:text/html,${encodeURIComponent('<div id="top"></div><button onclick="window.__c=(window.__c||0)+1">Keep</button>')}`;
-    await run(['goto', page]);
+    await gotoFixture('<div id="top"></div><button onclick="window.__c=(window.__c||0)+1">Keep</button>');
     const refOf = (text: string, name: string) => new RegExp(`@(e\\d+) \\[button\\] "${name}"`).exec(text)?.[1];
     const first = refOf((await run(['snapshot', '-i'])).stdout, 'Keep');
     assert(first, 'Keep button not in snapshot');
@@ -140,13 +169,12 @@ async function main(): Promise<void> {
 
   // ─── Actionability guard (plan 10, C5) ───────────────────────
   // These need a real DOM, which the simulator cannot provide.
-  const dataUrl = (html: string) => `data:text/html,${encodeURIComponent(html)}`;
-  const overlayPage = dataUrl(`
+  const overlayPage = (`
     <button id="under" onclick="window.__hit=(window.__hit||0)+1" style="position:absolute;top:40px;left:40px">Buy</button>
     <div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.3)">Accept cookies</div>`);
 
   await test('guard: click on a covered button is refused and names the overlay', async () => {
-    await run(['goto', overlayPage]);
+    await gotoFixture(overlayPage);
     const r = await run(['click', '#under']);
     assert(r.code === 4, `expected exit 4, got ${r.code}: ${r.stderr}`);
     assert(/covered by div#overlay/.test(r.stderr), `should name the coverer: ${r.stderr}`);
@@ -161,24 +189,24 @@ async function main(): Promise<void> {
   });
 
   await test('guard: fieldset[disabled] button is refused as disabled', async () => {
-    await run(['goto', dataUrl('<fieldset disabled><legend>L</legend><button id="b">Save</button></fieldset>')]);
+    await gotoFixture('<fieldset disabled><legend>L</legend><button id="b">Save</button></fieldset>');
     const r = await run(['click', '#b']);
     assert(r.code === 4 && /not actionable \(disabled\)/.test(r.stderr), `expected disabled: ${r.stderr}`);
   });
 
   await test('guard: a button inside the fieldset LEGEND stays enabled', async () => {
-    await run(['goto', dataUrl('<fieldset disabled><legend><button id="b" onclick="window.__ok=1">Toggle</button></legend></fieldset>')]);
+    await gotoFixture('<fieldset disabled><legend><button id="b" onclick="window.__ok=1">Toggle</button></legend></fieldset>');
     const r = await run(['click', '#b']);
     assert(r.code === 0, `legend button should click: ${r.stderr}`);
   });
 
   await test('guard: inherited aria-disabled wrapper is refused', async () => {
-    await run(['goto', dataUrl('<div aria-disabled="true"><span role="button" id="b">Go</span></div>')]);
+    await gotoFixture('<div aria-disabled="true"><span role="button" id="b">Go</span></div>');
     const r = await run(['click', '#b']);
     assert(r.code === 4 && /not actionable \(disabled\)/.test(r.stderr), `expected disabled: ${r.stderr}`);
   });
 
-  const shadowPage = (covered: boolean) => dataUrl(`
+  const shadowPage = (covered: boolean) => (`
     <div id="host"></div>
     <script>
       const root = document.getElementById('host').attachShadow({ mode: 'open' });
@@ -194,7 +222,7 @@ async function main(): Promise<void> {
   };
 
   await test('guard: a shadow-hosted button is hit-tested through its shadow root', async () => {
-    await run(['goto', shadowPage(false)]);
+    await gotoFixture(shadowPage(false));
     const r = await run(['click', await shadowRef()]);
     assert(r.code === 0, `shadow click should pass the hit test: ${r.stderr}`);
     const v = await run(['eval', 'window.__shadow || 0']);
@@ -202,11 +230,20 @@ async function main(): Promise<void> {
   });
 
   await test('guard: a shadow-hosted button under an overlay is refused as covered', async () => {
-    await run(['goto', shadowPage(true)]);
+    await gotoFixture(shadowPage(true));
     const r = await run(['click', await shadowRef()]);
     assert(r.code === 4 && /covered by div#overlay/.test(r.stderr), `expected covered: ${r.stderr}`);
   });
 
+  await test('goto data: fails fast and says why (Chrome blocks it for extensions)', async () => {
+    const started = Date.now();
+    const r = await run(['goto', 'data:text/html,x']);
+    assert(r.code !== 0, `data: goto should fail over the bridge, got exit 0: ${r.stdout}`);
+    assert(/data: URLs/.test(r.stderr), `error should name the data: restriction: ${r.stderr}`);
+    assert(Date.now() - started < 3000, 'should fail up front, not after the load timeout');
+  });
+
+  stopFixtures();
   console.log();
   if (failures > 0) {
     console.error(`✗ ${failures}/${checks} checks failed`);
