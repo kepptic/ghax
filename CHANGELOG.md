@@ -5,6 +5,10 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [0.9.0] - 2026-09-27
 ### Added
 - **`ghax bridge stats` and a global `--trace` flag.** The bridge now counts
   every relayed CDP command per method (calls, errors, total and max ms).
@@ -1393,7 +1397,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/kepptic/ghax/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/kepptic/ghax/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/kepptic/ghax/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kepptic/ghax/compare/v0.6.0...v0.7.0
