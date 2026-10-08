@@ -2255,6 +2255,88 @@ c('-- ends flags, so --trace (or any dash value) can be passed literally (findin
   assert(lead.stdout.trim() === '3' && /^trace: /m.test(lead.stderr), `leading --trace with a terminator: ${lead.stdout} ${lead.stderr}`);
 });
 
+c('eval --timeout gives up on a never-settling promise with a clear error', async () => {
+  const started = Date.now();
+  const r = await run(['eval', 'new Promise(() => {})', '--timeout', '1500'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/timed out after 1500ms/.test(r.stderr), `message: ${r.stderr}`);
+  assert(Date.now() - started < 10000, 'should give up near the --timeout, not the 120 s default');
+  const ok = await run(['eval', 'new Promise((r) => setTimeout(() => r(7), 200))', '--timeout', '5000']);
+  assert(ok.stdout.trim() === '7', `a slow-but-in-budget eval still returns: ${ok.stdout}`);
+  const bad = await run(['eval', '1', '--timeout', 'soon'], { allowFailure: true });
+  assert(bad.exitCode === 2 && /positive number/.test(bad.stderr), `bad --timeout: ${bad.exitCode} ${bad.stderr}`);
+  const bare = await run(['eval', '1', '--timeout'], { allowFailure: true });
+  assert(bare.exitCode === 2 && /positive number/.test(bare.stderr), `bare --timeout: ${bare.exitCode} ${bare.stderr}`);
+});
+
+c('eval --no-wait returns at once, runs later, and logs errors to the console', async () => {
+  await run(['goto', `data:text/html,${encodeURIComponent('<title>nowait</title><p>x</p>')}`]);
+  await run(['eval', 'window.__nw = 0; 1']);
+  // Flag before the code: the CLI must not read the code as the flag's value.
+  const r = await run(['eval', '--no-wait', 'window.__nw = 41 + 1', '--json']);
+  const data = parseJson<{ ok: boolean; dispatched: boolean }>(r.stdout);
+  assert(data.ok === true && data.dispatched === true, `no-wait result: ${r.stdout}`);
+  await run(['wait', '200']);
+  const v = await run(['eval', 'window.__nw']);
+  assert(v.stdout.trim() === '42', `the code ran on the timer: ${v.stdout}`);
+  await run(['eval', 'throw new Error("nowait-boom")', '--no-wait']);
+  await run(['wait', '200']);
+  const con = await run(['console', '--json']);
+  assert(/nowait-boom/.test(con.stdout), `the throw lands in the console buffer: ${con.stdout.slice(0, 300)}`);
+});
+
+c('gesture scroll --on aims the wheel at an element', async () => {
+  const html = '<body style="margin:0"><div id="box" style="position:absolute;left:300px;top:100px;width:200px;height:150px;overflow:auto"><div style="height:2000px">tall</div></div><div style="height:3000px"></div></body>';
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['gesture', 'scroll', 'down', '200', '--on', '#box', '--json']);
+  const data = parseJson<{ x: number; y: number; on: string }>(r.stdout);
+  assert(Math.abs(data.x - 400) < 2 && Math.abs(data.y - 175) < 2, `wheel aimed at the box centre: ${r.stdout}`);
+  await run(['wait', '200']);
+  const top = await run(['eval', 'document.getElementById("box").scrollTop']);
+  assert(Number(top.stdout.trim()) > 0, `the box scrolled, not the page: ${top.stdout}`);
+  const page = await run(['eval', 'window.scrollY']);
+  assert(Number(page.stdout.trim()) === 0, `the page did not scroll: ${page.stdout}`);
+  const miss = await run(['gesture', 'scroll', 'down', '--on', ''], { allowFailure: true });
+  assert(miss.exitCode === 2 && /target is empty/.test(miss.stderr), `empty --on: ${miss.exitCode} ${miss.stderr}`);
+});
+
+c('snapshot --grep keeps matches, their ancestors and --context lines', async () => {
+  const html = '<main><nav><a href="#a">Alpha link</a><a href="#b">Beta link</a></nav><section><h2>Reports</h2><button>Export</button><button>Print</button></section></main>';
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const all = await run(['snapshot', '-i']);
+  const g = await run(['snapshot', '-i', '--grep', 'Beta']);
+  assert(/Beta/.test(g.stdout) && !/Alpha/.test(g.stdout), `only Beta matches: ${g.stdout}`);
+  assert(g.stdout.trim().split('\n').length < all.stdout.trim().split('\n').length, 'grep output is shorter than the full tree');
+  const ctx = await run(['snapshot', '-i', '--grep=Export', '--context', '1']);
+  assert(/Export/.test(ctx.stdout) && /Print/.test(ctx.stdout), `--context 1 includes the next line: ${ctx.stdout}`);
+  // Refs from the full tree still resolve after a filtered print.
+  const ref = /@e\d+/.exec(g.stdout)?.[0];
+  assert(ref, `grep output has a ref: ${g.stdout}`);
+  await run(['box', ref]);
+  const none = await run(['snapshot', '-i', '--grep', 'zzz-no-such']);
+  assert(/no snapshot line matches/.test(none.stdout), `a miss says so: ${none.stdout}`);
+  const bad = await run(['snapshot', '--grep', '('], { allowFailure: true });
+  assert(bad.exitCode === 2 && /not a valid regex/.test(bad.stderr), `bad regex: ${bad.exitCode} ${bad.stderr}`);
+});
+
+c('screenshot --path-only prints just the path', async () => {
+  const out = path.join(os.tmpdir(), `ghax-pathonly-${Date.now()}.png`);
+  const r = await run(['screenshot', '--path-only', '--path', out]);
+  assert(r.stdout.trim() === out, `stdout is the bare path: ${JSON.stringify(r.stdout)}`);
+  assert(fs.existsSync(out), 'file written');
+  const r2 = await run(['screenshot', '--path', out, '--path-only']);
+  assert(r2.stdout.trim() === out, `flag order does not matter: ${JSON.stringify(r2.stdout)}`);
+  fs.unlinkSync(out);
+});
+
+c('an empty click/fill/select/upload target names the cause and exits 2', async () => {
+  for (const argv of [['click', ''], ['click'], ['fill', '', 'x'], ['select', ''], ['upload', '', '/tmp/x'], ['box', '']]) {
+    const r = await run(argv, { allowFailure: true });
+    assert(r.exitCode === 2, `${argv.join(' ')} should exit 2, got ${r.exitCode}: ${r.stderr}`);
+    assert(/target is empty — pass an @ref or selector \(unset shell variable\?\)/.test(r.stderr), `${argv.join(' ')}: ${r.stderr}`);
+  }
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

@@ -6,7 +6,31 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- **`eval --timeout <ms>` and `eval --no-wait`.** The bridge capped every
+  `Runtime.evaluate` at 30 s with no way to raise it. `--timeout` now sets
+  the deadline on both transports (the CLI's own RPC budget already grows
+  by `--timeout` + 30 s) and a missed deadline says so. `--no-wait` runs the
+  code on a 0 ms timer inside the page and returns
+  `{ok:true, dispatched:true}` at once; a throw or rejected promise goes to
+  `console.error`, so `ghax console` shows it. (A page CSP that bans
+  `unsafe-eval` blocks the inner eval and logs that too.)
+- **`gesture scroll <dir> [amount] --on <@ref|selector>`.** Aims the mouse
+  wheel at an element's centre (scrolled into view first, clamped to the
+  viewport), so inner panels scroll instead of the page. `gesture
+  click`, `dblclick`, `scroll` and `key` now work over the extension bridge
+  too.
+- **`snapshot --grep <regex> [--context N]`.** Prints only matching lines,
+  each match's ancestor lines and N lines after it, applied before the
+  250-ref / 32 KB cap. Print-only: every ref from the snapshot still
+  resolves. A bad regex exits 2; no match prints a one-line note.
+- **`screenshot --path-only`** prints just the file path, for
+  `shot=$(ghax screenshot --path-only)`.
+
+### Changed
+- `click`, `fill`, `select`, `upload`, `box`, `is` with a missing or empty
+  target now say `click: target is empty — pass an @ref or selector (unset
+  shell variable?)` and exit 2, instead of printing the usage line.
 
 ## [0.9.0] - 2026-09-27
 ### Added

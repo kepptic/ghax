@@ -98,3 +98,73 @@ export function budgetFromOpts(opts: Record<string, unknown>): SnapshotBudget {
   }
   return { maxRefs, maxChars: num(opts['max-chars'] ?? opts.maxChars, DEFAULT_MAX_CHARS) };
 }
+
+/** Leading spaces of a rendered snapshot line (two per tree level). */
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+/**
+ * `snapshot --grep`: keep the lines matching `re`, each match's ancestor
+ * lines (walking up by indentation, so a hit under a dialog still shows the
+ * dialog), and `context` lines after it. Document order, no duplicates.
+ *
+ * Runs on the rendered text BEFORE applySnapshotBudget, so the ref/char cap
+ * counts only what was asked for. Printing only: the ref registry already
+ * holds every ref from the snapshot and is not touched here.
+ */
+export function grepSnapshotLines(lines: string[], re: RegExp, context = 0): string[] {
+  const keep = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!re.test(lines[i])) continue;
+    keep.add(i);
+    let want = indentOf(lines[i]);
+    for (let j = i - 1; j >= 0 && want > 0; j--) {
+      if (lines[j].trim() === '') continue;
+      const ind = indentOf(lines[j]);
+      if (ind < want) {
+        keep.add(j);
+        want = ind;
+      }
+    }
+    for (let j = i + 1; j <= i + context && j < lines.length; j++) keep.add(j);
+  }
+  return lines.filter((_, i) => keep.has(i));
+}
+
+/** Read --grep / --context from RPC opts; null when --grep is absent. */
+export function grepFromOpts(opts: Record<string, unknown>): { re: RegExp; context: number } | null {
+  const raw = opts.grep;
+  if (raw === undefined || raw === false) return null;
+  if (typeof raw !== 'string' || raw === '') {
+    throw new SnapshotGrepError("snapshot: --grep needs a regex. Use --grep='<regex>' (the = form also works for patterns starting with a dash)");
+  }
+  let re: RegExp;
+  try {
+    re = new RegExp(raw);
+  } catch (err) {
+    throw new SnapshotGrepError(`snapshot: --grep '${raw}' is not a valid regex: ${(err as Error).message}`);
+  }
+  const ctxRaw = opts.context;
+  let context = 0;
+  if (ctxRaw !== undefined) {
+    context = Number(ctxRaw);
+    if (!Number.isInteger(context) || context < 0) {
+      throw new SnapshotGrepError(`snapshot: --context needs a whole number of lines, got '${String(ctxRaw)}'`);
+    }
+  }
+  return { re, context };
+}
+
+/** Bad --grep/--context input; the daemon maps it to exit 2. */
+export class SnapshotGrepError extends Error {
+  readonly exitCode = 2;
+}
+
+/** Apply --grep (if given) to rendered lines; a miss says so in-band. */
+export function applyGrep(lines: string[], opts: Record<string, unknown>): string[] {
+  const g = grepFromOpts(opts);
+  if (!g) return lines;
+  const out = grepSnapshotLines(lines, g.re, g.context);
+  return out.length > 0 ? out : [`(no snapshot line matches ${g.re})`];
+}

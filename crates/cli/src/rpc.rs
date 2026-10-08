@@ -385,6 +385,10 @@ mod tests {
         // Own --timeout wins, with a margin.
         let own = json!({ "timeout": "600000" });
         assert_eq!(t("wait", &no_args, &own, None), Some(Duration::from_secs(630)));
+        // eval --timeout grows the CLI's budget too, so the daemon's answer wins.
+        let eval_own = json!({ "timeout": "90000" });
+        assert_eq!(t("eval", &json!(["x"]), &eval_own, None), Some(Duration::from_secs(120)));
+        assert_eq!(t("eval", &json!(["x"]), &eval_own, Some("5")), Some(Duration::from_secs(120)));
         let own_ms = json!({ "timeoutMs": 45000 });
         assert_eq!(t("bridge.reload", &no_args, &own_ms, Some("1")), Some(Duration::from_secs(75)));
         // Formerly unbounded verbs are bounded, and GHAX_RPC_TIMEOUT caps them.

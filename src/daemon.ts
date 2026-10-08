@@ -46,7 +46,7 @@ import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import { actionability } from './actionability';
-import { applySnapshotBudget, budgetFromOpts, type BudgetedText } from './snapshot-budget';
+import { applyGrep, applySnapshotBudget, budgetFromOpts, grepFromOpts, type BudgetedText } from './snapshot-budget';
 import { RefRegistry, docIdOfMarker } from './ref-registry';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
@@ -197,6 +197,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'bridge.stats',
   'batch', 'record.start', 'record.stop', 'record.status',
+  'gesture.click', 'gesture.dblclick', 'gesture.scroll', 'gesture.key',
 ]);
 
 /**
@@ -1534,22 +1535,77 @@ register('reload', async (ctx) => {
   return { url: page.url() };
 });
 
+/**
+ * `eval --no-wait`: the code runs on a zero-delay timer inside the page, so
+ * the verb returns before it starts. Indirect eval keeps eval's expression-or-
+ * statements behaviour; a throw or a rejected promise goes to console.error
+ * (visible in `ghax console`) instead of being lost. A page CSP without
+ * 'unsafe-eval' blocks the inner eval and logs that to the console too.
+ */
+function noWaitExpression(js: string): string {
+  return `(() => {
+    const src = ${JSON.stringify(js)};
+    const fail = (e) => console.error('ghax eval --no-wait:', e && e.stack ? e.stack : e);
+    setTimeout(() => {
+      try {
+        const r = (0, eval)(src);
+        if (r && typeof r.then === 'function') r.then(undefined, fail);
+      } catch (e) { fail(e); }
+    }, 0);
+    return true;
+  })()`;
+}
+
 register('eval', async (ctx, args, opts) => {
   const js = String(args[0] ?? '');
-  if (!js) throw new Error('Usage: eval <js>');
+  if (!js) throw new Error('Usage: eval <js> [--timeout <ms>] [--no-wait]');
+  let timeoutMs: number | undefined;
+  if (opts.timeout !== undefined) {
+    const raw = opts.timeout;
+    timeoutMs = typeof raw === 'string' || typeof raw === 'number' ? Number(raw) : NaN;
+    if (typeof raw === 'string' && raw.trim() === '') timeoutMs = NaN;
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+      throw new DaemonError(`eval: --timeout needs a positive number of milliseconds, got '${String(opts.timeout)}'`, 2);
+    }
+  }
+  const noWait = opts['no-wait'] === true || opts.noWait === true;
+  const code = noWait ? noWaitExpression(js) : js;
   let result: unknown;
   if (ctx.bridgeMode) {
     if (!ctx.bridge) throw new Error('bridge not initialized');
     // Pinned to the main frame's live context, with a stale-context self-heal
     // — the bridge-side counterpart of the CDP path's evalWithNavRetry below.
-    result = await bridgeEval(ctx, js);
+    // timeoutMs replaces the bridge's 30 s default for this one call.
+    result = await bridgeEval(ctx, code, timeoutMs);
   } else {
     const page = await activePage(ctx);
     // Navigation in flight when eval lands will destroy the execution
     // context mid-call. Wait for the next load state once and retry before
     // giving up — matches what a human would do manually.
-    result = await evalWithNavRetry(page, js);
+    const run = evalWithNavRetry(page, code);
+    if (timeoutMs === undefined) {
+      result = await run;
+    } else {
+      // Playwright's evaluate has no deadline of its own, so --timeout is a
+      // race. The page code keeps running after we give up on it.
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        result = await Promise.race([
+          run,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`eval: timed out after ${timeoutMs}ms — the code may still be running in the page`)),
+              timeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      run.catch(() => undefined);
+    }
   }
+  if (noWait) return { ok: true, dispatched: true };
   // --max-bytes caps the stringified result so an accidental
   // `document.body.innerText` on a heavy page can't blow out the
   // LLM operator's context window. Measured in UTF-8 bytes, not
@@ -1973,7 +2029,7 @@ register('xpath', async (ctx, args, opts) => {
 
 register('box', async (ctx, args) => {
   const target = args[0] ? String(args[0]) : null;
-  if (!target) throw new Error('Usage: box <@ref|selector>');
+  requireTarget('box', target);
   if (ctx.bridgeMode) {
     try {
       return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target), target);
@@ -2008,6 +2064,8 @@ function budgetFields(b: BudgetedText): Record<string, unknown> {
 
 register('snapshot', async (ctx, _args, opts) => {
   const budget = budgetFromOpts(opts);
+  // Validate --grep up front so a bad regex fails before any page work.
+  grepFromOpts(opts);
   // Read BEFORE snapshotting: a mutation that lands mid-snapshot then shows
   // up as a changed marker next time (a harmless re-snapshot), never as a
   // false "unchanged".
@@ -2051,7 +2109,7 @@ register('snapshot', async (ctx, _args, opts) => {
       await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
     }
     return {
-      ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
+      ...budgetFields(applySnapshotBudget(applyGrep(result.text.split('\n'), opts), budget)),
       ...(annotatedPath ? { annotatedPath } : {}),
       ...(possiblyIncomplete ? {
         possiblyIncomplete: true,
@@ -2082,7 +2140,7 @@ register('snapshot', async (ctx, _args, opts) => {
   }
 
   return {
-    ...budgetFields(applySnapshotBudget(result.text.split('\n'), budget)),
+    ...budgetFields(applySnapshotBudget(applyGrep(result.text.split('\n'), opts), budget)),
     ...(annotatedPath ? { annotatedPath } : {}),
   };
 });
@@ -2235,7 +2293,7 @@ async function playwrightPrecheck(loc: Locator, label: string, kind: 'click' | '
 //                          confirm modals that wait on a network save).
 register('click', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
-  if (!target) throw new Error('Usage: click <@ref|selector>');
+  requireTarget('click', target);
   const observe = opts.observe !== false && opts['no-observe'] !== true;
   // --force skips the actionability guard (covered/disabled/hidden). Works as
   // a batch step opt too: {"cmd":"click","args":["@e3"],"opts":{"force":true}}.
@@ -2345,7 +2403,7 @@ register('click', async (ctx, args, opts) => {
 register('fill', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const value = String(args[1] ?? '');
-  if (!target) throw new Error('Usage: fill <@ref|selector> <value>');
+  requireTarget('fill', target);
   const force = opts.force === true;
   if (ctx.bridgeMode) {
     // Guard (connected, not disabled/inert, not read-only) and the fill run
@@ -2484,13 +2542,7 @@ register('fill', async (ctx, args, opts) => {
 // reports what was tried instead of a bare "not found".
 register('select', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
-  if (!target) {
-    throw new Error(
-      'Usage: select <@ref|selector> <value>\n' +
-      '   or: select <@ref|selector> --index <n>\n' +
-      '   or: select <@ref|selector> --by-value <val>',
-    );
-  }
+  requireTarget('select', target);
 
   const indexRaw = opts.index;
   const hasIndex = indexRaw !== undefined && indexRaw !== null && String(indexRaw) !== '';
@@ -2757,7 +2809,8 @@ register('press', async (ctx, args) => {
 register('upload', async (ctx, args, opts) => {
   const target = String(args[0] ?? '');
   const pathArg = String(args[1] ?? '');
-  if (!target || !pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
+  requireTarget('upload', target);
+  if (!pathArg) throw new Error('Usage: upload <@ref|selector> <path>[,<path>…]');
   const paths = pathArg.split(',').map((p) => p.trim()).filter(Boolean);
   if (ctx.bridgeMode) {
     const ref = await resolveBridgeTarget(ctx, target);
@@ -3189,7 +3242,8 @@ register('diff', async (ctx, args) => {
 register('is', async (ctx, args) => {
   const check = String(args[0] ?? '');
   const target = String(args[1] ?? '');
-  if (!check || !target) throw new Error('Usage: is <visible|enabled|checked|hidden|disabled> <@ref|selector>');
+  if (!check) throw new Error('Usage: is <visible|enabled|checked|hidden|disabled> <@ref|selector>');
+  requireTarget('is', target);
   const page = await activePage(ctx);
   const loc = await resolveRef(ctx, target, page);
   let result: boolean;
@@ -3383,6 +3437,17 @@ register('ext.targets', async (ctx, args) => {
 class DaemonError extends Error {
   constructor(message: string, public exitCode: number) {
     super(message);
+  }
+}
+
+/**
+ * A verb that acts on an element got no target, or an empty one. The usual
+ * cause is an unset shell variable (`ghax click "$REF"`), so say that
+ * instead of printing the usage line. Exit 2 like other bad-argument errors.
+ */
+function requireTarget(verb: string, target: string | null | undefined): asserts target is string {
+  if (!target || !target.trim()) {
+    throw new DaemonError(`${verb}: target is empty — pass an @ref or selector (unset shell variable?)`, 2);
   }
 }
 
@@ -3879,19 +3944,79 @@ for (const { label, match } of EXT_VIEW_FILTERS) {
 
 // ─── Gesture commands (real Input.dispatch*) ───────────────────
 
-register('gesture.click', async (ctx, args) => {
-  const spec = String(args[0] ?? '');
-  if (!spec) throw new Error('Usage: gesture click <x,y>');
+type InputSend = (method: string, params: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Run `fn` with a raw CDP sender for the active tab: the bridge's
+ * `chrome.debugger` relay in bridge mode, a short-lived Playwright CDP
+ * session otherwise. Gestures are the same Input.dispatch* calls either way.
+ */
+async function withInput<T>(ctx: Ctx, fn: (send: InputSend) => Promise<T>): Promise<T> {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    return fn((method, params) => bridge.send(method, params));
+  }
+  const page = await activePage(ctx);
+  return withCdpSession(page, (session) => fn((method, params) => session.send(method as never, params as never)));
+}
+
+async function gestureViewport(ctx: Ctx): Promise<{ width: number; height: number }> {
+  if (ctx.bridgeMode) {
+    const v = await bridgeEvaluate(requireBridge(ctx), '({ width: innerWidth, height: innerHeight })').catch(() => null) as
+      { width?: number; height?: number } | null;
+    return { width: v?.width || 1280, height: v?.height || 720 };
+  }
+  const page = await activePage(ctx);
+  return page.viewportSize() ?? { width: 1280, height: 720 };
+}
+
+/**
+ * Viewport point at the centre of `target` (@ref or selector), scrolled into
+ * view first. Aims at the visible part (box ∩ viewport) so an element taller
+ * than the window still gets a point the wheel can land on.
+ */
+async function gestureTargetPoint(ctx: Ctx, target: string): Promise<{ x: number; y: number }> {
+  let box: { x: number; y: number; width: number; height: number } | null;
+  if (ctx.bridgeMode) {
+    // bridgeBox scrolls into view if needed, then reads the box model.
+    box = await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target), target);
+  } else {
+    const loc = await resolveRef(ctx, target, await activePage(ctx));
+    await loc.scrollIntoViewIfNeeded();
+    box = await loc.boundingBox();
+  }
+  if (!box || box.width <= 0 || box.height <= 0) {
+    throw new Error(`gesture: ${target} has no visible box to aim at`);
+  }
+  const vp = await gestureViewport(ctx);
+  // Centre of box ∩ viewport, so a partly visible element is hit on its
+  // visible part, not at a clamped point that may sit outside it.
+  const left = Math.max(box.x, 0);
+  const top = Math.max(box.y, 0);
+  const right = Math.min(box.x + box.width, vp.width);
+  const bottom = Math.min(box.y + box.height, vp.height);
+  if (right <= left || bottom <= top) {
+    throw new Error(`gesture: ${target} is outside the viewport after scrolling`);
+  }
+  return { x: (left + right) / 2, y: (top + bottom) / 2 };
+}
+
+function parseGesturePoint(spec: string): { x: number; y: number } {
   const [xs, ys] = spec.split(',').map((s) => s.trim());
   const x = Number(xs);
   const y = Number(ys);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
-  // Dispatch on the active tab's target.
-  const page = await activePage(ctx);
-  await withCdpSession(page, async (session) => {
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  return { x, y };
+}
+
+register('gesture.click', async (ctx, args) => {
+  const spec = String(args[0] ?? '');
+  if (!spec) throw new Error('Usage: gesture click <x,y>');
+  const { x, y } = parseGesturePoint(spec);
+  await withInput(ctx, async (send) => {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
   });
   return { ok: true };
 });
@@ -4193,10 +4318,9 @@ register('record.status', async (ctx) => {
 register('gesture.key', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: gesture key <key>');
-  const page = await activePage(ctx);
-  await withCdpSession(page, async (session) => {
-    await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key });
-    await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key });
+  await withInput(ctx, async (send) => {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key });
   });
   return { ok: true };
 });
@@ -4204,48 +4328,46 @@ register('gesture.key', async (ctx, args) => {
 register('gesture.dblclick', async (ctx, args) => {
   const spec = String(args[0] ?? '');
   if (!spec) throw new Error('Usage: gesture dblclick <x,y>');
-  const [xs, ys] = spec.split(',').map((s) => s.trim());
-  const x = Number(xs);
-  const y = Number(ys);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`Invalid coords: ${spec}`);
-  const page = await activePage(ctx);
-  await withCdpSession(page, async (session) => {
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  const { x, y } = parseGesturePoint(spec);
+  await withInput(ctx, async (send) => {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     // clickCount=2 on the second pressed/released is what Chrome treats as a
     // dblclick — firing pressed/released twice with clickCount=1 is NOT the
     // same and won't trigger ondblclick handlers.
-    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
   });
   return { ok: true };
 });
 
-register('gesture.scroll', async (ctx, args) => {
+// Wheel events go to whatever is under the pointer, so scrolling a panel
+// (not the page) means aiming at it: --on <@ref|selector> puts the wheel at
+// that element's centre. Without --on it stays the viewport centre.
+register('gesture.scroll', async (ctx, args, opts) => {
   const dir = String(args[0] ?? '').toLowerCase();
   const amount = args[1] !== undefined ? Number(args[1]) : 300;
   if (!['up', 'down', 'left', 'right'].includes(dir)) {
-    throw new Error('Usage: gesture scroll <up|down|left|right> [amount=300]');
+    throw new Error('Usage: gesture scroll <up|down|left|right> [amount=300] [--on <@ref|selector>]');
   }
   if (!Number.isFinite(amount)) throw new Error(`Invalid scroll amount: ${args[1]}`);
-  const page = await activePage(ctx);
-  await withCdpSession(page, async (session) => {
-    // Dispatch on the viewport centre. Magnitude is the wheel delta.
-    const viewport = page.viewportSize() ?? { width: 1280, height: 720 };
-    const x = viewport.width / 2;
-    const y = viewport.height / 2;
-    const deltaX = dir === 'left' ? -amount : dir === 'right' ? amount : 0;
-    const deltaY = dir === 'up' ? -amount : dir === 'down' ? amount : 0;
-    await session.send('Input.dispatchMouseEvent', {
-      type: 'mouseWheel',
-      x,
-      y,
-      deltaX,
-      deltaY,
-    });
+  const on = opts.on;
+  let point: { x: number; y: number };
+  if (on !== undefined) {
+    if (typeof on !== 'string') requireTarget('gesture scroll --on', null);
+    requireTarget('gesture scroll --on', on as string);
+    point = await gestureTargetPoint(ctx, on as string);
+  } else {
+    const vp = await gestureViewport(ctx);
+    point = { x: vp.width / 2, y: vp.height / 2 };
+  }
+  const deltaX = dir === 'left' ? -amount : dir === 'right' ? amount : 0;
+  const deltaY = dir === 'up' ? -amount : dir === 'down' ? amount : 0;
+  await withInput(ctx, async (send) => {
+    await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX, deltaY });
   });
-  return { ok: true, direction: dir, amount };
+  return { ok: true, direction: dir, amount, x: point.x, y: point.y, ...(on !== undefined ? { on } : {}) };
 });
 
 // ─── HTTP server ───────────────────────────────────────────────
