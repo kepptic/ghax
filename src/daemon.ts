@@ -51,6 +51,7 @@ import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import { actionability } from './actionability';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, grepFromOpts, type BudgetedText } from './snapshot-budget';
 import { RefRegistry, docIdOfMarker } from './ref-registry';
+import { parseExpect, runExpect, type ExpectProbes, type VisState } from './expect';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -206,7 +207,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'bridge.stats',
   'cookies', 'cookies.delete', 'storage', 'auth.export',
-  'batch', 'record.start', 'record.stop', 'record.status',
+  'batch', 'expect', 'record.start', 'record.stop', 'record.status',
   'gesture.click', 'gesture.dblclick', 'gesture.scroll', 'gesture.key',
 ]);
 
@@ -1169,12 +1170,35 @@ register('batch', async (ctx, args, opts) => {
         }
       }
       const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
+      const t0 = Date.now();
       try {
         const data = await handler(ctx, stepArgs, stepOpts);
-        results.push({ cmd, ok: true, data, ...snapField });
+        const ms = Date.now() - t0;
+        // A failed expect is a result, not a throw (see src/expect.ts). It ends
+        // the plan whatever stopOnError says: the checks after it assume it held.
+        if (cmd === 'expect' && (data as { ok?: boolean } | null)?.ok === false) {
+          const r = data as ExpectResultLike;
+          results.push({
+            cmd, ok: false, code: r.code === 'EXPECT_ERROR' ? 'EXPECT_ERROR' : 'EXPECT_FAILED', error: r.message, step: results.length,
+            expect: r.expect, expected: r.expected, actual: r.actual, elapsedMs: r.elapsedMs, ms, ...snapField,
+          });
+          return true;
+        }
+        // A nested batch stopped on an expect: the outer plan stops too, with
+        // the same code, so the CLI maps it to the same exit.
+        if (cmd === 'batch' && Array.isArray(data)) {
+          const inner = (data as Array<{ code?: string; error?: string }>).find(
+            (s) => s && (s.code === 'EXPECT_FAILED' || s.code === 'EXPECT_ERROR'),
+          );
+          if (inner) {
+            results.push({ cmd, ok: false, code: inner.code, error: inner.error, step: results.length, data, ms, ...snapField });
+            return true;
+          }
+        }
+        results.push({ cmd, ok: true, data, ms, ...snapField });
         return false;
       } catch (err) {
-        results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ...snapField });
+        results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ms: Date.now() - t0, ...snapField });
         return stopOnError;
       }
     });
@@ -3358,6 +3382,92 @@ register('is', async (ctx, args) => {
       throw new Error(`Unknown check: ${check}`);
   }
   return { check, target, result };
+});
+
+// ─── expect — checks a plan carries with it ────────────────────
+//
+// Pure logic (parse, poll, result) is in src/expect.ts. This is the
+// transport glue: CDP asks Playwright, the bridge asks the page itself.
+
+type ExpectResultLike = { code?: string; message?: string; expect?: string; expected?: unknown; actual?: unknown; elapsedMs?: number };
+
+// Real functions, not source strings: Playwright's locator.evaluate(string)
+// evaluates the string as an expression and never calls the function it
+// yields, so every selector probe came back "absent". The bridge gets the
+// same function as source via toString(), so the two transports can't drift.
+// Keep them self-contained (no closures, no helpers): they run in the page.
+const VIS_FN = (el: Element): string => {
+  const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+  return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0 ? 'visible' : 'hidden';
+};
+const VALUE_FN = (el: Element): string => ('value' in el ? String((el as HTMLInputElement).value) : String(el.textContent ?? ''));
+const TEXT_FN = (el: Element): string => (el as HTMLElement).innerText;
+type ProbeFn = (el: Element) => string;
+
+function expectProbes(ctx: Ctx): ExpectProbes {
+  const isRef = (t: string) => /^@[ec]\d+$/.test(t);
+  const pageEval = async (js: string): Promise<unknown> =>
+    ctx.bridgeMode ? bridgeEval(ctx, js) : evalWithNavRetry(await activePage(ctx), js);
+  // A ref whose element is gone is "absent", not an error: `hidden @e3` after a
+  // dialog closes is the normal way to say it worked.
+  const goneRef = (err: unknown): boolean =>
+    (err as { code?: string } | null)?.code === 'BRIDGE_REF_STALE'
+    || /not found in the latest snapshot/.test(String((err as Error | null)?.message ?? ''));
+
+  // Runs `fnSrc(el)` on the target. undefined: nothing matched.
+  const onTarget = async (target: string, fn: ProbeFn): Promise<unknown> => {
+    const fnSrc = fn.toString();
+    if (ctx.bridgeMode) {
+      if (isRef(target)) {
+        try {
+          return await bridgeCallOn(verbBridge(ctx), await resolveBridgeTarget(ctx, target), `function() { return (${fnSrc})(this); }`, [], target);
+        } catch (err) {
+          if (goneRef(err)) return undefined;
+          throw err;
+        }
+      }
+      return await bridgeEval(ctx, `(() => { const el = document.querySelector(${JSON.stringify(target)}); return el ? (${fnSrc})(el) : undefined; })()`);
+    }
+    const page = await activePage(ctx);
+    let loc: Locator;
+    try { loc = await resolveRef(ctx, target, page); } catch (err) {
+      if (goneRef(err)) return undefined;
+      throw err;
+    }
+    if (await loc.count() === 0) return undefined;
+    return await loc.first().evaluate(fn, undefined, { timeout: 1000 });
+  };
+
+  return {
+    url: async () => ctx.bridgeMode ? String(await bridgeEval(ctx, 'location.href')) : (await activePage(ctx)).url(),
+    title: async () => ctx.bridgeMode ? String(await bridgeEval(ctx, 'document.title')) : await (await activePage(ctx)).title(),
+    text: async (selector) => {
+      if (!selector) return String(await pageEval('document.body ? document.body.innerText : ""'));
+      const r = await onTarget(selector, TEXT_FN);
+      return r == null ? null : String(r);
+    },
+    visibility: async (target) => {
+      const r = await onTarget(target, VIS_FN);
+      return (r == null ? 'absent' : r) as VisState;
+    },
+    count: async (selector) => ctx.bridgeMode
+      ? Number(await bridgeEval(ctx, `document.querySelectorAll(${JSON.stringify(selector)}).length`))
+      : await (await activePage(ctx)).locator(selector).count(),
+    value: async (target) => {
+      const r = await onTarget(target, VALUE_FN);
+      return r == null ? null : String(r);
+    },
+    evaluate: pageEval,
+  };
+}
+
+register('expect', async (ctx, _args, opts) => {
+  let spec;
+  try { spec = parseExpect(opts); } catch (err) {
+    // Misuse of the verb, not a failed check: exit 1 like any usage error.
+    throw new DaemonError((err as Error).message, 1);
+  }
+  return runExpect(spec, expectProbes(ctx));
 });
 
 register('wait', async (ctx, args, opts) => {

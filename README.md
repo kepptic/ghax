@@ -324,6 +324,7 @@ as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
 
 - `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots before a ref-using step when the page changed since the last snapshot, so a mid-plan combobox reshuffle doesn't break later refs and a quiet page doesn't pay for a snapshot per step. Each ref step reports `autoSnapshot: "skipped"` or `"taken"`.
 - `ghax chain` reads the same shape from stdin for ad-hoc flows.
+- `ghax expect` asserts one thing and polls until it holds: `--url <regex>`, `--title <regex>`, `--text <substring> [--selector <css>]`, `--visible <@ref|css>`, `--hidden <@ref|css>`, `--count <css> --n N` (or `--min` / `--max`), `--value <@ref|css> --expected <text>`, `--eval <js>` (truthy), each with `--timeout <ms>` (default 5000). Put the same thing in a plan as `{"cmd":"expect","opts":{"url":"dashboard","timeout":3000}}` and `batch`, `chain` and `replay` files check as they go. The first failed `expect` stops the plan and exits `1`; the result names the step, what was expected, what was there, and how long it waited. `--report <path>` on `batch`, `chain`, `replay` or `expect` writes every step's `ok`, `ms` and `actual` to a JSON file. Works on CDP and the bridge.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]` mutates the running page, measures a result, and screenshots in one call. Revert = reload.
 - `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.
 - `ghax shell` is a REPL that keeps the CLI process alive between commands, ~1.8× faster for multi-turn agent sessions.
@@ -367,7 +368,7 @@ ghax --help           # full surface — authoritative
 ghax --help | less    # scroll it
 ```
 
-Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error, `2` not attached, `4` CDP error, `10` build/bootstrap failure.
+Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error or failed `expect` (an `expect` that could not run, e.g. bridge disconnect, is `4`), `2` not attached, `4` CDP error, `10` build/bootstrap failure.
 
 ---
 
