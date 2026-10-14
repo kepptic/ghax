@@ -215,8 +215,10 @@ Re-run with `--browser edge` (or a label), or keep the daemon and pick with `gha
 **Driving several browsers at once.** `ghax attach --extension --browser all` (or `GHAX_BRIDGE_BROWSER=all`) binds every connected browser instead of parking all but one. One bound browser is **active**: it is the one `snapshot`, `click`, `eval` and the rest act on, and `ghax bridge instances` marks it (`*` active, `+` bound, blank parked). Then:
 
 - `ghax tabs` lists every bound browser's tabs, numbered `#1..N` across all of them. A browser that fails or takes over 10 s to answer shows as a `note:` line instead of hanging the listing.
-- `ghax tab '#5'` (or a full id such as `chrome-home:42`) in another bound browser makes that browser active, then controls the tab. Refs are cleared, as on any tab switch. A tab in a browser that isn't bound is refused with a `ghax bridge use` hint.
-- `ghax console` and `ghax network` show the active tab only. `--tab '#n'|<id>` picks another tab, `--all` shows every tab of every bound browser.
+- `ghax tab '#5'` (or a full id such as `chrome-home:42`) in another bound browser controls the tab there first, then makes that browser active. Refs are cleared, as on any tab switch. If that browser refuses the tab (another agent owns it, it can't attach), the daemon stays on the browser it was driving. A tab in a browser that isn't bound is refused with a `ghax bridge use` hint.
+- A command runs start to finish on the browser that was active when it started. A `tab` switch from another shell mid-command never sends the rest of it to the other browser.
+- `ghax console` and `ghax network` show the active tab only. `--tab '#n'|<id>` picks another tab, `--all` shows every tab of every bound browser. `--last N` counts the selected tab's entries. With no active tab they error instead of printing nothing. Caveat: `console --follow` and `network --follow` are not tab-filtered yet; they stream every bound browser's entries.
+- Every bound browser records console and network from the tab it controls, active or not.
 - `GHAX_BRIDGE_CONTROL=active` (`--control-active`) applies to the first browser that binds only.
 
 **Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:

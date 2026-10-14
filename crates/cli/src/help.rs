@@ -101,12 +101,15 @@ Snapshot & interact:
 Logs:
   console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps] [--tab <#n|id>] [--all]
          # bridge mode: the active tab only; --tab <#n|id> picks another tab,
-         #   --all lifts the filter (every tab of every bound browser)
+         #   --all lifts the filter (every tab of every bound browser);
+         #   no active tab is an error, not an empty list. --last N counts
+         #   the selected tab's entries. --follow is NOT tab-filtered yet:
+         #   it streams every bound browser's entries
          # --since filters to entries newer than the epoch-ms timestamp
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
   network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>] [--tab <#n|id>] [--all]
-         # bridge mode: same tab scoping as console
+         # bridge mode: same tab scoping as console (and --follow caveat)
   cookies [--domain <d>] [--url <u>] [--all] [--values] [--has <name>]
          # Default: cookies applicable to the active tab's URL only
          #   (Playwright's own domain/path/secure applicability match).

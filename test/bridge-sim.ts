@@ -448,7 +448,7 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       let caught: unknown = null;
-      await bridgeResolveHandle(bridge, { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
+      await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
         .catch((e) => { caught = e; });
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
@@ -463,10 +463,10 @@ async function main(): Promise<void> {
         ok: false, reason: 'covered', coveredBy: 'div#overlay "Accept cookies"', x: 10, y: 10, width: 5, height: 5,
       });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
       let caught: unknown = null;
-      await bridgeGuard(bridge, h, '@e7', 'click', false).catch((e) => { caught = e; });
-      bridgeReleaseHandle(bridge, h);
+      await bridgeGuard(bridge.pinned(), h, '@e7', 'click', false).catch((e) => { caught = e; });
+      bridgeReleaseHandle(bridge.pinned(), h);
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
       assert(e.code === 'BRIDGE_TARGET_NOT_ACTIONABLE', `code ${e.code}`);
@@ -488,13 +488,13 @@ async function main(): Promise<void> {
     await withBridge(async (bridge, port) => {
       const ext = await guardedExt(port, { ok: false, reason: 'disabled' });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
       let caught: any = null;
-      await bridgeGuard(bridge, h, '@e2', 'click', false).catch((e) => { caught = e; });
+      await bridgeGuard(bridge.pinned(), h, '@e2', 'click', false).catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_TARGET_NOT_ACTIONABLE' && /disabled/.test(caught.hint), `disabled: ${caught?.hint}`);
       ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
       caught = null;
-      await bridgeGuard(bridge, h, '@e2', 'fill', false).catch((e) => { caught = e; });
+      await bridgeGuard(bridge.pinned(), h, '@e2', 'fill', false).catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
     });
   });
@@ -503,8 +503,8 @@ async function main(): Promise<void> {
     await withBridge(async (bridge, port) => {
       const ext = await guardedExt(port, { ok: true, x: 40, y: 20, width: 80, height: 40 });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
-      const { guard } = await bridgeGuard(bridge, h, '@e1', 'click', true);
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
+      const { guard } = await bridgeGuard(bridge.pinned(), h, '@e1', 'click', true);
       assert(guard.x === 40 && guard.y === 20, `click point from the guard: ${JSON.stringify(guard)}`);
       const call = ext.sent.find((c) => c.method === 'Runtime.callFunctionOn');
       assert(call, 'no callFunctionOn sent');
@@ -557,7 +557,7 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       bridge.resetStats();
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       await sleep(10);
       const buttons = [...snap.refs.keys()].filter((k) => k.startsWith('e'));
       assert(buttons.length === 40, `expected 40 @e refs, got ${buttons.length}`);
@@ -574,13 +574,13 @@ async function main(): Promise<void> {
       const { ext, liveCursor } = snapshotExt(port, 2, 2);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       const c2 = snap.refs.get('c2')!;
-      const h = await bridgeResolveHandle(bridge, c2, '@c2');
+      const h = await bridgeResolveHandle(bridge.pinned(), c2, '@c2');
       assert(h.objectId === 'cursor-2', `resolved to ${h.objectId}`);
       liveCursor.delete(2);
       let caught: any = null;
-      await bridgeResolveHandle(bridge, c2, '@c2').catch((e) => { caught = e; });
+      await bridgeResolveHandle(bridge.pinned(), c2, '@c2').catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
   });
@@ -591,7 +591,7 @@ async function main(): Promise<void> {
       const { ext } = snapshotExt(port, 300, 0);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       assert(snap.refs.size === 300, `ref map keeps every ref, got ${snap.refs.size}`);
       const b = applySnapshotBudget(snap.text.split('\n'), budgetFromOpts({}));
       assert(b.shownRefs === DEFAULT_MAX_REFS && b.totalRefs === 300, `shown ${b.shownRefs} / total ${b.totalRefs}`);
@@ -653,11 +653,11 @@ async function main(): Promise<void> {
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
       const identity = registry.forDoc('doc-a');
-      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const first = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       const cancel = refByName(first, 'Cancel');
       buttons.unshift({ id: 9, name: 'Inserted' });
-      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const second = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       assert(refByName(second, 'Save') === save, `Save moved: ${save} -> ${refByName(second, 'Save')}`);
       assert(refByName(second, 'Cancel') === cancel, 'Cancel moved');
       const inserted = refByName(second, 'Inserted');
@@ -674,19 +674,19 @@ async function main(): Promise<void> {
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
       const identity = registry.forDoc('doc-a');
-      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const first = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       buttons[0].name = 'Saved';
-      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const second = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       assert(refByName(second, 'Saved') !== save, 'a renamed node must not keep its old ref');
       buttons[1].role = 'link';
-      const third = await bridgeSnapshot(bridge, { refs: identity });
+      const third = await bridgeSnapshot(bridge.pinned(), { refs: identity });
       assert(third.refs.get(refByName(first, 'Go')!) === undefined, 'a node whose role changed gets a new ref');
       buttons.splice(0, 1);
       const held = registry.size;
-      await bridgeSnapshot(bridge, { refs: identity, selector: '#main' });
+      await bridgeSnapshot(bridge.pinned(), { refs: identity, selector: '#main' });
       assert(registry.size === held, '--selector snapshots never prune');
-      await bridgeSnapshot(bridge, { refs: identity });
+      await bridgeSnapshot(bridge.pinned(), { refs: identity });
       assert(registry.size === held - 1, `an unscoped snapshot prunes nodes that left the page (${held} -> ${registry.size})`);
     });
   });
@@ -698,14 +698,14 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
-      const pageA = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-a') });
+      const pageA = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: registry.forDoc('doc-a') });
       const aRefs = [...pageA.refs.keys()];
       // Navigation: the daemon clears identities (clearSnapshotRefs) but the
       // new document reuses the SAME backend node ids and even the same names.
       registry.clear();
       buttons[0].name = 'Delete account';
       buttons[1].name = 'Buy';
-      const pageB = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-b') });
+      const pageB = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: registry.forDoc('doc-b') });
       const num = (r: string) => Number(r.slice(1));
       const maxA = Math.max(...aRefs.map(num));
       for (const r of pageB.refs.keys()) assert(num(r) > maxA, `page B reused ${r} (page A went up to e${maxA})`);
@@ -722,10 +722,10 @@ async function main(): Promise<void> {
       const ext = mutablePage(port, [{ id: 10, name: 'Save' }]);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      assert((await bridgeSnapshot(bridge, {})).scoped === false, 'a body-rooted snapshot is not scoped');
-      assert((await bridgeSnapshot(bridge, { selector: '#form' })).scoped === true, '--selector is scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), {})).scoped === false, 'a body-rooted snapshot is not scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), { selector: '#form' })).scoped === true, '--selector is scoped');
       ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'DIALOG' } }));
-      assert((await bridgeSnapshot(bridge, {})).scoped === true, 'a modal-rooted snapshot is scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), {})).scoped === true, 'a modal-rooted snapshot is scoped');
     });
   });
 
@@ -739,12 +739,12 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const ref = { backendNodeId: 42, role: 'button', name: 'Save' };
-      assert(await bridgeRefStillMatches(bridge, ref), 'same role and name should match');
+      assert(await bridgeRefStillMatches(bridge.pinned(), ref), 'same role and name should match');
       ax = { role: 'button', name: 'Delete' };
-      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a rename must not match');
+      assert(!(await bridgeRefStillMatches(bridge.pinned(), ref)), 'a rename must not match');
       ax = { role: 'checkbox', name: 'Save' };
-      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a role change must not match');
-      assert(await bridgeRefStillMatches(bridge, { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
+      assert(!(await bridgeRefStillMatches(bridge.pinned(), ref)), 'a role change must not match');
+      assert(await bridgeRefStillMatches(bridge.pinned(), { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
     });
   });
 
@@ -755,18 +755,18 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const ref = { backendNodeId: 5, role: 'button', name: 'Go' };
-      await bridgeResolveHandle(bridge, ref, '@e1');
-      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(ext.worldsCreated === 1, `one world per document, got ${ext.worldsCreated}`);
       const ctxIds = ext.sent.filter((c) => c.method === 'DOM.resolveNode').map((c) => c.params.executionContextId);
       assert(ctxIds.every((id) => id === 701), `both resolves in world 701: ${ctxIds}`);
       // Main-frame navigation drops the world; the next use makes a new one.
       ext.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'main-frame' } } });
       await sleep(20);
-      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(Number(ext.worldsCreated) === 2, 'navigation must re-create the world');
       // A main-world handle (fill) does not use the isolated world at all.
-      await bridgeResolveHandle(bridge, ref, '@e1', 'main');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1', 'main');
       const last = ext.sent.filter((c) => c.method === 'DOM.resolveNode').at(-1);
       assert(last?.params.executionContextId === undefined, 'main-world resolve carries no context id');
       // A stale context is re-created once, transparently.
@@ -775,7 +775,7 @@ async function main(): Promise<void> {
         if (fail && p.executionContextId) { fail = false; throw new Error('Cannot find context with specified id'); }
         return { object: { objectId: 'o2' } };
       });
-      const h = await bridgeResolveHandle(bridge, ref, '@e1');
+      const h = await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(h.objectId === 'o2' && Number(ext.worldsCreated) === 3, `stale world should be rebuilt: ${ext.worldsCreated}`);
     });
   });

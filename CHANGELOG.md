@@ -39,13 +39,20 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Multi-browser surface for `--browser all`.** `ghax tabs` lists every bound
   browser's tabs numbered `#1..N` across all of them; a browser that errors or
   does not answer within 10 s becomes a `note:` row instead of hanging the
-  listing. `ghax tab <x>` in another bound browser makes it the active browser
-  (refs cleared) before controlling the tab; a tab in an unbound browser is
-  refused with a `bridge use` hint. In bridge mode `console` and `network`
-  show the active tab by default, `--tab <#n|id>` picks another, `--all` lifts
-  the filter (CDP mode is unchanged). `bridge instances` reports `active` and
-  marks the active browser, `/bridge-status.connected` is true when any bound
-  browser is connected, and the daemon log no longer says "only 'all' may
+  listing. `ghax tab <x>` in another bound browser controls the tab there and
+  only then makes that browser active (refs cleared); a refusal leaves the
+  daemon on the browser it was driving, and a tab in an unbound browser is
+  refused with a `bridge use` hint. Each command's CDP and control calls stay
+  on the browser it started on, even if another shell switches browsers
+  mid-command. In bridge mode `console` and `network` show the active tab by
+  default, `--tab <#n|id>` picks another, `--all` lifts the filter (CDP mode
+  is unchanged); `--last N` counts the selected tab's entries, no active tab
+  is an error rather than `[]`, and `--follow` is not tab-filtered yet. Every
+  bound browser enables console/network capture on its own tab, active or
+  not, and switching browsers keeps the destination's in-flight requests.
+  `tabs` no longer marks a non-active browser's tab `active`.
+  `bridge instances` reports `active` and marks the active browser,
+  `/bridge-status.connected` is true when any bound browser is connected, and the daemon log no longer says "only 'all' may
   bind". `GHAX_BRIDGE_CONTROL=active` under `all` applies to the first bound
   browser only (now logged).
 

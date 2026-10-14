@@ -193,6 +193,11 @@ class FakeConnection {
   attachFailure: Error | null = null;
   /** The id of the last control request seen — lets a test forge an ack for it. */
   lastControlId: number | null = null;
+  /**
+   * Answer (or hold) a CDP command instead of the default echo. Return true
+   * when handled; `reply` may be called later to release a held command.
+   */
+  onCdp: ((method: string, params: any, reply: (result: unknown) => void) => boolean) | null = null;
   private legacyTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -339,6 +344,7 @@ class FakeConnection {
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       this.received.push(msg.method);
       if (this.swallowCdp) return;
+      if (this.onCdp?.(msg.method, msg.params, (result) => this.send({ id: msg.id, result }))) return;
       this.send({ id: msg.id, result: { echoed: msg.method, tabId: this.controlledTabId } });
     }
   }
@@ -1909,6 +1915,135 @@ async function main(): Promise<void> {
       assert(all.ok && text(all) === 'from-chrome,from-edge', `--all: ${JSON.stringify(all)}`);
       const net = await rpc('network');
       assert(net.ok && Array.isArray(net.data), `network: ${JSON.stringify(net)}`);
+    });
+  });
+
+  /** The daemon's active and other bound connection, by instances(). */
+  async function activeAndOther(h: DaemonHarness): Promise<{ active: FakeConnection; other: FakeConnection }> {
+    const insts = (await h.rpc('bridge.instances')).data.instances;
+    const activeId = insts.find((i: any) => i.active)?.instanceId;
+    assert(activeId === 'inst-edge' || activeId === 'inst-chrome', `active: ${activeId}`);
+    return activeId === 'inst-edge' ? { active: h.edge, other: h.chrome } : { active: h.chrome, other: h.edge };
+  }
+
+  /** List tabs, then drive edge's tab 1; returns chrome's tab 2 row too. */
+  async function driveEdgeTab1(h: DaemonHarness): Promise<{ chromeTab: any }> {
+    const ea = await h.alias('inst-edge');
+    const ca = await h.alias('inst-chrome');
+    const tabs = (await h.rpc('tabs')).data;
+    const r = await h.rpc('tab', [`${ea}:1`]);
+    assert(r.ok, `drive edge tab 1: ${JSON.stringify(r)}`);
+    return { chromeTab: tabs.find((t: any) => t.id === `${ca}:2`) };
+  }
+
+  const activeInstance = async (h: DaemonHarness) => (await h.rpc('bridge.instances')).data.instances.find((i: any) => i.active)?.instanceId;
+
+  await test('daemon, all: a verb in flight on one browser never sends to the other after a concurrent tab switch', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, edge, chrome } = h;
+      const { chromeTab } = await driveEdgeTab1(h);
+      const held: { release: (() => void) | null } = { release: null };
+      edge.onCdp = (method, _p, reply) => {
+        if (method === 'Page.getFrameTree') { reply({ frameTree: { frame: { id: 'F' } } }); return true; }
+        if (method === 'Page.createIsolatedWorld') { held.release = () => reply({ executionContextId: 77 }); return true; }
+        return false;
+      };
+      const pending = rpc('box', ['#target']);
+      await until(() => held.release !== null, 'isolated-world creation in flight on edge');
+      assert((await rpc('tab', [chromeTab.id])).ok, 'switch to the chrome tab');
+      assert(await activeInstance(h) === 'inst-chrome', 'chrome is active');
+      chrome.received.length = 0;
+      const edgeFrom = edge.received.length;
+      held.release!();
+      await pending;
+      assert(!chrome.received.includes('Runtime.evaluate'), `edge's world context id reached chrome: ${chrome.received}`);
+      assert(edge.received.slice(edgeFrom).includes('Runtime.evaluate'), `the verb's evaluate stays on edge: ${edge.received.slice(edgeFrom)}`);
+    });
+  });
+
+  await test('daemon, all: a refused tab/control on the other browser leaves the active browser unchanged', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, chrome } = h;
+      const { chromeTab } = await driveEdgeTab1(h);
+      assert(await activeInstance(h) === 'inst-edge', 'edge active');
+      chrome.attachFailure = new Error('cannot attach to this tab');
+      const r = await rpc('tab', [chromeTab.id]);
+      assert(!r.ok, `refused: ${JSON.stringify(r)}`);
+      assert(await activeInstance(h) === 'inst-edge', `a refused tab moved the daemon to ${await activeInstance(h)}`);
+      const c = await rpc('bridge.control', [], { mode: 'tab', tabId: chromeTab.id });
+      assert(!c.ok, `control refused: ${JSON.stringify(c)}`);
+      assert(await activeInstance(h) === 'inst-edge', `a refused bridge control moved the daemon to ${await activeInstance(h)}`);
+      const st = await rpc('console');
+      assert(st.ok, `edge tab is still the active tab: ${JSON.stringify(st)}`);
+    });
+  });
+
+  await test('daemon, all: console/network --last N counts only the selected tab\'s entries', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, edge, chrome } = h;
+      await driveEdgeTab1(h);
+      for (let i = 0; i < 3; i++) edge.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ value: `edge-${i}` }] } });
+      for (let i = 0; i < 2; i++) edge.send({ type: 'event', method: 'Network.requestWillBeSent', params: { requestId: `e${i}`, request: { url: `https://edge.test/${i}` } } });
+      await sleep(100);
+      for (let i = 0; i < 5; i++) chrome.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ value: `chrome-${i}` }] } });
+      for (let i = 0; i < 5; i++) chrome.send({ type: 'event', method: 'Network.requestWillBeSent', params: { requestId: `c${i}`, request: { url: `https://chrome.test/${i}` } } });
+      await sleep(200);
+      const con = await rpc('console', [], { last: 3 });
+      assert(con.ok && con.data.map((e: any) => e.text).join() === 'edge-0,edge-1,edge-2', `console --last 3: ${JSON.stringify(con)}`);
+      const net = await rpc('network', [], { last: 2 });
+      assert(net.ok && net.data.length === 2 && net.data.every((e: any) => e.url.startsWith('https://edge.test/')), `network --last 2: ${JSON.stringify(net)}`);
+    });
+  });
+
+  await test('daemon, all: a never-active browser gets Runtime/Network/Log enabled once it controls a tab', async () => {
+    await withDaemon(async (h) => {
+      const { other } = await activeAndOther(h);
+      other.received.length = 0;
+      other.controlledTabId = 2;
+      other.send({ type: 'controlled', tabId: 2 });
+      await until(
+        () => ['Runtime.enable', 'Network.enable', 'Log.enable'].every((m) => other.received.includes(m)),
+        `domains enabled on the non-active browser (got ${other.received})`,
+      );
+    });
+  });
+
+  await test('daemon, all: switching browsers keeps the destination\'s in-flight requests', async () => {
+    await withDaemon(async (h) => {
+      const { rpc } = h;
+      const { other } = await activeAndOther(h);
+      other.controlledTabId = 2;
+      other.send({ type: 'controlled', tabId: 2 });
+      await sleep(50);
+      other.send({ type: 'event', method: 'Network.requestWillBeSent', params: { requestId: 'r1', request: { url: 'https://inflight.test/' } } });
+      await sleep(100);
+      assert((await rpc('bridge.use', [other.instanceId])).ok, 'switch to the other browser');
+      other.send({ type: 'event', method: 'Network.responseReceived', params: { requestId: 'r1', response: { status: 201, statusText: 'Created' } } });
+      await sleep(150);
+      const net = await rpc('network', [], { all: true });
+      const row = net.data?.find((e: any) => e.url === 'https://inflight.test/');
+      assert(row && row.status === 201, `the switch dropped the request's response: ${JSON.stringify(row)}`);
+    });
+  });
+
+  await test('daemon, all: tabs marks only the daemon-active browser\'s tab active', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, chrome, alias } = h;
+      await driveEdgeTab1(h);
+      chrome.controlledTabId = 2; // the other browser drives a tab of its own
+      const tabs = await rpc('tabs');
+      const act = tabs.data.filter((t: any) => t.active);
+      assert(act.length === 1 && act[0].id === `${await alias('inst-edge')}:1`, `active rows: ${JSON.stringify(act)}`);
+    });
+  });
+
+  await test('daemon, all: console/network with no active tab refuse instead of returning []', async () => {
+    await withDaemon(async ({ rpc }) => {
+      for (const verb of ['console', 'network']) {
+        const r = await rpc(verb);
+        assert(!r.ok && /no active tab/.test(String(r.error)) && /--all/.test(String(r.error)), `${verb}: ${JSON.stringify(r)}`);
+      }
+      assert((await rpc('console', [], { all: true })).ok, '--all still works');
     });
   });
 

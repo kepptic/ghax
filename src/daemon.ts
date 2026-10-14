@@ -43,7 +43,7 @@ import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import {
-  activePeerState, capBody, CAPTURABLE_CONTENT_TYPE_RE, pickMainFrameContext, wireBridgePageEvents, type PeerPageState,
+  newPeerPageState, peerState, capBody, CAPTURABLE_CONTENT_TYPE_RE, pickMainFrameContext, wireBridgePageEvents, type PeerPageState,
 } from './bridge-page-state';
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
@@ -70,14 +70,17 @@ import {
   bridgeText,
   bridgeRefStillMatches,
   isStaleContextError,
+  type BridgeConn,
   type BridgeEvent,
   type ControlAck,
+  type ControlledReason,
   type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
   type ControlTarget,
 } from './bridge';
 import * as fs from 'fs';
+import { AsyncLocalStorage } from 'async_hooks';
 import * as http from 'http';
 import type { BridgeInstance } from './bridge-peers';
 import * as path from 'path';
@@ -161,7 +164,7 @@ interface Ctx {
   lastSnapshotMarker: string | null;
   // Per bound browser: main frame, execution contexts, load timing and
   // in-flight requests (plan 12, brief B). Keyed by instanceId; readers use
-  // the ACTIVE peer's via activePeerState(). See bridge-page-state.ts.
+  // the verb's pinned peer's via verbPeerState(). See bridge-page-state.ts.
   bridgePeers: Map<string, PeerPageState>;
   instrumented: WeakSet<Page>;
   startedAt: number;
@@ -226,45 +229,59 @@ const BRIDGE_RETRY_SAFE = new Set([
   'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait',
 ]);
 
+/**
+ * The bound peer one bridge verb runs against, captured when the verb starts
+ * (plan 12 review, finding 1). Every CDP and control call the verb makes goes
+ * through `verbBridge(ctx)`, pinned to it, so a concurrent `tab` / `bridge
+ * use` moving the active peer can't split one verb across two browsers. A
+ * verb that itself switches peers re-pins in switchActivePeer. Each `batch`
+ * step is a verb of its own and captures afresh.
+ */
+const verbPeer = new AsyncLocalStorage<{ peer: string | null }>();
+
 function register(name: string, fn: Handler) {
   handlers.set(name, async (ctx, args, opts) => {
     if (ctx.bridgeMode && !BRIDGE_SUPPORTED_COMMANDS.has(name)) {
       throw new Error(`${name}: not supported over the extension bridge yet`);
     }
     if (!ctx.bridgeMode) return fn(ctx, args, opts);
-    try {
-      return await fn(ctx, args, opts);
-    } catch (err) {
-      // The bound extension dropped mid-operation. Only the verb layer knows
-      // whether re-running is safe, which is exactly why this lives here and
-      // not in Bridge.send().
-      if (err instanceof BridgeInterrupted) {
-        if (BRIDGE_RETRY_SAFE.has(name)) {
-          // Only on the browser the command was in flight on, and only while
-          // it is still the active one — never a replay on whatever `use`
-          // switched to in the meantime.
-          await requireBridge(ctx).waitForResumeOf(err, name);
-          // Whole-operation replay against the re-attached tab.
-          return await fn(ctx, args, opts);
-        }
-        const e = new Error(
-          `${name}: the bridge connection dropped mid-command — the action MAY have landed. ` +
-          `Run \`ghax snapshot\` to check the page state before retrying.`,
-        );
-        (e as any).code = 'BRIDGE_OUTCOME_UNKNOWN';
-        (e as any).hint = 'Verify the page with `ghax snapshot`; ghax will not replay an action that may have mutated the page.';
-        throw e;
-      }
-      // Already typed (stale ref, not actionable): its code and hint are the
-      // specific ones, so never let the generic message matchers re-wrap it.
-      if (err instanceof BridgeTypedError) throw err;
-      // Decorate recognized failures (unattachable tab, no extension) with a
-      // code + recovery hint. Unrecognized errors pass through unchanged.
-      const wrapped = bridgeError(err, { tab: describeActiveTab(ctx) });
-      if (wrapped.code === 'BRIDGE_ERROR') throw err; // nothing to add
-      throw wrapped;
-    }
+    return verbPeer.run({ peer: ctx.bridge?.boundInstanceId ?? null }, () => runBridgeVerb(ctx, name, fn, args, opts));
   });
+}
+
+async function runBridgeVerb(ctx: Ctx, name: string, fn: Handler, args: unknown[], opts: Record<string, unknown>): Promise<unknown> {
+  try {
+    return await fn(ctx, args, opts);
+  } catch (err) {
+    // The bound extension dropped mid-operation. Only the verb layer knows
+    // whether re-running is safe, which is exactly why this lives here and
+    // not in Bridge.send().
+    if (err instanceof BridgeInterrupted) {
+      if (BRIDGE_RETRY_SAFE.has(name)) {
+        // Only on the browser the command was in flight on, and only while
+        // it is still the active one — never a replay on whatever `use`
+        // switched to in the meantime.
+        await requireBridge(ctx).waitForResumeOf(err, name);
+        // Whole-operation replay against the re-attached tab.
+        return await fn(ctx, args, opts);
+      }
+      const e = new Error(
+        `${name}: the bridge connection dropped mid-command — the action MAY have landed. ` +
+        `Run \`ghax snapshot\` to check the page state before retrying.`,
+      );
+      (e as any).code = 'BRIDGE_OUTCOME_UNKNOWN';
+      (e as any).hint = 'Verify the page with `ghax snapshot`; ghax will not replay an action that may have mutated the page.';
+      throw e;
+    }
+    // Already typed (stale ref, not actionable): its code and hint are the
+    // specific ones, so never let the generic message matchers re-wrap it.
+    if (err instanceof BridgeTypedError) throw err;
+    // Decorate recognized failures (unattachable tab, no extension) with a
+    // code + recovery hint. Unrecognized errors pass through unchanged.
+    const wrapped = bridgeError(err, { tab: describeActiveTab(ctx) });
+    if (wrapped.code === 'BRIDGE_ERROR') throw err; // nothing to add
+    throw wrapped;
+  }
 }
 
 // ─── Page / target helpers ─────────────────────────────────────
@@ -525,8 +542,8 @@ function wireBridgeEvents(ctx: Ctx): void {
  * one yet. Waits briefly mid-navigation rather than failing: bookkeeping
  * lagging by a few ms must never turn a valid read into an error.
  */
-async function mainFrameContextId(ctx: Ctx, waitMs = 2000): Promise<string | null> {
-  const pick = (): string | null => pickMainFrameContext(activePeerState(ctx, requireBridge(ctx)));
+async function mainFrameContextId(ctx: Ctx, waitMs = 2000, conn: BridgeConn = verbBridge(ctx)): Promise<string | null> {
+  const pick = (): string | null => pickMainFrameContext(verbPeerState(ctx, conn));
   const immediate = pick();
   if (immediate) return immediate;
   const deadline = Date.now() + waitMs;
@@ -546,17 +563,17 @@ async function mainFrameContextId(ctx: Ctx, waitMs = 2000): Promise<string | nul
  * context means the expression provably never ran.
  */
 async function bridgeEval(ctx: Ctx, expression: string, timeoutMs?: number): Promise<unknown> {
-  const bridge = requireBridge(ctx);
-  const uniqueContextId = await mainFrameContextId(ctx, 300);
+  const bridge = verbBridge(ctx);
+  const uniqueContextId = await mainFrameContextId(ctx, 300, bridge);
   try {
     return await bridgeEvaluate(bridge, expression, { uniqueContextId, timeoutMs });
   } catch (err) {
     if (!isStaleContextError(err)) throw err;
     // Re-announce every context, wait for the new main-frame default, retry.
-    activePeerState(ctx, bridge).contexts.clear();
+    verbPeerState(ctx, bridge).contexts.clear();
     await bridge.send('Runtime.disable').catch(() => undefined);
     await bridge.send('Runtime.enable').catch(() => undefined);
-    const fresh = await mainFrameContextId(ctx, 2000);
+    const fresh = await mainFrameContextId(ctx, 2000, bridge);
     return await bridgeEvaluate(bridge, expression, { uniqueContextId: fresh, timeoutMs });
   }
 }
@@ -692,20 +709,24 @@ async function waitForStability(
  */
 function looksSuspiciouslyEmpty(ctx: Ctx, yieldSize: number, threshold: number): boolean {
   if (yieldSize >= threshold) return false;
-  const st = activePeerState(ctx, requireBridge(ctx));
+  const st = verbPeerState(ctx);
   if (st.networkRequests.size > 0) return true;              // requests in flight
   if (st.lastLoadAt && Date.now() - st.lastLoadAt < 2000) return true; // just loaded
   return false;
 }
 
-async function enableBridgeDomains(ctx: Ctx): Promise<void> {
-  const bridge = requireBridge(ctx);
+/**
+ * Enable the domains console/network/context tracking need, on ONE peer: every
+ * bound browser feeds the buffers, active or not (plan 12 review, finding 4).
+ */
+async function enableBridgeDomains(bridge: Bridge, instanceId: string): Promise<void> {
+  const conn = bridge.pinned(instanceId);
   await Promise.all([
-    bridge.send('Page.enable'),
-    bridge.send('Runtime.enable'),
-    bridge.send('Log.enable'),
-    bridge.send('Network.enable'),
-    bridge.send('DOM.enable'),
+    conn.send('Page.enable'),
+    conn.send('Runtime.enable'),
+    conn.send('Log.enable'),
+    conn.send('Network.enable'),
+    conn.send('DOM.enable'),
   ]).catch(() => undefined);
 }
 
@@ -731,6 +752,22 @@ async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator
 function requireBridge(ctx: Ctx): Bridge {
   if (!ctx.bridge) throw new Error('ghax bridge: extension bridge is not initialized');
   return ctx.bridge;
+}
+
+/**
+ * The bridge pinned to the current verb's peer (see `verbPeer`). Outside a
+ * verb (event listeners, startup) it pins to the active peer now; listeners
+ * that act for a specific peer pin to that peer with `bridge.pinned(id)`.
+ */
+function verbBridge(ctx: Ctx): BridgeConn {
+  const bridge = requireBridge(ctx);
+  const store = verbPeer.getStore();
+  return bridge.pinned(store?.peer ?? bridge.boundInstanceId);
+}
+
+/** The pinned peer's page state; a throwaway empty one when nothing is bound. */
+function verbPeerState(ctx: Ctx, conn: BridgeConn = verbBridge(ctx)): PeerPageState {
+  return conn.instanceId ? peerState(ctx, conn.instanceId) : newPeerPageState();
 }
 
 function clearSnapshotRefs(ctx: Ctx): void {
@@ -807,7 +844,7 @@ async function refStillMatches(ctx: Ctx, ref: string): Promise<boolean> {
     if (ctx.bridgeMode) {
       const entry = ctx.bridgeRefs.get(key);
       if (!entry) return false;
-      return await bridgeRefStillMatches(requireBridge(ctx), entry);
+      return await bridgeRefStillMatches(verbBridge(ctx), entry);
     }
     const entry = ctx.refs.get(key);
     if (!entry) return false;
@@ -833,14 +870,14 @@ async function readFreshnessMarker(ctx: Ctx): Promise<string | null> {
 }
 
 async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null): Promise<TabIdentity[]> {
-  const bridge = requireBridge(ctx);
+  const bridge = verbBridge(ctx);
   const ack = instanceSelector
-    ? await bridge.sendControlToInstance(instanceSelector, { action: 'list-tabs' })
+    ? await bridge.bridge.sendControlToInstance(instanceSelector, { action: 'list-tabs' })
     : await bridge.sendControl({ action: 'list-tabs' });
   if (!Array.isArray(ack.result)) throw new Error('tabs: extension returned an invalid tab list');
   // Mint ids with the alias of the instance that ANSWERED — with --browser
   // that is a parked browser, whose tab 42 is not the bound browser's.
-  const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.boundInstanceId);
+  const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.instanceId);
   return bridgeRowsToIdentities(ack.result as unknown[], who);
 }
 
@@ -857,10 +894,13 @@ async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Pr
   const bridge = requireBridge(ctx);
   const ids = bridge.boundIds;
   if (ids.length <= 1) return { rows: await listBridgeTabs(ctx), notes: [] };
+  const activeId = bridge.boundInstanceId;
   const settled = await Promise.allSettled(ids.map(async (id) => {
     const ack = await bridge.sendControl({ action: 'list-tabs' }, timeoutMs, { peer: id });
     if (!Array.isArray(ack.result)) throw new Error('extension returned an invalid tab list');
-    return bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id));
+    const rows = bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id));
+    // `active` is the daemon's active tab, so only the active browser has one.
+    return id === activeId ? rows : rows.map((t) => ({ ...t, active: false }));
   }));
   const rows: TabIdentity[] = [];
   const notes: string[] = [];
@@ -874,12 +914,17 @@ async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Pr
   return { rows: rows.map((t, i) => ({ ...t, index: i + 1 })), notes };
 }
 
-/** Make `selector` the active bound browser: refs die, in-flight requests reset. */
+/**
+ * Make `selector` the active bound browser: refs die. Its in-flight requests
+ * stay: they are still that browser's, only a tab change of its own resets
+ * them (bridge-page-state.ts). The rest of the calling verb is re-pinned to it.
+ */
 async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInstance> {
   const bridge = requireBridge(ctx);
   const instance = await bridge.use(selector);
+  const store = verbPeer.getStore();
+  if (store) store.peer = instance.instanceId;
   clearSnapshotRefs(ctx);
-  activePeerState(ctx, bridge).networkRequests.clear();
   // A different browser means a different alias, so the active id changes
   // even when the chrome tab number happens to match.
   const controlled = bridge.controlledTabId;
@@ -888,25 +933,32 @@ async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInsta
 }
 
 /**
- * Drive a resolved tab. A tab in a bound but non-active browser makes that
- * browser the active one first; one in a browser that is not bound at all is
- * refused (resolveTabSelector already did, since only bound tabs are listed).
+ * Drive a resolved tab. The tab's own browser is asked first; only once it
+ * acks does that browser become the active one, so a refusal (tab owned by
+ * another agent, unattachable) leaves the daemon on the browser it was
+ * driving. A browser that is not bound at all is refused (resolveTabSelector
+ * already did, since only bound tabs are listed).
  */
 async function controlResolvedTab(ctx: Ctx, tab: TabIdentity, extra: { quiet?: boolean } = {}): Promise<ControlAck> {
   const bridge = requireBridge(ctx);
   const alias = aliasOfId(tab.id);
+  let owner: string | null = null;
   if (alias !== null) {
     const owners = bridge.boundIds.filter((id) => bridge.identityOf(id)?.alias === alias);
     if (owners.length !== 1) {
       throw new Error(`${describeTab(tab)}: browser ${alias} is not bound to this daemon. Run 'ghax bridge use ${alias}' first.`);
     }
-    if (owners[0] !== bridge.boundInstanceId) await switchActivePeer(ctx, owners[0]);
+    owner = owners[0];
   }
+  let ack: ControlAck;
   try {
-    return await bridge.sendControl({ action: 'control-tab', tabId: tab.chromeTabId!, ...extra });
+    const conn = owner === null ? verbBridge(ctx) : bridge.pinned(owner);
+    ack = await conn.sendControl({ action: 'control-tab', tabId: tab.chromeTabId!, ...extra });
   } catch (err) {
     throw withTabIdentity(err, tab);
   }
+  if (owner !== null && owner !== bridge.boundInstanceId) await switchActivePeer(ctx, owner);
+  return ack;
 }
 
 /** resolveTabSelector over every bound browser; notes explain a missing one. */
@@ -985,7 +1037,7 @@ async function resolveBridgeTarget(ctx: Ctx, target: string): Promise<BridgeRef>
     if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
     return entry;
   }
-  return bridgeResolveSelector(requireBridge(ctx), target);
+  return bridgeResolveSelector(verbBridge(ctx), target);
 }
 
 // ─── Command handlers ──────────────────────────────────────────
@@ -1098,7 +1150,9 @@ register('batch', async (ctx, args, opts) => {
 register('status', async (ctx) => {
   if (ctx.bridgeMode) {
     const tabs = await listBridgeTabs(ctx);
-    const active = tabs.find((tab) => tab.chromeTabId === ctx.bridge?.controlledTabId) ?? null;
+    const pinned = verbBridge(ctx).instanceId;
+    const controlled = pinned ? requireBridge(ctx).controlledTabOf(pinned) : null;
+    const active = tabs.find((tab) => tab.chromeTabId === controlled) ?? null;
     return {
       pid: process.pid,
       uptimeMs: Date.now() - ctx.startedAt,
@@ -1272,12 +1326,12 @@ register('find', async (ctx, args) => {
 register('newWindow', async (ctx, args) => {
   const url = args[0] ? String(args[0]) : 'about:blank';
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     const ack = await bridge.sendControl({ action: 'new-window', url });
     const tab = ack.result as Partial<BridgeTab> | undefined;
     if (!tab || typeof tab.id !== 'number') throw new Error('newWindow: extension did not return the new tab');
     bridge.setDesiredControl({ action: 'control-tab', tabId: tab.id, quiet: true });
-    const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.boundInstanceId);
+    const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.instanceId);
     const id = composeTabId(who.alias, tab.id);
     setActiveTab(ctx, id);
     // index 0: a new window is in no listing yet, so it has no `#n`.
@@ -1358,7 +1412,7 @@ register('goto', async (ctx, args, opts) => {
   if (!url) throw new Error('Usage: goto <url>');
   if (ctx.bridgeMode) {
     clearSnapshotRefs(ctx);
-    const result = await bridgeGoto(requireBridge(ctx), url);
+    const result = await bridgeGoto(verbBridge(ctx), url);
     // --stable turns goto into "navigate AND wait for the SPA to settle",
     // which is what most callers actually want before their first read.
     if (opts.stable) {
@@ -1422,7 +1476,7 @@ interface HistoryNavResult {
  * double-step.
  */
 async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNavResult> {
-  const bridge = requireBridge(ctx);
+  const bridge = verbBridge(ctx);
   const history = await bridge.send('Page.getNavigationHistory') as {
     currentIndex?: number; entries?: Array<{ id: number; url: string }>;
   };
@@ -1440,7 +1494,7 @@ async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNav
   } catch (err) {
     if (!(err instanceof BridgeInterrupted)) throw err;
     // Dropped mid-navigation. Wait for the session back, then reconcile.
-    await bridge.waitForResumeOf(err, direction < 0 ? 'back' : 'forward');
+    await bridge.bridge.waitForResumeOf(err, direction < 0 ? 'back' : 'forward');
     const after = await bridge.send('Page.getNavigationHistory') as {
       currentIndex?: number; entries?: Array<{ id: number; url: string }>;
     };
@@ -1470,7 +1524,7 @@ register('forward', async (ctx) => {
 
 register('reload', async (ctx) => {
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     await bridge.send('Page.reload', {});
     clearSnapshotRefs(ctx);
     return { url: String(await bridgeEvaluate(bridge, 'location.href').catch(() => '')) };
@@ -1600,7 +1654,7 @@ register('text', async (ctx, _args, opts) => {
   let text: string;
   let possiblyIncomplete = false;
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     if (opts.stable) await waitForStability(ctx, { selector });
     const read = async (): Promise<string> => {
       if (selector) {
@@ -1678,7 +1732,7 @@ register('bridge.control', async (ctx, _args, opts) => {
   } else {
     throw new Error(`bridge.control: unknown mode '${mode}' (expected active | tab | stop)`);
   }
-  const ack = await ctx.bridge.sendControl(target);
+  const ack = await verbBridge(ctx).sendControl(target);
   // String ids since tab identity; chromeTabId keeps the raw number.
   return {
     ok: ack.ok,
@@ -1700,7 +1754,7 @@ register('bridge.reload', async (ctx, _args, opts) => {
   }
   const bridge = ctx.bridge;
   const before = bridge.extensionInfo;
-  const reloaded = bridge.boundInstanceId;
+  const reloaded = verbBridge(ctx).instanceId;
   if (!before || !reloaded) {
     throw new Error('bridge.reload: no extension connected — run `ghax attach --extension` first');
   }
@@ -1802,7 +1856,7 @@ register('bridge.use', async (ctx, args, opts) => {
 register('html', async (ctx, args) => {
   const sel = args[0] ? String(args[0]) : null;
   if (ctx.bridgeMode) {
-    return bridgeEvaluate(requireBridge(ctx), sel
+    return bridgeEvaluate(verbBridge(ctx), sel
       ? `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) throw new Error('Selector not found: ' + ${JSON.stringify(sel)}); return el.innerHTML; })()`
       : `document.doctype ? '<!DOCTYPE ' + document.doctype.name + '>' + document.documentElement.outerHTML : document.documentElement.outerHTML`);
   }
@@ -1820,7 +1874,7 @@ register('screenshot', async (ctx, args, opts) => {
   const fullPage = Boolean(opts.fullPage || opts['full-page']);
   if (ctx.bridgeMode) {
     const ref = target ? await resolveBridgeTarget(ctx, target) : null;
-    await captureBridgeScreenshot(requireBridge(ctx), outPath, fullPage, ref, target ?? 'element');
+    await captureBridgeScreenshot(verbBridge(ctx), outPath, fullPage, ref, target ?? 'element');
     return { path: outPath };
   }
   const page = await activePage(ctx);
@@ -1833,7 +1887,7 @@ register('screenshot', async (ctx, args, opts) => {
 });
 
 async function captureBridgeScreenshot(
-  bridge: Bridge,
+  bridge: BridgeConn,
   outPath: string,
   fullPage: boolean,
   ref: BridgeRef | null = null,
@@ -1925,7 +1979,7 @@ register('box', async (ctx, args) => {
   if (!target) throw new Error('Usage: box <@ref|selector>');
   if (ctx.bridgeMode) {
     try {
-      return await bridgeBox(requireBridge(ctx), await resolveBridgeTarget(ctx, target), target);
+      return await bridgeBox(verbBridge(ctx), await resolveBridgeTarget(ctx, target), target);
     } catch (err) {
       if (String((err as Error)?.message ?? err).includes('element not visible')) {
         throw new Error(`${target}: element not visible or not in layout`);
@@ -1966,7 +2020,7 @@ register('snapshot', async (ctx, _args, opts) => {
   const docId = docIdOfMarker(marker) ?? `unknown:${crypto.randomUUID()}`;
   const refAllocator = ctx.refRegistry.forDoc(docId);
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
     if (opts.stable) await waitForStability(ctx, { selector });
     const take = () => bridgeSnapshot(bridge, {
@@ -2037,7 +2091,7 @@ register('snapshot', async (ctx, _args, opts) => {
 });
 
 async function annotateBridgeScreenshot(
-  bridge: Bridge,
+  bridge: BridgeConn,
   refs: Map<string, BridgeRef>,
   outPath: string,
 ): Promise<void> {
@@ -2197,7 +2251,7 @@ register('click', async (ctx, args, opts) => {
   })();
 
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     const ref = await resolveBridgeTarget(ctx, target);
     const readState = async () => bridgeEvaluate(bridge, `(() => {
       const sel = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
@@ -2300,7 +2354,7 @@ register('fill', async (ctx, args, opts) => {
     // Guard (connected, not disabled/inert, not read-only) and the fill run
     // in the same in-page call. No visibility or hit test on purpose: Monaco
     // and hidden-but-scriptable inputs are legitimate fill targets.
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     // Main world on purpose: the Monaco path needs the page's own globals.
     const handle = await bridgeResolveHandle(bridge, await resolveBridgeTarget(ctx, target), target, 'main');
     let filled;
@@ -2674,7 +2728,7 @@ register('press', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: press <key>');
   if (ctx.bridgeMode) {
-    await pressBridgeKey(requireBridge(ctx), key);
+    await pressBridgeKey(verbBridge(ctx), key);
     return { ok: true };
   }
   const page = await activePage(ctx);
@@ -2720,7 +2774,7 @@ register('upload', async (ctx, args, opts) => {
       }
       if (!fs.existsSync(p)) throw new Error(`upload: file not found: ${p}`);
     }
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     const handle = await bridgeResolveHandle(bridge, ref, target);
     try {
       await bridgeGuard(bridge, handle, target, 'upload', opts.force === true);
@@ -2739,7 +2793,7 @@ register('upload', async (ctx, args, opts) => {
 register('type', async (ctx, args) => {
   const text = String(args[0] ?? '');
   if (ctx.bridgeMode) {
-    await requireBridge(ctx).send('Input.insertText', { text });
+    await verbBridge(ctx).send('Input.insertText', { text });
     return { ok: true };
   }
   const page = await activePage(ctx);
@@ -2747,7 +2801,7 @@ register('type', async (ctx, args) => {
   return { ok: true };
 });
 
-async function pressBridgeKey(bridge: Bridge, spec: string): Promise<void> {
+async function pressBridgeKey(bridge: BridgeConn, spec: string): Promise<void> {
   const parts = spec.split('+').filter(Boolean);
   const keyName = parts.pop() ?? spec;
   let modifiers = 0;
@@ -2793,12 +2847,20 @@ async function pressBridgeKey(bridge: Bridge, spec: string): Promise<void> {
  * them. Returns the composite tab id to keep, or null for no filter. CDP mode
  * has one buffer for one browser and is never filtered.
  */
-async function bridgeLogTabFilter(ctx: Ctx, opts: Record<string, unknown>): Promise<string | null | undefined> {
+async function bridgeLogTabFilter(ctx: Ctx, verb: string, opts: Record<string, unknown>): Promise<string | undefined> {
   if (!ctx.bridgeMode || opts.all) return undefined;
   const raw = opts.tab;
   if (raw !== undefined && raw !== true && String(raw).trim() !== '') return (await resolveBridgeTab(ctx, String(raw))).id;
-  if (raw === true) throw new Error('console/network --tab requires a value: <#n | id | chrome-tab-id>');
+  if (raw === true) throw new Error(`${verb} --tab requires a value: <#n | id | chrome-tab-id>`);
+  // An empty list here would read as "the page logged nothing".
+  if (ctx.activePageId === null) throw new Error(`${verb}: no active tab; use --all or --tab <#n | id>`);
   return ctx.activePageId;
+}
+
+/** The last `n` entries for one tab (or all): filter first, so another browser's traffic can't crowd them out. */
+function lastForTab<T extends { tabId?: string }>(buf: CircularBuffer<T>, n: number, tabFilter: string | undefined): T[] {
+  if (tabFilter === undefined) return buf.last(n);
+  return n > 0 ? buf.filter((e) => e.tabId === tabFilter).slice(-n) : [];
 }
 
 register('console', async (ctx, _args, opts) => {
@@ -2807,9 +2869,7 @@ register('console', async (ctx, _args, opts) => {
   const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
   const since = parseSinceOpt(opts.since);
-  const tabFilter = await bridgeLogTabFilter(ctx, opts);
-  let entries = ctx.consoleBuf.last(n);
-  if (tabFilter !== undefined) entries = entries.filter((e) => e.tabId === tabFilter);
+  let entries = lastForTab(ctx.consoleBuf, n, await bridgeLogTabFilter(ctx, 'console', opts));
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
 
@@ -2893,9 +2953,7 @@ register('network', async (ctx, _args, opts) => {
   }
 
   const since = parseSinceOpt(opts.since);
-  const tabFilter = await bridgeLogTabFilter(ctx, opts);
-  let entries = ctx.networkBuf.last(n);
-  if (tabFilter !== undefined) entries = entries.filter((e) => e.tabId === tabFilter);
+  let entries = lastForTab(ctx.networkBuf, n, await bridgeLogTabFilter(ctx, 'network', opts));
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (pattern) entries = entries.filter((e) => pattern.test(e.url));
   if (statusTest) entries = entries.filter((e) => statusTest!(e.status));
@@ -3207,11 +3265,11 @@ register('wait', async (ctx, args, opts) => {
     return await page.evaluate(expr) as StabilityResult;
   }
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
+    const bridge = verbBridge(ctx);
     if (opts.networkidle) {
       await bridge.send('Network.enable');
       const deadline = Date.now() + 30_000;
-      const inFlight = () => activePeerState(ctx, bridge).networkRequests.size;
+      const inFlight = () => verbPeerState(ctx, bridge).networkRequests.size;
       let idleSince = inFlight() === 0 ? Date.now() : 0;
       while (Date.now() < deadline) {
         if (inFlight() === 0) {
@@ -3228,7 +3286,9 @@ register('wait', async (ctx, args, opts) => {
       if (await bridgeEvaluate(bridge, 'document.readyState === "complete"').catch(() => false)) return { ok: true };
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { off(); reject(new Error('wait --load timed out after 30000ms')); }, 30_000);
-        const off = bridge.onActive('event', (ev: BridgeEvent) => {
+        // The pinned peer's load, not whichever browser is active by then.
+        const off = bridge.bridge.onEvent((ev: BridgeEvent) => {
+          if (bridge.instanceId !== null && ev.instanceId !== bridge.instanceId) return;
           if (ev.method === 'Page.loadEventFired') { clearTimeout(timer); off(); resolve(); }
         });
       });
@@ -4503,17 +4563,22 @@ async function main() {
     bridge.onActive('controlled', (tabId: number | null) => {
       clearSnapshotRefs(ctx);
       ctx.activePageId = tabId === null ? null : bridgeTabId(ctx, tabId);
-      if (tabId !== null) void enableBridgeDomains(ctx);
     });
-    bridge.onActive('hello', () => {
-      if (bridge.controlledTabId !== null) void enableBridgeDomains(ctx);
+    // Domains go on per peer, active or not: a browser that is never made
+    // active still feeds console/network. A 'switch' changed no tab, so the
+    // peer's domains are already on.
+    bridge.on('controlled', (tabId: number | null, instanceId: string, reason?: ControlledReason) => {
+      if (tabId !== null && reason !== 'switch') void enableBridgeDomains(bridge, instanceId);
+    });
+    bridge.on('hello', (_info: unknown, instanceId: string) => {
+      if (bridge.controlledTabOf(instanceId) !== null) void enableBridgeDomains(bridge, instanceId);
     });
     // A browser restarted behind a known instance: its old tab numbers mean
     // nothing, so a `#n` from before must ask for a fresh `ghax tabs`.
     bridge.on('peer-restart', () => { ctx.lastTabListing = null; });
-    if (bridge.controlledTabId !== null) {
+    if (bridge.controlledTabId !== null && bridge.boundInstanceId) {
       ctx.activePageId = bridgeTabId(ctx, bridge.controlledTabId);
-      void enableBridgeDomains(ctx);
+      void enableBridgeDomains(bridge, bridge.boundInstanceId);
     }
   }
 

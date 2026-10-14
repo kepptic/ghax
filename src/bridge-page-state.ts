@@ -12,7 +12,7 @@
  * peer (CLAUDE.md invariant 3) through `onActiveMainFrameNavigated`.
  */
 
-import type { Bridge, BridgeEvent } from './bridge';
+import type { Bridge, BridgeEvent, ControlledReason } from './bridge';
 import { parseStack, type CircularBuffer, type ConsoleEntry, type NetworkEntry } from './buffers';
 
 export const BODY_CAP_BYTES = 32 * 1024;
@@ -88,7 +88,7 @@ export function peerState(sink: Pick<BridgePageSink, 'bridgePeers'>, instanceId:
 }
 
 /**
- * The state verbs read: the active peer's. With nothing bound it is a
+ * The active peer's state (the daemon's verbs read their pinned peer's). With nothing bound it is a
  * throwaway empty state, so readers never need a null check and never
  * create an entry for a peer that does not exist.
  */
@@ -134,9 +134,10 @@ function bridgeHeaders(raw: unknown): Record<string, string> {
  * shared buffers, and keep per-peer state in step with the peer lifecycle.
  */
 export function wireBridgePageEvents(bridge: Bridge, sink: BridgePageSink, hooks: BridgePageHooks): void {
-  // A peer's tab changed: its in-flight requests belong to the old tab.
-  bridge.on('controlled', (_tabId: number | null, instanceId: string) => {
-    sink.bridgePeers.get(instanceId)?.networkRequests.clear();
+  // A peer's tab changed: its in-flight requests belong to the old tab. A
+  // 'switch' (`use` moving the active peer) changed no tab, so they stay.
+  bridge.on('controlled', (_tabId: number | null, instanceId: string, reason?: ControlledReason) => {
+    if (reason !== 'switch') sink.bridgePeers.get(instanceId)?.networkRequests.clear();
   });
   // A dropped or expired peer's frames and contexts are gone with its
   // debugger session; a reconnect re-announces them.

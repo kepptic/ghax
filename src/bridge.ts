@@ -268,6 +268,26 @@ export interface PeerOpt {
 }
 
 /**
+ * The bridge as one verb sees it: every CDP and control call fixed to the peer
+ * the verb started on (`Bridge.pinned`). Under `--browser all` a concurrent
+ * `tab` / `bridge use` can move the ACTIVE peer mid-verb; a verb's isolated
+ * world, context ids and object ids belong to its own browser, so none of its
+ * later calls may follow the switch. The bridge helpers below take this, never
+ * a bare Bridge.
+ */
+export interface BridgeConn {
+  readonly bridge: Bridge;
+  /** The pinned peer. null = nothing was bound when pinned: calls go to the active one. */
+  readonly instanceId: string | null;
+  send(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
+  sendControl(target: ControlTarget, timeoutMs?: number): Promise<ControlAck>;
+  setDesiredControl(target: ControlTarget): void;
+}
+
+/** Why a `controlled` was emitted: omitted = the peer's tab (re)attached. */
+export type ControlledReason = 'switch';
+
+/**
  * Everything that belongs to ONE bound browser's session (plan 12, brief A).
  * Under a single-browser filter there is at most one of these; under `all`
  * there is one per bound browser, so one peer's drop, queue and grace window
@@ -324,8 +344,9 @@ class PeerSession {
  *   'resumed'    (wasInterrupted, instanceId)   — a bound peer is driving again
  *   'event'      (ev: BridgeEvent)              — relayed chrome.debugger.onEvent,
  *                                                 tagged with instanceId + tabId
- *   'controlled' (tabId: number | null, instanceId) — a controlled tab changed,
- *                                                 or `use` switched the active peer
+ *   'controlled' (tabId: number | null, instanceId, reason?) — a controlled tab
+ *                                                 changed, or (reason 'switch')
+ *                                                 `use` moved the active peer
  *   'instances'  ()                             — registry membership changed
  */
 export class Bridge extends EventEmitter {
@@ -483,6 +504,27 @@ export class Bridge extends EventEmitter {
   /** The tab the active extension reports it's currently driving, or null. */
   get controlledTabId(): number | null {
     return this.activePeer?.controlledTabId ?? null;
+  }
+
+  /** One bound peer's controlled tab, or null. */
+  controlledTabOf(instanceId: string): number | null {
+    return this.bound.has(instanceId) ? this.registry.get(instanceId)?.controlledTabId ?? null : null;
+  }
+
+  /**
+   * A handle with every call fixed to `instanceId` (default: the active peer
+   * now). A pinned peer that later leaves is refused as not bound, never
+   * re-routed to whoever is active.
+   */
+  pinned(instanceId: string | null = this.activeId): BridgeConn {
+    const opts = instanceId === null ? undefined : { peer: instanceId };
+    return {
+      bridge: this,
+      instanceId,
+      send: (method, params = {}, timeoutMs = DEFAULT_TIMEOUT_MS) => this.send(method, params, timeoutMs, opts),
+      sendControl: (target, timeoutMs = CONTROL_TIMEOUT_MS) => this.sendControl(target, timeoutMs, opts),
+      setDesiredControl: (target) => this.setDesiredControl(target, opts),
+    };
   }
 
   /** Every bound instanceId, active first. */
@@ -1285,7 +1327,10 @@ export class Bridge extends EventEmitter {
       this.log(`bridge: active → ${this.registry.describePeer(target)}`);
       // Tab ids are per-browser, so refs MUST die on the switch — the
       // 'controlled' emit reuses the existing ref-clearing path (invariant 3).
-      this.emit('controlled', target.controlledTabId, target.instanceId);
+      // Tagged 'switch': the peer's tab did not change, so its per-peer state
+      // (in-flight requests, isolated world) must survive.
+      const reason: ControlledReason = 'switch';
+      this.emit('controlled', target.controlledTabId, target.instanceId, reason);
       this.emit('instances');
       return describe();
     }
@@ -1529,7 +1574,7 @@ export function unwrapEvalResult(result: unknown): unknown {
  * navigations.
  */
 export async function bridgeEvaluate(
-  bridge: Bridge,
+  bridge: BridgeConn,
   expression: string,
   opts: { uniqueContextId?: string | null; contextId?: number; timeoutMs?: number } = {},
 ): Promise<unknown> {
@@ -1540,7 +1585,7 @@ export async function bridgeEvaluate(
   };
   if (opts.uniqueContextId) params.uniqueContextId = opts.uniqueContextId;
   else if (typeof opts.contextId === 'number') params.contextId = opts.contextId;
-  const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs);
+  const result = await bridge.send('Runtime.evaluate', params, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   return unwrapEvalResult(result);
 }
 
@@ -1565,7 +1610,7 @@ export function isStaleContextError(err: unknown): boolean {
  * re-attaches. Then read back the final URL + title via Runtime.evaluate.
  */
 export async function bridgeGoto(
-  bridge: Bridge,
+  bridge: BridgeConn,
   url: string,
   loadTimeoutMs = 8_000,
 ): Promise<{ url: string; title: string }> {
@@ -1611,7 +1656,7 @@ export async function bridgeGoto(
 }
 
 /** `document.body.innerText`, shaped exactly like the non-bridge `text` verb. */
-export async function bridgeText(bridge: Bridge): Promise<string> {
+export async function bridgeText(bridge: BridgeConn): Promise<string> {
   const value = await bridgeEvaluate(bridge, 'document.body.innerText');
   return typeof value === 'string' ? value : String(value ?? '');
 }
@@ -1690,28 +1735,29 @@ function worldMap(bridge: Bridge): Map<string, number> {
       (ev.method === 'Page.frameNavigated' && !p.frame?.parentId)
     ) byPeer.delete(id);
   });
-  bridge.on('controlled', (_tabId: number | null, id: string) => { byPeer.delete(id); });
+  bridge.on('controlled', (_tabId: number | null, id: string, reason?: ControlledReason) => {
+    // A switch of the active peer leaves that peer's document, and its world, alone.
+    if (reason !== 'switch') byPeer.delete(id);
+  });
   bridge.on('disconnect', (id: string) => { byPeer.delete(id); });
   bridge.on('expired', (id: string) => { byPeer.delete(id); });
   return byPeer;
 }
 
-/** The execution context id of ghax's isolated world in the active peer's controlled tab. */
-export async function bridgeIsolatedWorld(bridge: Bridge): Promise<number> {
-  const byPeer = worldMap(bridge);
-  const id = bridge.boundInstanceId;
+/** The execution context id of ghax's isolated world in the pinned peer's controlled tab. */
+export async function bridgeIsolatedWorld(bridge: BridgeConn): Promise<number> {
+  const byPeer = worldMap(bridge.bridge);
+  const id = bridge.instanceId;
   const cached = id ? byPeer.get(id) : undefined;
   if (cached !== undefined) return cached;
-  // Pin both calls to the peer the world is cached under.
-  const peer = id ? { peer: id } : undefined;
-  const tree = await bridge.send('Page.getFrameTree', {}, undefined, peer) as { frameTree?: { frame?: { id?: string } } };
+  const tree = await bridge.send('Page.getFrameTree', {}) as { frameTree?: { frame?: { id?: string } } };
   const frameId = tree.frameTree?.frame?.id;
   if (!frameId) throw new Error('bridge: no main frame to create the ghax isolated world in');
   const res = await bridge.send('Page.createIsolatedWorld', {
     frameId,
     worldName: 'ghax',
     grantUniveralAccess: true,
-  }, undefined, peer) as { executionContextId?: number };
+  }) as { executionContextId?: number };
   if (typeof res.executionContextId !== 'number') {
     throw new Error('bridge: Page.createIsolatedWorld returned no execution context');
   }
@@ -1720,19 +1766,19 @@ export async function bridgeIsolatedWorld(bridge: Bridge): Promise<number> {
 }
 
 /** Run `fn` in the isolated world, re-creating it once if it went stale. */
-async function inWorld<T>(bridge: Bridge, fn: (contextId: number) => Promise<T>): Promise<T> {
+async function inWorld<T>(bridge: BridgeConn, fn: (contextId: number) => Promise<T>): Promise<T> {
   try {
     return await fn(await bridgeIsolatedWorld(bridge));
   } catch (err) {
     if (!isStaleContextError(err)) throw err;
-    const id = bridge.boundInstanceId;
-    if (id) worldMap(bridge).delete(id);
+    const id = bridge.instanceId;
+    if (id) worldMap(bridge.bridge).delete(id);
     return await fn(await bridgeIsolatedWorld(bridge));
   }
 }
 
 async function runtimeObjectFor(
-  bridge: Bridge,
+  bridge: BridgeConn,
   expression: string,
   contextId?: number,
 ): Promise<{ objectId: string; backendNodeId: number; nodeName: string } | null> {
@@ -1784,7 +1830,7 @@ const CURSOR_REGISTRY_JS = `const reg = (window.__ghax ||= { ids: new WeakMap(),
  * is this" instead.
  */
 export async function bridgeSnapshot(
-  bridge: Bridge,
+  bridge: BridgeConn,
   opts: {
     interactive?: boolean;
     compact?: boolean;
@@ -1935,7 +1981,7 @@ export async function bridgeSnapshot(
  * printed with? One `Accessibility.getPartialAXTree` call; cursor refs
  * (no backend id) are not rechecked.
  */
-export async function bridgeRefStillMatches(bridge: Bridge, ref: BridgeRef): Promise<boolean> {
+export async function bridgeRefStillMatches(bridge: BridgeConn, ref: BridgeRef): Promise<boolean> {
   if (ref.backendNodeId === null) return true;
   const res = await bridge.send('Accessibility.getPartialAXTree', {
     backendNodeId: ref.backendNodeId,
@@ -1949,7 +1995,7 @@ export async function bridgeRefStillMatches(bridge: Bridge, ref: BridgeRef): Pro
 }
 
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */
-export async function bridgeResolveSelector(bridge: Bridge, selector: string): Promise<BridgeRef> {
+export async function bridgeResolveSelector(bridge: BridgeConn, selector: string): Promise<BridgeRef> {
   const object = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`, cid));
   if (!object) throw new Error(`Selector not found: ${selector}`);
   await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
@@ -2023,7 +2069,7 @@ export interface BridgeHandle {
  * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
  */
 export async function bridgeResolveHandle(
-  bridge: Bridge,
+  bridge: BridgeConn,
   ref: BridgeRef,
   label = 'element',
   /** 'isolated' (default): ghax's own world. 'main': the page's, for fill. */
@@ -2067,7 +2113,7 @@ export async function bridgeResolveHandle(
 }
 
 /** Fire-and-forget: the caller never waits on a release. */
-export function bridgeReleaseHandle(bridge: Bridge, handle: BridgeHandle): void {
+export function bridgeReleaseHandle(bridge: BridgeConn, handle: BridgeHandle): void {
   void bridge.send('Runtime.releaseObject', { objectId: handle.objectId }).catch(() => undefined);
 }
 
@@ -2081,7 +2127,7 @@ const ACTIONABILITY_SRC = actionability.toString();
  * on the same element in the same call when the guard passes (fill).
  */
 export async function bridgeGuard(
-  bridge: Bridge,
+  bridge: BridgeConn,
   handle: BridgeHandle,
   label: string,
   kind: ActionabilityKind,
@@ -2119,7 +2165,7 @@ export async function bridgeGuard(
 }
 
 export async function bridgeBox(
-  bridge: Bridge,
+  bridge: BridgeConn,
   ref: BridgeRef,
   label = 'element',
 ): Promise<{ x: number; y: number; width: number; height: number }> {
@@ -2147,7 +2193,7 @@ export async function bridgeBox(
 }
 
 export async function bridgeCallOn(
-  bridge: Bridge,
+  bridge: BridgeConn,
   ref: BridgeRef,
   functionDeclaration: string,
   args: unknown[] = [],
