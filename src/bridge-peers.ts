@@ -90,6 +90,8 @@ export interface Peer {
   sessionNonce: string;
   /** Alias handed out while live; kept so it never flips under a bound id. */
   pinnedAlias: string | null;
+  /** Hello carried no instanceId (pre-v2 extension); the id is synthetic. */
+  legacy: boolean;
 }
 
 export class PeerRegistry {
@@ -286,7 +288,7 @@ export class PeerRegistry {
         ws: null, role: 'parked',
         lastHelloAt: 0, lastFrameAt: Date.now(),
         helloCount: 0, replacedCount: 0, controlledTabId: null,
-        sessionNonce, pinnedAlias: null,
+        sessionNonce, pinnedAlias: null, legacy,
       };
       this.peers.set(instanceId, peer);
     }

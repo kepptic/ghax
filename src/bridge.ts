@@ -211,7 +211,12 @@ export type BridgeSessionState = 'UNBOUND' | 'BOUND' | 'DEGRADED' | 'EXPIRED';
  */
 export class BridgeInterrupted extends Error {
   readonly code = 'BRIDGE_INTERRUPTED';
-  constructor(public readonly method: string) {
+  /**
+   * `instanceId` is the peer the command was in flight on. A replay may only
+   * ever run there: by the time the drop surfaces, `use` may have made a
+   * different browser the active one.
+   */
+  constructor(public readonly method: string, public readonly instanceId: string | null = null) {
     super(`bridge: connection lost while '${method}' was in flight`);
   }
 }
@@ -505,6 +510,11 @@ export class Bridge extends EventEmitter {
     return this.activeSession;
   }
 
+  /** The refusal for a call naming a peer that has no session. */
+  private notBound(instanceId: string): Error {
+    return new Error(`bridge: instance ${this.registry.shortId(instanceId)} is not bound`);
+  }
+
   private infoOf(p: Peer | null): BridgeExtensionInfo | null {
     if (!p) return null;
     const info: BridgeExtensionInfo = { agent: 'ghax-ext', version: p.version };
@@ -618,9 +628,9 @@ export class Bridge extends EventEmitter {
     // In-flight commands can't be silently retried here: only the operation
     // layer knows whether the verb was a read or a click. Hand them a typed
     // interruption and let runBridgeOperation decide.
-    for (const p of session.pending.values()) p.reject(new BridgeInterrupted(p.method));
+    for (const p of session.pending.values()) p.reject(new BridgeInterrupted(p.method, session.instanceId));
     session.pending.clear();
-    this.rejectControlPending(session.instanceId, () => new BridgeInterrupted('control'));
+    this.rejectControlPending(session.instanceId, () => new BridgeInterrupted('control', session.instanceId));
     if (session.graceTimer) clearTimeout(session.graceTimer);
     session.graceTimer = setTimeout(() => this.toExpired(session), this.graceMs);
     this.emit('disconnect', session.instanceId);
@@ -639,6 +649,16 @@ export class Bridge extends EventEmitter {
     for (const q of session.queue.splice(0)) q.reject(err);
     for (const w of session.resumeWaiters.splice(0)) w.reject(err);
     this.emit('expired', session.instanceId);
+    if (this.bindAll) {
+      // Under `all` nothing replaces an expired session, so keeping it would
+      // grow `bound` by one dead entry per browser ever seen. A return binds
+      // fresh (a late hello under `all` joins). Single mode keeps its one
+      // EXPIRED session: that state is what lets a rival take over.
+      this.bound.delete(session.instanceId);
+      const peer = this.peerOf(session);
+      if (peer) peer.role = 'parked';
+      this.emit('instances');
+    }
   }
 
   /** Reject in-flight control requests dispatched to one instance. */
@@ -759,7 +779,7 @@ export class Bridge extends EventEmitter {
         // Attach-phase failures deliberately do NOT come here: the extension
         // absorbs the transient ones before dispatch, and a genuinely
         // unattachable tab is a plain error, not an ambiguous outcome.
-        if (msg.error.phase === 'dispatch-detached') p.reject(new BridgeInterrupted(p.method));
+        if (msg.error.phase === 'dispatch-detached') p.reject(new BridgeInterrupted(p.method, peer.instanceId));
         else p.reject(new Error(msg.error.message || 'bridge command failed'));
       } else p.resolve(msg.result);
       return;
@@ -908,6 +928,20 @@ export class Bridge extends EventEmitter {
    */
   private bindPeer(peer: Peer, via: 'hello-ack' | 'role', reason: string, countBind = true): void {
     const instanceId = peer.instanceId;
+    if (this.bindAll && peer.legacy) {
+      // A pre-identity extension gets a fresh synthetic id on every hello, so
+      // under `all` each reconnect would bind (and leak) a new session.
+      this.log(
+        `bridge: refusing to bind ${this.registry.describePeer(peer)} under --browser all: its extension predates `
+        + 'instance ids. Reload the ghax bridge extension in that browser (edge://extensions or chrome://extensions).',
+      );
+      peer.role = 'parked';
+      if (via === 'hello-ack') {
+        this.rawSend(peer.ws, { type: 'hello-ack', role: 'parked', daemonId: this.daemonId, graceMs: this.graceMs });
+      }
+      this.emit('instances');
+      return;
+    }
     if (via === 'role') this.log(`bridge: bound → ${this.registry.describePeer(peer)} (${reason})`);
     let session = this.bound.get(instanceId);
     const ownershipChanged = !session;
@@ -1028,6 +1062,53 @@ export class Bridge extends EventEmitter {
   }
 
   /**
+   * The replay gate for an interrupted `safe` verb: resolve once the peer the
+   * command was in flight on is driving again AND is still the active one.
+   */
+  async waitForResumeOf(err: BridgeInterrupted, verb: string): Promise<void> {
+    const origin = err.instanceId;
+    if (origin === null) return this.waitForResume();
+    const refuseIfMoved = () => {
+      if (this.activeId === origin) return;
+      const from = this.registry.describePeer(this.registry.get(origin) ?? null);
+      const now = this.activeId ? this.registry.describePeer(this.activePeer) : 'none';
+      const e = new Error(
+        `${verb}: the bridge connection to ${from} dropped mid-command and the active browser is now ${now}. `
+        + `Not replaying on a different browser; re-run the command.`,
+      );
+      (e as any).code = 'BRIDGE_PEER_CHANGED';
+      throw e;
+    };
+    refuseIfMoved();
+    if (!this.bound.has(origin)) {
+      throw new Error(`${verb}: instance ${this.registry.shortId(origin)} is no longer bound; re-run the command.`);
+    }
+    await this.waitForResume({ peer: origin });
+    // `use` may have moved the active peer while we waited.
+    refuseIfMoved();
+  }
+
+  /**
+   * Resolve on the next `hello` from one instance (a `bridge reload` waiting
+   * for the browser it reloaded), reject after `timeoutMs`.
+   */
+  waitForHello(instanceId: string, timeoutMs: number): Promise<BridgeExtensionInfo> {
+    return new Promise<BridgeExtensionInfo>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.off('hello', onHello);
+        reject(new Error(`bridge: instance did not reconnect within ${timeoutMs}ms`));
+      }, timeoutMs);
+      const onHello = (info: BridgeExtensionInfo | null, from: string) => {
+        if (from !== instanceId) return;
+        clearTimeout(timer);
+        this.off('hello', onHello);
+        resolve(info ?? { agent: 'ghax-ext', version: '?' });
+      };
+      this.on('hello', onHello);
+    });
+  }
+
+  /**
    * Send one CDP command to a bound extension's controlled tab (default:
    * the active peer).
    *
@@ -1065,9 +1146,7 @@ export class Bridge extends EventEmitter {
     opts?: PeerOpt,
   ): Promise<unknown> {
     const session = this.sessionFor(opts);
-    if (!session && opts?.peer !== undefined) {
-      return Promise.reject(new Error(`bridge: instance ${this.registry.shortId(opts.peer)} is not bound`));
-    }
+    if (!session && opts?.peer !== undefined) return Promise.reject(this.notBound(opts.peer));
     if (session?.state === 'BOUND') return this.dispatch(session, method, params, timeoutMs);
     if (session?.state === 'DEGRADED') {
       if (session.queue.length >= QUEUE_CAP) {
@@ -1178,6 +1257,12 @@ export class Bridge extends EventEmitter {
     if (target.instanceId === this.activeId && this.bound.has(target.instanceId)) return describe();
 
     if (this.bindAll) {
+      if (target.legacy) {
+        throw new Error(
+          `bridge: ${this.registry.describePeer(target)} predates instance ids and cannot bind under --browser all. `
+          + 'Reload the ghax bridge extension in that browser.',
+        );
+      }
       // A peer that joined while unbindable (e.g. its hello raced a settle
       // close) binds here; one already bound just becomes the active one.
       if (!this.bound.has(target.instanceId)) this.bindPeer(target, 'role', 'bridge use');
@@ -1201,7 +1286,7 @@ export class Bridge extends EventEmitter {
     // so refs MUST die here — the 'controlled' emit reuses the existing
     // ref-clearing path (CLAUDE.md invariant 3) for free.
     if (previous) {
-      for (const p of previous.pending.values()) p.reject(new BridgeInterrupted(p.method));
+      for (const p of previous.pending.values()) p.reject(new BridgeInterrupted(p.method, previous.instanceId));
       previous.pending.clear();
       // Control requests belong to the instance they were dispatched to just as
       // much as CDP does: a late ack arriving after the session moved would
@@ -1254,6 +1339,7 @@ export class Bridge extends EventEmitter {
    */
   setDesiredControl(target: ControlTarget, opts?: PeerOpt): void {
     const session = this.sessionFor(opts);
+    if (!session && opts?.peer !== undefined) throw this.notBound(opts.peer);
     const next = target.action === 'stop' ? null : target;
     if (session) session.desiredControl = next;
     else if (opts?.peer === undefined) this.initialDesiredControl = next;
@@ -1268,7 +1354,8 @@ export class Bridge extends EventEmitter {
    */
   sendControl(target: ControlTarget, timeoutMs = CONTROL_TIMEOUT_MS, opts?: PeerOpt): Promise<ControlAck> {
     const session = this.sessionFor(opts);
-    if (session || opts?.peer === undefined) this.recordDesired(session, target);
+    if (!session && opts?.peer !== undefined) return Promise.reject(this.notBound(opts.peer));
+    this.recordDesired(session, target);
     // Deliberately NOT `desiredControl` — a reload must not become "what to
     // re-assert on the next resume". Leaving desiredControl untouched means
     // resumeSequence re-asserts whatever tab was ACTUALLY being driven before
@@ -1345,6 +1432,21 @@ export class Bridge extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  /**
+   * Subscribe to a session event, delivered only while it is about the ACTIVE
+   * peer. Daemon state (refs, main frame, contexts, buffers, active tab) is
+   * single-session until plan 12 brief B, so another bound peer's traffic must
+   * not reach it. Returns an unsubscribe function.
+   */
+  onActive(name: 'event' | 'controlled' | 'hello', listener: (...args: any[]) => void): () => void {
+    const wrapped = (...args: any[]) => {
+      const id = name === 'event' ? (args[0] as BridgeEvent | undefined)?.instanceId : args[1];
+      if (id === this.activeId) listener(...args);
+    };
+    this.on(name, wrapped);
+    return () => this.off(name, wrapped);
   }
 
   /** Subscribe to relayed CDP events. Returns an unsubscribe function. */
@@ -1561,13 +1663,13 @@ function worldState(bridge: Bridge): WorldState {
   if (st) return st;
   const state: WorldState = { contextId: null };
   worlds.set(bridge, state);
-  bridge.onEvent((ev) => {
+  bridge.onActive('event', (ev: BridgeEvent) => {
     const p = ev.params as { executionContextId?: unknown; frame?: { parentId?: unknown } };
     if (ev.method === 'Runtime.executionContextsCleared') state.contextId = null;
     else if (ev.method === 'Runtime.executionContextDestroyed' && p.executionContextId === state.contextId) state.contextId = null;
     else if (ev.method === 'Page.frameNavigated' && !p.frame?.parentId) state.contextId = null;
   });
-  bridge.on('controlled', () => { state.contextId = null; });
+  bridge.onActive('controlled', () => { state.contextId = null; });
   bridge.on('disconnect', () => { state.contextId = null; });
   return state;
 }

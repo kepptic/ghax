@@ -23,7 +23,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { readFileSync } from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { Bridge, BRIDGE_PORT_RANGE } from '../src/bridge';
+import { Bridge, BridgeInterrupted, BRIDGE_PORT_RANGE } from '../src/bridge';
 import { PeerRegistry } from '../src/bridge-peers';
 import {
   bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
@@ -177,6 +177,8 @@ class FakeConnection {
   controlErrors: string[] = [];
   /** Set to leave a control request unanswered, so it stays pending. */
   swallowControl = false;
+  /** Set to leave CDP commands unanswered, so they stay in flight. */
+  swallowCdp = false;
   /**
    * A PERMANENT chrome.debugger.attach failure to raise from the attach step of
    * switchControlTo — a target that will never become attachable, as opposed to
@@ -330,6 +332,7 @@ class FakeConnection {
     }
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       this.received.push(msg.method);
+      if (this.swallowCdp) return;
       this.send({ id: msg.id, result: { echoed: msg.method, tabId: this.controlledTabId } });
     }
   }
@@ -1440,6 +1443,195 @@ async function main(): Promise<void> {
       await until(() => events.length === 1, 'the event to arrive');
       off();
       assert(events[0].instanceId === 'inst-a' && events[0].tabId === 2, `event tags: ${JSON.stringify(events[0])}`);
+    });
+  });
+
+  // ─── Round-1 review fixes (plan 12, brief A) ───
+
+  await test('all: a safe verb in flight on A, then use(B), then A drops: no replay on B', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      a.swallowCdp = true;
+      const inflight = bridge.send('Accessibility.getFullAXTree').then(() => null, (e) => e);
+      await until(() => a.received.includes('Accessibility.getFullAXTree'), 'the read to reach A');
+      await bridge.use('inst-b');
+      a.close();
+      const err = await inflight;
+      assert(err instanceof BridgeInterrupted, `A's drop interrupts the read: ${String(err)}`);
+      assert(err.instanceId === 'inst-a', `the interruption names A: ${err.instanceId}`);
+      let replayAllowed = false;
+      let refusal: any = null;
+      try {
+        await bridge.waitForResumeOf(err, 'snapshot');
+        replayAllowed = true;
+      } catch (e) {
+        refusal = e;
+      }
+      assert(!replayAllowed, 'the replay gate opened with B active: the read would re-run on the wrong browser');
+      const msg = String(refusal?.message);
+      assert(msg.includes('snapshot') && msg.includes('edge'), `the refusal names the verb and A's browser: ${msg}`);
+    });
+  });
+
+  await test('single: use(B) interrupting A\'s in-flight read does not replay it on B', async () => {
+    const bridge = await Bridge.create(reserveBase(), () => undefined, { graceMs: GRACE_MS, livenessMs: MULTI_LIVENESS_MS, settleMs: SETTLE_MS });
+    const one = new FakeExtension();
+    const two = new FakeExtension();
+    two.browser = 'chrome';
+    try {
+      const a = await one.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await two.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'parked', 'B to park');
+      a.swallowCdp = true;
+      const inflight = bridge.send('DOM.getDocument').then(() => null, (e) => e);
+      await until(() => a.received.includes('DOM.getDocument'), 'the read to reach A');
+      await bridge.use('inst-b');
+      const err = await inflight;
+      assert(err instanceof BridgeInterrupted && err.instanceId === 'inst-a', `interrupted on A: ${String(err)}`);
+      const gate = await bridge.waitForResumeOf(err, 'text').then(() => 'replay', (e) => String(e.message));
+      assert(gate !== 'replay', 'the replay gate opened on B');
+    } finally {
+      one.closeAll();
+      two.closeAll();
+      bridge.close();
+      await sleep(20);
+    }
+  });
+
+  await test('all: an interrupted read on the active A replays once A resumes', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      a.swallowCdp = true;
+      const inflight = bridge.send('DOM.getDocument').then(() => null, (e) => e);
+      await until(() => a.received.includes('DOM.getDocument'), 'the read to reach A');
+      a.close();
+      const err = await inflight;
+      assert(err instanceof BridgeInterrupted, `interrupted: ${String(err)}`);
+      a.swallowCdp = false;
+      const gate = bridge.waitForResumeOf(err, 'text');
+      await a.reopen();
+      await gate;
+    });
+  });
+
+  await test('all: a non-active peer\'s event, controlled and hello never reach active-session listeners', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      assert(bridge.boundInstanceId === 'inst-a', 'A is active');
+      const got: Array<[string, string]> = [];
+      const offs = [
+        bridge.onActive('event', (ev: any) => got.push(['event', ev.instanceId])),
+        bridge.onActive('controlled', (_t: number | null, id: string) => got.push(['controlled', id])),
+        bridge.onActive('hello', (_i: unknown, id: string) => got.push(['hello', id])),
+      ];
+      b.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'B-main' } } });
+      b.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [] } });
+      b.send({ type: 'controlled', tabId: 3 });
+      await b.reopen();
+      await until(() => b.role === 'bound', 'B to resume');
+      a.send({ type: 'event', method: 'Page.loadEventFired', params: {} });
+      await until(() => got.some(([k, id]) => k === 'event' && id === 'inst-a'), 'A\'s event (sentinel)');
+      const leaked = got.filter(([, id]) => id !== 'inst-a');
+      assert(leaked.length === 0, `B's traffic reached the active session: ${JSON.stringify(leaked)}`);
+      await bridge.use('inst-b');
+      assert(got.some(([k, id]) => k === 'controlled' && id === 'inst-b'), 'use(B) still delivers B\'s controlled (ref clear)');
+      for (const off of offs) off();
+    });
+  });
+
+  await test('all: waitForHello (bridge reload) ignores another peer\'s hello', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      let settled: string | null = null;
+      const w = bridge.waitForHello('inst-a', 2000).then(() => { settled = 'a-hello'; }, () => { settled = 'timeout'; });
+      await b.reopen();
+      await until(() => b.role === 'bound', 'B to resume');
+      await sleep(50);
+      assert(settled === null, `B's hello resolved A's reload wait: ${settled}`);
+      await a.reopen();
+      await w;
+      assert(settled === 'a-hello', `A's hello resolves it: ${settled}`);
+    });
+  });
+
+  await test('a named peer that is not bound: setDesiredControl and sendControl refuse', async () => {
+    const bridge = await Bridge.create(reserveBase(), () => undefined, { graceMs: GRACE_MS, livenessMs: MULTI_LIVENESS_MS, settleMs: SETTLE_MS });
+    const one = new FakeExtension();
+    const two = new FakeExtension();
+    two.browser = 'chrome';
+    try {
+      const a = await one.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await two.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'parked', 'B to park');
+      let thrown: any = null;
+      try {
+        bridge.setDesiredControl({ action: 'control-active' }, { peer: 'inst-b' });
+      } catch (e) {
+        thrown = e;
+      }
+      assert(thrown && /is not bound/.test(String(thrown.message)), `setDesiredControl on a parked peer: ${String(thrown?.message)}`);
+      const sent = await bridge.sendControl({ action: 'control-tab', tabId: 2 }, 500, { peer: 'inst-b' })
+        .then(() => 'ok', (e) => String(e.message));
+      assert(/is not bound/.test(sent), `sendControl on a parked peer: ${sent}`);
+      assert(b.lastControlId === null, 'nothing reached the parked browser');
+    } finally {
+      one.closeAll();
+      two.closeAll();
+      bridge.close();
+      await sleep(20);
+    }
+  });
+
+  await test('all: an EXPIRED peer leaves the bound set', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      const expired: string[] = [];
+      bridge.on('expired', (id: string) => expired.push(id));
+      b.close();
+      await until(() => expired.includes('inst-b'), 'B to expire', GRACE_MS * 4);
+      assert(!bridge.boundIds.includes('inst-b'), `B still bound after expiry: ${bridge.boundIds}`);
+      assert(bridge.boundIds.length === 1 && bridge.boundInstanceId === 'inst-a', `A unaffected: ${bridge.boundIds}`);
+      await b.reopen();
+      await until(() => b.role === 'bound', 'B rejoins');
+      const r = await bridge.send('DOM.getDocument', {}, 1000, { peer: 'inst-b' }) as { echoed: string };
+      assert(r.echoed === 'DOM.getDocument', 'the rejoined B drives');
+    });
+  });
+
+  await test('all: a legacy (no instanceId) hello is refused, not bound', async () => {
+    await withBindAll(async (bridge, [edge, chrome], logs) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const legacy = await chrome.connect(bridge.port, '');
+      await until(() => legacy.role !== null, 'the legacy hello to get a disposition');
+      assert(legacy.role === 'parked', `a legacy hello under all must park, got ${legacy.role}`);
+      assert(bridge.boundIds.length === 1, `bound: ${bridge.boundIds}`);
+      assert(logs.some((l) => /legacy|no instanceId/i.test(l) && /reload/i.test(l) && /all/.test(l)), `a reload hint is logged: ${logs.join(' | ')}`);
+    });
+  });
+
+  await test('all: a legacy hello as the first peer is refused too', async () => {
+    await withBindAll(async (bridge, [edge]) => {
+      const legacy = await edge.connect(bridge.port, '');
+      await until(() => legacy.role !== null, 'a disposition');
+      assert(legacy.role === 'parked' && bridge.boundIds.length === 0, `legacy first-bind: ${legacy.role} ${bridge.boundIds}`);
     });
   });
 

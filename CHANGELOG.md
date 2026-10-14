@@ -23,6 +23,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   then only moves which bound browser is active. Relayed events carry the
   `instanceId` and `tabId` they came from. The CLI surface for this lands
   separately.
+  A read interrupted on one browser is never replayed on another (it fails
+  with `BRIDGE_PEER_CHANGED` naming the browser instead). Only the active
+  browser's events, tab changes and hellos reach the daemon's session state;
+  other bound browsers' console and network entries are dropped for now.
+  `bridge reload` waits for the browser it reloaded, not any hello. Naming an
+  unbound browser for control is refused. Under `all`, an expired browser
+  leaves the bound set, and an extension without an instance id is refused
+  with a reload hint.
 
 ### Fixed
 - **`tabs --browser <x>` no longer picks the first of several matches.** A

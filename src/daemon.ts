@@ -67,6 +67,7 @@ import {
   bridgeText,
   bridgeRefStillMatches,
   isStaleContextError,
+  type BridgeEvent,
   type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
@@ -245,7 +246,10 @@ function register(name: string, fn: Handler) {
       // not in Bridge.send().
       if (err instanceof BridgeInterrupted) {
         if (BRIDGE_RETRY_SAFE.has(name)) {
-          await requireBridge(ctx).waitForResume();
+          // Only on the browser the command was in flight on, and only while
+          // it is still the active one — never a replay on whatever `use`
+          // switched to in the meantime.
+          await requireBridge(ctx).waitForResumeOf(err, name);
           // Whole-operation replay against the re-attached tab.
           return await fn(ctx, args, opts);
         }
@@ -555,7 +559,10 @@ function bridgeHeaders(raw: unknown): Record<string, string> {
 
 function wireBridgeEvents(ctx: Ctx): void {
   const bridge = requireBridge(ctx);
-  bridge.onEvent((ev) => {
+  // shortcut: another bound peer's events (console/network included) are
+  // DROPPED, because ctx holds one session's refs, frames, contexts and
+  // buffers; upgrade trigger: plan 12 brief B gives each peer its own state.
+  bridge.onActive('event', (ev: BridgeEvent) => {
     const p = ev.params as any;
     // ─── Execution-context bookkeeping (plan §2.5) ────────────
     // Track, don't guess: knowing the live main-frame context is what stops
@@ -1557,7 +1564,7 @@ async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNav
   } catch (err) {
     if (!(err instanceof BridgeInterrupted)) throw err;
     // Dropped mid-navigation. Wait for the session back, then reconcile.
-    await bridge.waitForResume();
+    await bridge.waitForResumeOf(err, direction < 0 ? 'back' : 'forward');
     const after = await bridge.send('Page.getNavigationHistory') as {
       currentIndex?: number; entries?: Array<{ id: number; url: string }>;
     };
@@ -1822,7 +1829,8 @@ register('bridge.reload', async (ctx, _args, opts) => {
   }
   const bridge = ctx.bridge;
   const before = bridge.extensionInfo;
-  if (!before) {
+  const reloaded = bridge.boundInstanceId;
+  if (!before || !reloaded) {
     throw new Error('bridge.reload: no extension connected — run `ghax attach --extension` first');
   }
   const timeoutMs = Number(opts.timeoutMs ?? opts.timeout) || 30_000;
@@ -1830,20 +1838,12 @@ register('bridge.reload', async (ctx, _args, opts) => {
 
   // Set up the "it came back" wait BEFORE sending the reload request, so a
   // reload that lands faster than this promise is wired can't be missed.
-  const reconnected = new Promise<BridgeExtensionInfo>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      bridge.off('hello', onHello);
-      reject(new Error(
-        `bridge.reload: extension did not reconnect within ${timeoutMs}ms — check that the browser `
-        + 'is still running and the ghax bridge extension shows up in edge://extensions.',
-      ));
-    }, timeoutMs);
-    const onHello = (info: BridgeExtensionInfo | null) => {
-      clearTimeout(timer);
-      bridge.off('hello', onHello);
-      resolve(info ?? { agent: 'ghax-ext', version: '?' });
-    };
-    bridge.on('hello', onHello);
+  // Another bound peer's hello (under `all`) is not this reload coming back.
+  const reconnected = bridge.waitForHello(reloaded, timeoutMs).catch(() => {
+    throw new Error(
+      `bridge.reload: extension did not reconnect within ${timeoutMs}ms — check that the browser `
+      + 'is still running and the ghax bridge extension shows up in edge://extensions.',
+    );
   });
 
   // The ack timeout is short and independent of `timeoutMs`: the extension
@@ -1859,7 +1859,7 @@ register('bridge.reload', async (ctx, _args, opts) => {
   // IMMEDIATELY with `{ok:false, error:'unknown control action: reload'}` —
   // which rejects here just as fast, with no "timed out" in the message.
   try {
-    const ack = await bridge.sendControl({ action: 'reload' }, 5_000);
+    const ack = await bridge.sendControl({ action: 'reload' }, 5_000, { peer: reloaded });
     if (!ack.ok) throw new Error('extension refused the reload request');
   } catch (err) {
     const msg = (err as Error)?.message ?? String(err);
@@ -1893,7 +1893,7 @@ register('bridge.instances', async (ctx) => {
     // "controlledBy some other agent's daemon".
     port: ctx.bridge.port,
     state: ctx.bridge.state,
-    boundInstanceId: ctx.bridge.instances().find((i) => i.role === 'bound')?.instanceId ?? null,
+    boundInstanceId: ctx.bridge.boundInstanceId,
     livelockSuspected: ctx.bridge.livelockSuspected,
     instances: ctx.bridge.instances(),
   };
@@ -3343,7 +3343,7 @@ register('wait', async (ctx, args, opts) => {
       if (await bridgeEvaluate(bridge, 'document.readyState === "complete"').catch(() => false)) return { ok: true };
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { off(); reject(new Error('wait --load timed out after 30000ms')); }, 30_000);
-        const off = bridge.onEvent((ev) => {
+        const off = bridge.onActive('event', (ev: BridgeEvent) => {
           if (ev.method === 'Page.loadEventFired') { clearTimeout(timer); off(); resolve(); }
         });
       });
@@ -4609,13 +4609,15 @@ async function main() {
 
   if (bridgeMode && bridge) {
     wireBridgeEvents(ctx);
-    bridge.on('controlled', (tabId: number | null) => {
+    // Only the ACTIVE peer's tab changes are ours: a non-active peer's tab id
+    // composed with the active alias would point at the wrong browser.
+    bridge.onActive('controlled', (tabId: number | null) => {
       clearSnapshotRefs(ctx);
       ctx.bridgeNetworkRequests.clear();
       ctx.activePageId = tabId === null ? null : bridgeTabId(ctx, tabId);
       if (tabId !== null) void enableBridgeDomains(ctx);
     });
-    bridge.on('hello', () => {
+    bridge.onActive('hello', () => {
       if (bridge.controlledTabId !== null) void enableBridgeDomains(ctx);
     });
     // A browser restarted behind a known instance: its old tab numbers mean
