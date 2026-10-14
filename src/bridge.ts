@@ -45,6 +45,7 @@ import * as crypto from 'crypto';
 import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
 import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
 import { RefRegistry, type RefAllocator } from './ref-registry';
+import { mintAlias } from './tab-identity';
 
 export interface BridgeEvent {
   method: string;
@@ -78,6 +79,8 @@ export interface ControlAck {
   ok: boolean;
   tabId: number | null;
   result?: unknown;
+  /** The instance that answered, so tab ids can be minted with its alias. */
+  instanceId?: string;
 }
 
 export interface BridgeTab {
@@ -92,6 +95,10 @@ export interface BridgeTab {
    * difference between "that tab is taken" and an unexplained refusal.
    */
   controlledBy: number | null;
+  /** Absent (null) from extensions predating tab identity. */
+  windowId: number | null;
+  /** Position within its window; null from older extensions. */
+  index: number | null;
 }
 
 /**
@@ -228,6 +235,12 @@ export interface BridgeInstance {
   instanceId: string;
   browser: string;
   label: string;
+  /** Popup "Profile name" (hello.profile, else hello.label). */
+  profile: string;
+  /** Tab-id prefix for this instance: `<alias>:<chromeTabId>`. */
+  alias: string;
+  /** Browser major version from the extension, '' if it did not say. */
+  brandVersion: string;
   version: string;
   gitSha: string;
   buildDate: string;
@@ -289,6 +302,8 @@ interface Peer {
   instanceId: string;
   browser: string;
   label: string;
+  profile: string;
+  brandVersion: string;
   version: string;
   gitSha: string;
   buildDate: string;
@@ -584,6 +599,9 @@ export class Bridge extends EventEmitter {
       instanceId: p.instanceId,
       browser: p.browser,
       label: p.label,
+      profile: p.profile,
+      alias: this.aliasOf(p.instanceId),
+      brandVersion: p.brandVersion,
       version: p.version,
       gitSha: p.gitSha,
       buildDate: p.buildDate,
@@ -594,6 +612,30 @@ export class Bridge extends EventEmitter {
       helloCount: p.helloCount,
       replacedCount: p.replacedCount,
     }));
+  }
+
+  /**
+   * Tab-id alias for an instance (see src/tab-identity.ts). Recomputed on
+   * every call against all known peers, so a second browser with the same
+   * profile name pushes both onto the `<name>-<short6>` form.
+   */
+  aliasOf(instanceId: string): string {
+    const self = this.peers.get(instanceId);
+    if (!self) return mintAlias({ instanceId, browser: '', profile: '' });
+    const others = [...this.peers.values()].map((p) => ({ instanceId: p.instanceId, browser: p.browser, profile: p.profile }));
+    return mintAlias({ instanceId: self.instanceId, browser: self.browser, profile: self.profile }, others);
+  }
+
+  /** Identity of the bound instance, or null when nothing is bound. */
+  get boundInstanceId(): string | null {
+    return this.boundId;
+  }
+
+  /** browser / profile / alias of one instance, for tab listings. */
+  identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string } | null {
+    const p = this.peers.get(instanceId);
+    if (!p) return null;
+    return { instanceId, browser: p.browser, profile: p.profile, alias: this.aliasOf(instanceId) };
   }
 
   /** True once ownership has flapped enough to indicate a pre-identity rival. */
@@ -739,6 +781,7 @@ export class Bridge extends EventEmitter {
         if (msg.ok) p.resolve({
           ok: true,
           tabId: typeof msg.tabId === 'number' ? msg.tabId : null,
+          instanceId: peer.instanceId,
           ...(msg.result !== undefined ? { result: msg.result } : {}),
         });
         else p.reject(new Error(msg.error || 'bridge: control failed'));
@@ -843,6 +886,10 @@ export class Bridge extends EventEmitter {
     }
     const browser = typeof msg.browser === 'string' ? msg.browser : '';
     const label = typeof msg.label === 'string' ? msg.label : '';
+    // `profile` is the tab-identity name for the same popup field; extensions
+    // predating it send only `label`, which carries the same value.
+    const profile = typeof msg.profile === 'string' ? msg.profile : label;
+    const brandVersion = typeof msg.brandVersion === 'string' ? msg.brandVersion : '';
     const version = typeof msg.version === 'string' ? msg.version : '?';
     // Optional — absent on any extension build predating the provenance
     // change. 'unknown' is the same sentinel build-info.ts/build.rs use.
@@ -852,7 +899,7 @@ export class Bridge extends EventEmitter {
     let peer = this.peers.get(instanceId);
     if (!peer) {
       peer = {
-        instanceId, browser, label, version, gitSha, buildDate,
+        instanceId, browser, label, profile, brandVersion, version, gitSha, buildDate,
         ws: null, role: 'parked',
         lastHelloAt: 0, lastFrameAt: Date.now(),
         helloCount: 0, replacedCount: 0, controlledTabId: null,
@@ -870,6 +917,8 @@ export class Bridge extends EventEmitter {
     peer.ws = ws;
     peer.browser = browser || peer.browser;
     peer.label = label || peer.label;
+    peer.profile = profile || peer.profile;
+    peer.brandVersion = brandVersion || peer.brandVersion;
     peer.version = version;
     peer.gitSha = gitSha;
     peer.buildDate = buildDate;
@@ -1151,7 +1200,9 @@ export class Bridge extends EventEmitter {
     const matches = [...this.peers.values()].filter(
       (p) => p.instanceId.toLowerCase().startsWith(want)
         || p.browser.toLowerCase() === want
-        || p.label.toLowerCase() === want,
+        || p.label.toLowerCase() === want
+        // The tab-id prefix, so a refusal's `ghax bridge use <alias>` works.
+        || this.aliasOf(p.instanceId) === want,
     );
     if (matches.length === 0) {
       const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
@@ -1277,7 +1328,8 @@ export class Bridge extends EventEmitter {
     return [...this.peers.values()].find(
       (p) => p.instanceId.toLowerCase().startsWith(want)
         || p.browser.toLowerCase() === want
-        || p.label.toLowerCase() === want,
+        || p.label.toLowerCase() === want
+        || this.aliasOf(p.instanceId) === want,
     ) ?? null;
   }
 

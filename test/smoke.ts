@@ -327,6 +327,36 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('tabs rows carry index, browser and profile (CDP)', async () => {
+  const r = await run(['tabs', '--json']);
+  const tabs = parseJson<Array<{ index: number; id: string; chromeTabId: unknown; browser: string; profile: string; windowId: unknown }>>(r.stdout);
+  tabs.forEach((t, i) => {
+    assert(t.index === i + 1, `row ${i} should have index ${i + 1}, got ${t.index}`);
+    assert(typeof t.browser === 'string' && t.browser.length > 0, `browser missing: ${JSON.stringify(t)}`);
+    // CDP has no profile name and no chrome tab id; the id is the target id.
+    assert(t.profile === '—', `CDP profile should be '—', got ${t.profile}`);
+    assert(t.chromeTabId === null && t.windowId === null, `CDP rows: ${JSON.stringify(t)}`);
+  });
+  const text = (await run(['tabs'])).stdout.split('\n')[0];
+  assert(/^#1  \S+  ".*"  \S+ · —/.test(text), `tabs text line should be '#1  <id>  "<title>"  <Browser> · —', got: ${text}`);
+});
+
+c('tab #1 switches to row 1 of the last tabs listing; a bad #n refuses', async () => {
+  const tabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const before = tabs.find((t) => t.active)?.id;
+  try {
+    const r = await run(['tab', '#1', '--quiet', '--json']);
+    const t = parseJson<{ id: string; index: number }>(r.stdout);
+    assert(t.id === tabs[0].id && t.index === 1, `tab #1 should be ${tabs[0].id}, got ${JSON.stringify(t)}`);
+    const bad = await run(['tab', `#${tabs.length + 50}`], { allowFailure: true });
+    assert(bad.exitCode !== 0 && /no #\d+/.test(bad.stderr + bad.stdout), `out-of-range #n should refuse: ${bad.stderr || bad.stdout}`);
+    const bare = await run(['tab', '987654'], { allowFailure: true });
+    assert(bare.exitCode !== 0 && /No tab with id 987654/.test(bare.stderr + bare.stdout), `unknown id should refuse: ${bare.stderr || bare.stdout}`);
+  } finally {
+    if (before) await run(['tab', before, '--quiet'], { allowFailure: true });
+  }
+});
+
 c('wait --stable reports a settled page as stable', async () => {
   await run(['goto', 'https://example.com']);
   const r = await run(['wait', '--stable', '--json']);

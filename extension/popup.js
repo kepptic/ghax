@@ -13,6 +13,7 @@ const list = document.getElementById('list');
 const emptyEl = document.getElementById('empty');
 const errEl = document.getElementById('err');
 const labelInput = document.getElementById('labelInput');
+const profileHeader = document.getElementById('profileHeader');
 const portInput = document.getElementById('portInput');
 const pairInput = document.getElementById('pairInput');
 const savedEl = document.getElementById('saved');
@@ -145,8 +146,9 @@ async function refresh() {
 }
 
 // ─── Label + port ────────────────────────────────────────────
-// Both apply on the next connect. The label also rides in `hello`, so
-// `ghax bridge instances` can show a human name instead of a UUID prefix.
+// Both apply on the next connect. The profile name (stored as `ghaxLabel`
+// for compatibility) rides in `hello` as both `label` and `profile`, so
+// `ghax tabs` and tab ids carry a human name instead of a UUID prefix.
 // The port field sets the BASE of the scanned range — the worker dials
 // base..base+9, which is how several daemons (one per agent) are found.
 async function loadSettings() {
@@ -154,8 +156,16 @@ async function loadSettings() {
     ['ghaxLabel', 'bridgePort', 'ghaxPairToken'],
   );
   if (typeof ghaxLabel === 'string') labelInput.value = ghaxLabel;
+  renderProfileHeader(typeof ghaxLabel === 'string' ? ghaxLabel : '');
   if (Number.isFinite(Number(bridgePort)) && Number(bridgePort) > 0) portInput.value = String(bridgePort);
   if (typeof ghaxPairToken === 'string') pairInput.value = ghaxPairToken;
+}
+
+// The profile name is what tab ids are minted from (`work:42`), so show it
+// where the user looks first. Unset → say so, since the fallback alias
+// (`edge-1a2b3c`) is not something anyone recognises.
+function renderProfileHeader(name) {
+  profileHeader.textContent = name ? `· ${name}` : '· (no profile name)';
 }
 
 let savedTimer = null;
@@ -166,8 +176,10 @@ function flashSaved(msg) {
 }
 
 labelInput.addEventListener('change', async () => {
-  await chrome.storage.local.set({ ghaxLabel: labelInput.value.trim() });
-  flashSaved('label saved — reconnect to apply');
+  const name = labelInput.value.trim();
+  await chrome.storage.local.set({ ghaxLabel: name });
+  renderProfileHeader(name);
+  flashSaved('profile name saved — reconnect to apply');
 });
 
 portInput.addEventListener('change', async () => {

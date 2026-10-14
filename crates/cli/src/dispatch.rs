@@ -132,7 +132,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     }
 
     match verb {
-        "tabs" | "back" | "forward" | "reload" | "text" | "downloads" => {
+        "tabs" => crate::tabs::cmd_tabs(cfg, &args::parse(rest)),
+
+        "back" | "forward" | "reload" | "text" | "downloads" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }

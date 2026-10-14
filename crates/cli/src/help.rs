@@ -30,7 +30,8 @@ Connection:
   restart
 
 Bridge (after attach --extension):
-  bridge control [--active | --tab-id <n> | --stop]  # point the bridge at a tab
+  bridge control [--active | --tab-id <#n|id> | --stop]
+                                      # point the bridge at a tab (same ids as 'tab')
   bridge instances                    # connected browsers, bound + parked
   bridge use <instance-id|browser|label>
                                       # bind a different browser
@@ -40,9 +41,15 @@ Bridge (after attach --extension):
 
 Tab:
   tabs [--browser <id|edge|chrome|label>]
+                                  # one line per tab:
+                                  #   #n  id  "title"  Browser · Profile  controlledBy=…
+                                  # bridge ids are <profile>:<chrome tab id>,
+                                  #   e.g. work:42 (profile = popup "Profile name")
                                   # bridge: --browser lists another connected
                                   #   browser's tabs without taking it over
-  tab <id> [--quiet]              # --quiet = don't bringToFront
+  tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
+                                  #   n alone only if exactly one tab has that
+                                  #   chrome tab id. --quiet = don't bringToFront
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
   goto <url> [--stable]           # --stable also waits for the DOM to settle

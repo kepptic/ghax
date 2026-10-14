@@ -141,6 +141,9 @@ class FakeExt {
    * extension omits both when extension/build-info.json isn't built yet. */
   gitSha: string | null = null;
   buildDate: string | null = null;
+  /** Set to send `profile`/`brandVersion` in hello, as a tab-identity-aware
+   * extension does. Left null, hello carries only `label` (older builds). */
+  profile: string | null = null;
   /** Set to a control action this fake should silently ignore — never ack,
    * never act — simulating an extension too old to have a `control` handler
    * at all. */
@@ -161,6 +164,7 @@ class FakeExt {
       instanceId: this.instanceId,
       browser: this.browser,
       label: this.label,
+      ...(this.profile !== null ? { profile: this.profile, brandVersion: '150' } : {}),
       controlledTabId: 42,
       ...(this.pairToken ? { pairToken: this.pairToken } : {}),
       ...(this.gitSha && this.buildDate ? { gitSha: this.gitSha, buildDate: this.buildDate } : {}),
@@ -1275,6 +1279,34 @@ async function main(): Promise<void> {
       // Crucially, querying must not change who is driving.
       assert(a.role === 'bound' && b.role === 'parked', 'roles must be unchanged after a query');
       assert(bridge.controlledTabId === 42, 'bound peer still owns the session');
+    });
+  });
+
+  await test('identity: hello.profile names the alias; label-only and unlabelled extensions fall back', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-a', 'edge');
+      a.profile = 'Work Laptop';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const ia = bridge.instances().find((i) => i.instanceId === 'inst-a')!;
+      assert(ia.profile === 'Work Laptop' && ia.alias === 'work-laptop', `profile/alias: ${ia.profile} / ${ia.alias}`);
+      assert(ia.brandVersion === '150', `brandVersion: ${ia.brandVersion}`);
+      // An extension predating `profile` still names itself through `label`.
+      const b = new FakeExt(port, 'inst-b', 'chrome', 'Home');
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      const ib = bridge.instances().find((i) => i.instanceId === 'inst-b')!;
+      assert(ib.profile === 'Home' && ib.alias === 'home' && ib.brandVersion === '', `label fallback: ${JSON.stringify(ib)}`);
+      // No name at all: <brand>-<short6>.
+      const c = new FakeExt(port, 'inst-c-123456', 'chrome');
+      await c.connect();
+      await until(() => c.role === 'parked', 'c parked');
+      assert(bridge.aliasOf('inst-c-123456') === 'chrome-instc1', `fallback alias: ${bridge.aliasOf('inst-c-123456')}`);
+      // The ack says who answered, so ids are minted with the right alias.
+      const ack = await bridge.sendControlToInstance('home', { action: 'list-tabs' });
+      assert(ack.instanceId === 'inst-b', `ack.instanceId: ${ack.instanceId}`);
+      const own = await bridge.sendControl({ action: 'list-tabs' });
+      assert(own.instanceId === 'inst-a', `bound ack.instanceId: ${own.instanceId}`);
     });
   });
 

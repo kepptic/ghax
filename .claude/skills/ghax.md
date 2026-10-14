@@ -113,7 +113,7 @@ inside the ghax CLI.
 #   → <repo>/extension  (persists in the profile; reload after ghax updates)
 ghax attach --extension --control-active   # drives the active tab, no popup
 ghax snapshot -i                            # then the full verb surface works
-ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
+ghax bridge control [--active | --tab-id '#n'|<id> | --stop]   # (re)point mid-session
 ```
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
@@ -147,6 +147,11 @@ Bridge caveats:
   is debugging this browser" banner — expected, not an error.
 - **One controlled tab.** The bridge drives the tab you point it at
   (`--control-active` or `bridge control --tab-id`). `tabs` lists them.
+- **Tab ids name the browser.** Bridge ids are `<profile>:<chrome tab id>`
+  (`work:42`; `edge-3f2a1b:42` when the popup has no Profile name), because
+  two browsers can both have a tab 42. Pick by `'#n'` from the last `tabs`
+  or by full id. A bare `42` is refused when it matches more than one tab:
+  read the listing it prints and choose, never guess.
 - **Fallback:** if the bridge extension isn't installed and can't be, use
   the Claude-in-Chrome extension (same `chrome.debugger` mechanism, but
   slower cloud relay, outside ghax).
@@ -200,15 +205,18 @@ ghax detach                              # clean daemon shutdown
 ghax attach --extension --control-active # drive the active real tab, no popup
 ghax attach --extension                  # connect only; then pick a tab:
 ghax bridge control --active             #   control the current active tab
-ghax bridge control --tab-id <n>         #   control a specific tab (see `tabs`)
+ghax bridge control --tab-id '#2'        #   control row 2 of the last `tabs`
 ghax bridge control --stop               #   release the tab (banner clears)
 ghax attach --extension --bridge-port N  # non-default WS port (default 9223)
 ghax bridge reload                       # reload the extension, no edge://extensions click
 ghax bridge reload --force               # also proceed if another agent has a tab claimed
 
 # Tab work
-ghax tabs                                # list {id, title, url, active}
-ghax tab <id>                            # switch active tab
+ghax tabs                                # #n  id  "title"  Browser · Profile  controlledBy=…
+ghax tabs --json                         # + index, chromeTabId, browser, profile, windowId
+ghax tab '#2'                            # row 2 of the last `tabs` (refused if it closed)
+ghax tab work:42                         # full id: <profile>:<chrome tab id> on the bridge
+ghax tab 42                              # only if exactly one tab has id 42, else refused
 ghax goto https://example.com
 ghax text                                # clean page text
 ghax html [<selector>]                   # innerHTML

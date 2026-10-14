@@ -36,7 +36,10 @@
  *      attachment, so a parked connection can still ask for it.
  *   -> daemon, control note: {"type":"controlled","tabId":N|null}   (pushed on any change)
  * `list-tabs` acks additionally carry `controlledBy` per tab: the bridge port
- * of the agent that owns it, or null. Nothing else about the protocol changed.
+ * of the agent that owns it, or null, plus `windowId` and `index` (position in
+ * its window). `hello` also carries `profile` (same value as `label`, the
+ * popup's "Profile name") and `brandVersion`; the daemon mints tab ids
+ * `<alias>:<tabId>` from them (docs/design/plan/11-multi-browser.md).
  *
  * MV3 service workers are EPHEMERAL — Chrome evicts them after ~30s idle.
  * Two mechanisms keep this bridge alive and self-healing:
@@ -151,14 +154,31 @@ function ownerOf(tabId) {
 
 function conflictError(tabId, owner) {
   // Tagged so callers can tell "someone else has this tab" (keep wanting it,
-  // report the conflict) from "this tab is gone" (forget it).
+  // report the conflict) from "this tab is gone" (forget it). tabId/ownerPort
+  // let describeConflict() rebuild the message with the tab's full identity.
   return Object.assign(
     new Error(
       `tab ${tabId} is already controlled by another ghax agent (bridge port ${owner.port}) — `
       + `pick another tab or run 'ghax bridge control --stop' there`,
     ),
-    { ghaxConflict: true },
+    { ghaxConflict: true, tabId, ownerPort: owner.port },
   );
+}
+
+/**
+ * The conflict message with the tab's full identity: title, browser and
+ * profile. A bare "tab 42" is ambiguous once two browsers are in play (both
+ * can have a tab 42), so every refusal names which one. Async because the
+ * title needs chrome.tabs.get; the sync throw sites keep the short form and
+ * the control channel upgrades it here before it goes to the daemon.
+ */
+async function describeConflict(err) {
+  const identity = await getIdentity().catch(() => ({ browser: '', label: '' }));
+  const tab = await chrome.tabs.get(err.tabId).catch(() => null);
+  const title = tab?.title ? ` ${JSON.stringify(tab.title.slice(0, 60))}` : '';
+  const where = `${identity.browser || 'browser'} · ${identity.label || '(no profile name)'}`;
+  return `tab ${err.tabId}${title} in ${where} is already controlled by another ghax agent `
+    + `(bridge port ${err.ownerPort}) — pick another tab or run 'ghax bridge control --stop' there`;
 }
 
 /** Take ownership of `tabId`, or throw if a different connection holds it. */
@@ -263,11 +283,21 @@ async function getIdentity() {
     instanceId = crypto.randomUUID();
     await chrome.storage.local.set({ ghaxInstanceId: instanceId });
   }
+  const browser = detectBrowser();
   return {
     instanceId,
     label: typeof stored.ghaxLabel === 'string' ? stored.ghaxLabel : '',
-    browser: detectBrowser(),
+    browser,
+    brandVersion: detectBrandVersion(browser),
   };
+}
+
+/** Major version of the detected brand, e.g. "150" for Edge 150. '' if unknown. */
+function detectBrandVersion(browser) {
+  const brands = (globalThis.navigator?.userAgentData?.brands) ?? [];
+  const want = browser === 'edge' ? 'edge' : browser === 'chrome' ? 'google chrome' : 'chromium';
+  const hit = brands.find((b) => String(b?.brand ?? '').toLowerCase().includes(want));
+  return hit?.version ? String(hit.version) : '';
 }
 
 function detectBrowser() {
@@ -469,6 +499,11 @@ class BridgeConnection {
         instanceId: identity.instanceId,
         browser: identity.browser,
         label: identity.label,
+        // `profile` is the same user-set "Profile name" as `label`, under the
+        // name tab identity uses (docs/design/plan/11-multi-browser.md).
+        // Daemons predating it read `label`; newer ones prefer `profile`.
+        profile: identity.label,
+        brandVersion: identity.brandVersion,
         // The tab we WANT. Provisional in both directions: the attachment awaits
         // the disposition, and the tab itself is dropped if the ack turns out to
         // come from a different daemon — applyRole always follows with a
@@ -993,6 +1028,9 @@ class BridgeConnection {
               // Which agent owns this tab, so `ghax tabs` can show the other
               // sessions' territory instead of offering a tab that will refuse.
               controlledBy: owner ? owner.port : null,
+              // Where the tab sits, so `ghax tabs` can say which window.
+              windowId: typeof tab.windowId === 'number' ? tab.windowId : null,
+              index: typeof tab.index === 'number' ? tab.index : null,
             };
           }),
         });
@@ -1011,7 +1049,11 @@ class BridgeConnection {
         }
         this.send({
           type: 'control-ack', id, ok: true, tabId: tab.id,
-          result: { id: tab.id, title: tab.title ?? '', url: tab.url ?? msg.url ?? 'about:blank', active: true },
+          result: {
+            id: tab.id, title: tab.title ?? '', url: tab.url ?? msg.url ?? 'about:blank', active: true,
+            windowId: typeof tab.windowId === 'number' ? tab.windowId : null,
+            index: typeof tab.index === 'number' ? tab.index : null,
+          },
         });
         return;
       }
@@ -1039,7 +1081,10 @@ class BridgeConnection {
       await this.switchControlTo(tabId);
       this.send({ type: 'control-ack', id, ok: true, tabId });
     } catch (err) {
-      this.send({ type: 'control-ack', id, ok: false, error: err?.message ?? String(err) });
+      const message = err?.ghaxConflict
+        ? await describeConflict(err).catch(() => err.message)
+        : err?.message ?? String(err);
+      this.send({ type: 'control-ack', id, ok: false, error: message });
     }
   }
 

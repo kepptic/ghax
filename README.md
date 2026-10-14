@@ -177,7 +177,7 @@ Since Edge 150 / Chrome 136, `--remote-debugging-port` is ignored on the default
 #   edge://extensions → Developer mode → Load unpacked → ./extension
 ghax attach --extension --control-active   # drive the active tab, no popup click
 ghax snapshot -i                            # full verb surface over your real session
-ghax bridge control --tab-id <n>            # or point it at a specific tab (see `tabs`)
+ghax bridge control --tab-id '#2'           # or point it at a specific tab (see `tabs`)
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
@@ -211,6 +211,15 @@ ghax: BRIDGE_AMBIGUOUS: 2 browsers connected and no --browser picks one:
 ```
 
 Re-run with `--browser edge` (or a label), or keep the daemon and pick with `ghax bridge use <id|browser|label>`. Two profiles of the same brand need distinct labels in the extension popup.
+
+**Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:
+
+```
+#1  work:7   "Inbox"                    Edge · Work  controlledBy=:9223  active
+#2  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
+```
+
+The id is `<profile>:<chrome tab id>`. Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches.
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 

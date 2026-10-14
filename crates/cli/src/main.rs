@@ -19,6 +19,7 @@ mod ship;
 mod small;
 mod sse;
 mod state;
+mod tabs;
 mod time_util;
 mod update;
 mod version;

@@ -24,6 +24,9 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BRIDGE_PORT_RANGE } from '../src/bridge';
+import {
+  bridgeRowsToIdentities, displayBrand, formatTabLine, resolveTabSelector, TabResolveError, type TabIdentity,
+} from '../src/tab-identity';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -88,6 +91,15 @@ class FakeExtension {
    * with a real daemon answering `hello` wants — those get a disposition.
    */
   constructor(readonly basePort: number = -1) {}
+
+  /** `hello.browser`. */
+  browser = 'edge';
+  /**
+   * The popup "Profile name". null = an extension predating tab identity: no
+   * `profile` / `brandVersion` in hello and `label` empty, so the daemon must
+   * fall back to `<brand>-<short6>`.
+   */
+  profile: string | null = null;
 
   async connect(port: number, instanceId = 'inst-browser'): Promise<FakeConnection> {
     const conn = new FakeConnection(this, port, instanceId);
@@ -205,8 +217,9 @@ class FakeConnection {
       // Install-wide identity: the SAME browser talks to every daemon, and each
       // daemon keeps its own peer registry, so sharing the id is correct.
       instanceId: this.instanceId,
-      browser: 'edge',
-      label: '',
+      browser: this.ext.browser,
+      label: this.ext.profile ?? '',
+      ...(this.ext.profile !== null ? { profile: this.ext.profile, brandVersion: '150' } : {}),
       controlledTabId: this.controlledTabId,
     });
     // Mirrors the legacy fallback in extension/background.js: a daemon that
@@ -365,7 +378,7 @@ class FakeConnection {
       if (msg.action === 'list-tabs') {
         this.send({
           type: 'control-ack', id, ok: true, tabId: this.controlledTabId,
-          result: this.ext.tabs.map((tab) => {
+          result: this.ext.tabs.map((tab, i) => {
             const owner = this.ext.ownerOf(tab.id);
             return {
               id: tab.id,
@@ -373,6 +386,8 @@ class FakeConnection {
               url: tab.url,
               active: tab.id === this.controlledTabId,
               controlledBy: owner ? owner.port : null,
+              // Only extensions with tab identity report placement.
+              ...(this.ext.profile !== null ? { windowId: 1, index: i } : {}),
             };
           }),
         });
@@ -1084,6 +1099,135 @@ async function main(): Promise<void> {
       bridge.close();
       await sleep(20);
     }
+  });
+
+
+  // ─── Tab identity (docs/design/plan/11-multi-browser.md, phase 2) ───
+
+  /** Two browsers, both with a tab 42, one bound and one parked. */
+  async function twoBrowsersWithTab42(
+    fn: (bridge: Bridge, work: TabIdentity[], home: TabIdentity[]) => Promise<void>,
+    profiles: [string | null, string | null] = ['Work', null],
+  ): Promise<void> {
+    const base = reserveBase();
+    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const edge = new FakeExtension();
+    const chrome = new FakeExtension();
+    edge.browser = 'edge';
+    edge.profile = profiles[0];
+    chrome.browser = 'chrome';
+    chrome.profile = profiles[1];
+    edge.tabs = [
+      { id: 7, title: 'Inbox', url: 'https://mail.example' },
+      { id: 42, title: 'Bank feeds - QuickBooks', url: 'https://qbo.example' },
+    ];
+    chrome.tabs = [{ id: 42, title: 'Recipes', url: 'https://food.example' }];
+    try {
+      const a = await edge.connect(bridge.port, 'aaaaaa-edge-instance');
+      await until(() => a.role === 'bound', 'edge to bind');
+      const b = await chrome.connect(bridge.port, 'bbbbbb-chrome-instance');
+      await until(() => b.role === 'parked', 'chrome to park');
+      // What the daemon's listBridgeTabs does: list each instance, mint with
+      // the alias of whoever answered.
+      const list = async (sel: string): Promise<TabIdentity[]> => {
+        const ack = await bridge.sendControlToInstance(sel, { action: 'list-tabs' });
+        const who = bridge.identityOf(ack.instanceId!)!;
+        return bridgeRowsToIdentities(ack.result as unknown[], {
+          alias: who.alias, browser: displayBrand(who.browser), profile: who.profile,
+        });
+      };
+      await fn(bridge, await list('aaaaaa'), await list('bbbbbb'));
+    } finally {
+      edge.closeAll();
+      chrome.closeAll();
+      bridge.close();
+      await sleep(20);
+    }
+  }
+
+  /** Phase-3 shape: both browsers' tabs in one numbered listing. */
+  function combined(...lists: TabIdentity[][]): TabIdentity[] {
+    return lists.flat().map((t, i) => ({ ...t, index: i + 1 }));
+  }
+
+  function refusal(fn: () => unknown): TabResolveError {
+    try {
+      fn();
+    } catch (err) {
+      if (err instanceof TabResolveError) return err;
+      throw err;
+    }
+    throw new Error('expected a refusal, got a match');
+  }
+
+  await test('two browsers with a tab 42 each get distinct ids naming browser and profile', async () => {
+    await twoBrowsersWithTab42(async (_bridge, work, home) => {
+      const w42 = work.find((t) => t.chromeTabId === 42)!;
+      const h42 = home.find((t) => t.chromeTabId === 42)!;
+      assert(w42.id === 'work:42', `labelled profile → slug alias, got ${w42.id}`);
+      // No profile name (old extension) → <brand>-<short6>.
+      assert(h42.id === 'chrome-bbbbbb:42', `unlabelled → brand-short6, got ${h42.id}`);
+      assert(w42.browser === 'Edge' && w42.profile === 'Work', `edge identity: ${w42.browser} · ${w42.profile}`);
+      assert(h42.browser === 'Chrome' && h42.profile === '—', `chrome identity: ${h42.browser} · ${h42.profile}`);
+      assert(w42.windowId === 1 && h42.windowId === null, `windowId only from new extensions: ${w42.windowId}/${h42.windowId}`);
+      assert(w42.index === 2, `index is the row number, got ${w42.index}`);
+      const line = formatTabLine(w42);
+      assert(
+        line === '#2  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none',
+        `tabs text line: ${line}`,
+      );
+    });
+  });
+
+  await test('tab 42 matching two browsers is refused, listing both with full identity', async () => {
+    await twoBrowsersWithTab42(async (_bridge, work, home) => {
+      const all = combined(work, home);
+      const err = refusal(() => resolveTabSelector('42', all, all));
+      assert(err.code === 'TAB_AMBIGUOUS', `code ${err.code}`);
+      for (const want of ['work:42', 'chrome-bbbbbb:42', 'Edge · Work', 'Chrome · —', 'Bank feeds', 'Recipes']) {
+        assert(err.message.includes(want), `refusal should name ${want}: ${err.message}`);
+      }
+      // Never [0] of several, but one match is fine.
+      assert(resolveTabSelector('7', all, all).id === 'work:7', 'an unambiguous bare id resolves');
+      assert(resolveTabSelector('chrome-bbbbbb:42', all, all).title === 'Recipes', 'the full id resolves');
+      assert(refusal(() => resolveTabSelector('99', all, all)).code === 'TAB_NOT_FOUND', 'no match refuses');
+    });
+  });
+
+  await test('tab #2 resolves against the last listing; a vanished #n is refused', async () => {
+    await twoBrowsersWithTab42(async (_bridge, work) => {
+      const last = work;
+      const picked = resolveTabSelector('#2', work, last);
+      assert(picked.id === 'work:42', `#2 should be work:42, got ${picked.id}`);
+      assert(refusal(() => resolveTabSelector('#2', work, null)).code === 'TAB_NO_LISTING', 'no listing yet refuses');
+      assert(refusal(() => resolveTabSelector('#9', work, last)).code === 'TAB_NOT_FOUND', 'out of range refuses');
+      // Tab 42 closes; the row that is now #2 must NOT be picked instead.
+      const now = work.filter((t) => t.chromeTabId !== 42);
+      const gone = refusal(() => resolveTabSelector('#2', now, last));
+      assert(gone.code === 'TAB_VANISHED', `code ${gone.code}`);
+      assert(gone.message.includes('work:42') && gone.message.includes('Bank feeds'), `names the gone tab: ${gone.message}`);
+    });
+  });
+
+  await test('an id from the parked browser is refused with a bridge use hint', async () => {
+    await twoBrowsersWithTab42(async (_bridge, work, home) => {
+      // `tabs --browser chrome` listed the parked one; the bound one is Edge.
+      const err = refusal(() => resolveTabSelector('#1', work, home));
+      assert(err.message.includes('another browser') && err.message.includes('bridge use chrome-bbbbbb'), err.message);
+      const full = refusal(() => resolveTabSelector('chrome-bbbbbb:42', work, work));
+      assert(full.message.includes('bridge use chrome-bbbbbb'), full.message);
+    });
+  });
+
+  await test('two browsers with the same profile name get suffixed aliases; bridge use takes an alias', async () => {
+    await twoBrowsersWithTab42(async (bridge, work, home) => {
+      const a = work.find((t) => t.chromeTabId === 42)!.id;
+      const b = home.find((t) => t.chromeTabId === 42)!.id;
+      assert(a === 'work-aaaaaa:42' && b === 'work-bbbbbb:42', `clash → suffixed: ${a}, ${b}`);
+      const inst = await bridge.use('work-bbbbbb');
+      assert(inst.instanceId === 'bbbbbb-chrome-instance', `bridge use <alias> binds it, got ${inst.instanceId}`);
+      assert(inst.profile === 'work' && inst.brandVersion === '150', `instances() carries profile/brandVersion: ${JSON.stringify(inst)}`);
+    }, ['Work', 'work']);
   });
 
   console.log();
