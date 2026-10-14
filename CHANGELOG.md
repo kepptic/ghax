@@ -13,8 +13,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   CDP on the default profile. Cookies are limited to the listed domains and
   their subdomains (`--domain` is required); `--origin` adds localStorage from
   a tab already open at that origin and never navigates. The daemon writes the
-  file itself (0600, `O_EXCL` unless `--force`, refuses symlinks and
-  un-gitignored paths inside a git work tree), so values never cross the RPC
+  file itself (temp file 0600 then atomic `link`/`rename`, so an existing file
+  is never truncated in place; refuses symlinks and un-gitignored paths inside
+  a git work tree, with hardened git that fails closed), so values never cross the RPC
   socket or reach stdout. Output is the path, per-domain cookie counts, origin
   count and earliest expiry.
 - **`cookies`, `cookies delete` and `storage` work over the extension bridge.**

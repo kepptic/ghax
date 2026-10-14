@@ -72,6 +72,7 @@ import {
   type BridgeTab,
   type ControlTarget,
 } from './bridge';
+import { recordableStep } from './record-filter';
 import { AuthExportError, exportAuth, LOCAL_STORAGE_EXPR, originOf, parseLocalStorage, type AuthSource } from './auth-export';
 import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
@@ -89,6 +90,7 @@ interface RecordedStep {
   args: unknown[];
   opts: Record<string, unknown>;
   at: number;
+  note?: string;
 }
 
 interface Recording {
@@ -4181,21 +4183,6 @@ register('perf', async (ctx, _args, opts) => {
 
 // ─── Recording ─────────────────────────────────────────────────
 
-// Commands we never store in a recording — they're either meta-operations
-// on the recorder itself, or expensive read-only queries a replay should
-// not re-run as the user's "actions".
-const NEVER_RECORD = new Set([
-  'record.start', 'record.stop', 'record.status',
-  'status', 'health',
-  'tabs', 'console', 'network', 'cookies', 'text', 'html',
-  // Writes a secrets file; a replay must never re-export a session.
-  'auth.export',
-  // Read-only queries that don't change page state — replay would re-fire
-  // the measurement, not the action, and waste time. Add every new
-  // read-only handler here.
-  'find', 'is', 'perf', 'xpath', 'box',
-]);
-
 register('record.start', async (ctx, args) => {
   const name = String(args[0] ?? `rec-${Date.now()}`);
   ctx.recording = { name, startedAt: Date.now(), steps: [] };
@@ -4603,8 +4590,9 @@ async function main() {
     if (!handler) throw new Error(`Unknown command: ${cmd}`);
     lastActivity = Date.now();
     const result = await handler(ctx, args, opts);
-    if (ctx.recording && !NEVER_RECORD.has(cmd)) {
-      ctx.recording.steps.push({ cmd, args, opts, at: Date.now() });
+    if (ctx.recording) {
+      const step = recordableStep(cmd, args, opts);
+      if (step) ctx.recording.steps.push({ ...step, at: Date.now() });
     }
     return result;
   };

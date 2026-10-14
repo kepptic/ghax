@@ -112,7 +112,10 @@ Logs:
          #   open there (bridge: the controlled tab). Never navigates.
          # The file is created 0600 and never printed. Refuses an existing
          #   file without --force, a symlink, and an un-gitignored path in a
-         #   git work tree. Prints counts, path and earliest expiry only.
+         #   git work tree. Prints counts, path and earliest expiry only
+         #   (and the file mode on POSIX; Windows has none).
+         # --domain matches literally, public suffixes included: co.uk or
+         #   github.io would export every site under them. Name the site.
 
 Extensions (MV3):
   ext list

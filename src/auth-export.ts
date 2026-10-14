@@ -12,9 +12,10 @@
  * earliest expiry). Errors name cookies, origins and paths, never values.
  */
 
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import type { Cookie } from './cookies';
 
 /** A refusal or usage error. The daemon maps it to exit code 2. */
@@ -44,7 +45,8 @@ export interface AuthExportOpts {
 
 export interface AuthExportResult {
   path: string;
-  mode: string;
+  /** Octal file mode; omitted on Windows, where chmod has no meaning. */
+  mode?: string;
   cookies: number;
   cookiesByDomain: Record<string, number>;
   partitionedCookies: number;
@@ -177,19 +179,42 @@ export function checkOutPath(raw: unknown): string {
 
 /**
  * A storageState file inside a git work tree must be gitignored, or one
- * `git add -A` commits a live session. No git on PATH means no work tree to
- * commit into, so that case passes.
+ * `git add -A` commits a live session. Git runs hardened: a hostile repo's
+ * .git/config (core.fsmonitor, hooks) must not execute, and system/global
+ * config is ignored. Fails CLOSED: only git's own "not a git repository" means
+ * outside a work tree; any other error (dubious ownership, exit 128) refuses.
+ * No git binary on PATH means no work tree to commit into, so that passes
+ * (documented in SECURITY.md).
  */
-function refuseUnignoredGitPath(dir: string, base: string, target: string): void {
+function git(dir: string, args: string[]): SpawnSyncReturns<string> {
   const env = { ...process.env };
   for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CEILING_DIRECTORIES']) delete env[k];
-  const inside = spawnSync('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'], { env, encoding: 'utf8' });
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = '/dev/null';
+  env.GIT_OPTIONAL_LOCKS = '0';
+  env.LC_ALL = 'C';
+  return spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-C', dir, ...args],
+    { env, encoding: 'utf8' },
+  );
+}
+
+function refuseUnignoredGitPath(dir: string, base: string, target: string): void {
+  const inside = git(dir, ['rev-parse', '--is-inside-work-tree']);
   if (inside.error) {
     if ((inside.error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw new AuthExportError(`could not run git to check ${target}: ${inside.error.message}`);
   }
-  if (inside.status !== 0 || inside.stdout.trim() !== 'true') return;
-  const ignored = spawnSync('git', ['-C', dir, 'check-ignore', '-q', '--', base], { env, encoding: 'utf8' });
+  if (inside.status !== 0) {
+    if (/not a git repository/i.test(inside.stderr ?? '')) return;
+    throw new AuthExportError(
+      `git could not check ${target} (exit ${inside.status}: ${(inside.stderr ?? '').trim().split('\n')[0] || 'no message'}); refusing to write.`,
+    );
+  }
+  // Inside a .git dir or bare repo rev-parse prints "false": not a work tree.
+  if (inside.stdout.trim() !== 'true') return;
+  const ignored = git(dir, ['check-ignore', '-q', '--', base]);
   if (ignored.status === 0) return;
   if (ignored.status === 1) {
     throw new AuthExportError(
@@ -202,61 +227,66 @@ function refuseUnignoredGitPath(dir: string, base: string, target: string): void
 
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
-/**
- * Create the file 0600. Without --force: O_CREAT|O_EXCL, so an existing file
- * or a planted symlink fails. With --force: refuse a symlink, a non-regular
- * file or a hard-linked file, chmod 0600 BEFORE truncating, then write.
- */
-export function writeSecretFile(target: string, content: string, force: boolean): void {
-  const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
-  let fd: number;
-  let created = false;
-  if (!force) {
-    try {
-      fd = fs.openSync(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
-      created = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new AuthExportError(`${target} already exists; pass --force to overwrite it.`);
-      }
-      throw err;
-    }
-  } else {
-    let st: fs.Stats | null = null;
-    try {
-      st = fs.lstatSync(target);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
-    if (st?.isSymbolicLink()) throw new AuthExportError(`${target} is a symlink; refusing to write through it.`);
-    if (st && !st.isFile()) throw new AuthExportError(`${target} exists and is not a regular file.`);
-    try {
-      fd = fs.openSync(target, O_WRONLY | O_CREAT | O_NOFOLLOW, 0o600);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
-        throw new AuthExportError(`${target} is a symlink; refusing to write through it.`);
-      }
-      throw err;
-    }
-    created = !st;
-    const fst = fs.fstatSync(fd);
-    if (!fst.isFile() || fst.nlink > 1) {
-      fs.closeSync(fd);
-      throw new AuthExportError(`${target} is not a single regular file (hard-linked or special); refusing to write.`);
-    }
-  }
+function fsyncDir(dir: string): void {
+  // Durability only; some platforms cannot open or fsync a directory.
   try {
-    fs.fchmodSync(fd, 0o600);
-    fs.ftruncateSync(fd, 0);
-    fs.writeSync(fd, content, 0, 'utf8');
-    fs.fsyncSync(fd);
+    const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch { /* best effort */ }
+}
+
+/**
+ * Write the secret file without ever touching `target` in place. The bytes go
+ * to a 0600 O_EXCL|O_NOFOLLOW temp file in the same directory, are fsynced,
+ * then published atomically:
+ *   - no --force: link(2) tmp -> target, which fails EEXIST rather than replace;
+ *   - --force: refuse a symlink or non-regular target, then rename(2) over it.
+ * An old file keeps its inode (open readers never see the new secrets), and a
+ * failed write only ever unlinks the temp file.
+ * `beforeCommit` runs right before publishing (parent re-check after the slow
+ * cookie read); if it throws, nothing is published.
+ */
+export function writeSecretFile(target: string, content: string, force: boolean, beforeCommit?: () => void): void {
+  const dir = path.dirname(target);
+  const base = path.basename(target);
+  const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants;
+  const tmp = path.join(dir, `.${base}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+  const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+  try {
+    try {
+      fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, content, 'utf8'); // loops until every byte is written
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    beforeCommit?.();
+    if (!force) {
+      try {
+        fs.linkSync(tmp, target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new AuthExportError(`${target} already exists; pass --force to overwrite it.`);
+        }
+        throw err;
+      }
+      fs.unlinkSync(tmp);
+    } else {
+      let st: fs.Stats | null = null;
+      try {
+        st = fs.lstatSync(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      if (st?.isSymbolicLink()) throw new AuthExportError(`${target} is a symlink; refusing to write through it.`);
+      if (st && !st.isFile()) throw new AuthExportError(`${target} exists and is not a regular file.`);
+      fs.renameSync(tmp, target);
+    }
   } catch (err) {
-    fs.closeSync(fd);
-    // A half-written file we created is just a partial secret; don't leave it.
-    if (created) fs.rmSync(target, { force: true });
+    fs.rmSync(tmp, { force: true });
     throw err;
   }
-  fs.closeSync(fd);
+  fsyncDir(dir);
 }
 
 export async function exportAuth(src: AuthSource, opts: AuthExportOpts): Promise<AuthExportResult> {
@@ -284,12 +314,18 @@ export async function exportAuth(src: AuthSource, opts: AuthExportOpts): Promise
     originsOut.push({ origin, localStorage: items.map((i) => ({ name: String(i.name), value: String(i.value) })) });
   }
 
-  writeSecretFile(target, `${JSON.stringify({ cookies, origins: originsOut }, null, 2)}\n`, force);
+  // The cookie reads above are slow; the parent (or its git status) may have
+  // changed since checkOutPath. Re-check immediately before publishing.
+  writeSecretFile(target, `${JSON.stringify({ cookies, origins: originsOut }, null, 2)}\n`, force, () => {
+    if (checkOutPath(opts.out) !== target) {
+      throw new AuthExportError(`the directory of ${target} changed while exporting; refusing to write.`);
+    }
+  });
 
   const expiries = cookies.map((c) => c.expires as number).filter((e) => e > 0);
   return {
     path: target,
-    mode: '0600',
+    ...(process.platform === 'win32' ? {} : { mode: '0600' }),
     cookies: cookies.length,
     cookiesByDomain: byDomain,
     partitionedCookies: cookies.filter((c) => c.partitionKey !== undefined).length,

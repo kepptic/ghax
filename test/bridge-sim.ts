@@ -32,7 +32,8 @@ import {
   isStaleContextError,
 } from '../src/bridge';
 import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
-import { AuthExportError, exportAuth, type AuthSource } from '../src/auth-export';
+import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
+import { recordableStep } from '../src/record-filter';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -517,6 +518,100 @@ async function main(): Promise<void> {
     const r = await exportAuth(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
     assert(r.cookies === 4, 'ignored path should export');
     fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  const leftovers = (dir: string) => fs.readdirSync(dir).filter((n) => n.endsWith('.tmp'));
+  const withCookieHook = (hook: () => void): AuthSource => ({ ...authSrc(), cookies: async () => { hook(); return authJar(); } });
+
+  await test('auth export --force replaces by rename: an open reader of the old file keeps the old bytes', async () => {
+    const out = path.join(authTmp, 'inode.json');
+    fs.writeFileSync(out, 'old-secret', { mode: 0o644 });
+    const reader = fs.openSync(out, 'r');
+    const oldIno = fs.fstatSync(reader).ino;
+    await exportAuth(authSrc(), { out, domain: 'example.com', force: true });
+    const buf = Buffer.alloc(32);
+    const n = fs.readSync(reader, buf, 0, 32, 0);
+    fs.closeSync(reader);
+    assert(buf.toString('utf8', 0, n) === 'old-secret', 'old inode was modified in place');
+    assert(fs.statSync(out).ino !== oldIno, 'target was not replaced by a new inode');
+    assert((fs.statSync(out).mode & 0o777) === 0o600, 'new file not 0600');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export without --force loses a create race with EEXIST and leaves the winner intact', async () => {
+    const out = path.join(authTmp, 'race.json');
+    const msg = await refusal(withCookieHook(() => fs.writeFileSync(out, 'winner')), { out, domain: 'example.com' });
+    assert(msg.includes('already exists'), msg);
+    assert(fs.readFileSync(out, 'utf8') === 'winner', 'racing file was clobbered');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export --force swapped to a symlink mid-export is refused, victim and old file untouched', async () => {
+    const out = path.join(authTmp, 'swap.json');
+    const victim = path.join(authTmp, 'victim2.txt');
+    fs.writeFileSync(victim, 'keep');
+    const msg = await refusal(withCookieHook(() => fs.symlinkSync(victim, out)), { out, domain: 'example.com', force: true });
+    assert(msg.includes('symlink'), msg);
+    assert(fs.readFileSync(victim, 'utf8') === 'keep', 'wrote through the symlink');
+    assert(fs.lstatSync(out).isSymbolicLink(), 'symlink was removed');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('writeSecretFile: a failed forced write leaves the old file byte-identical', async () => {
+    const out = path.join(authTmp, 'keep.json');
+    fs.writeFileSync(out, 'precious', { mode: 0o644 });
+    const ino = fs.statSync(out).ino;
+    let threw = false;
+    try { writeSecretFile(out, 'new', true, () => { throw new Error('boom'); }); } catch { threw = true; }
+    assert(threw, 'beforeCommit failure should propagate');
+    assert(fs.readFileSync(out, 'utf8') === 'precious' && fs.statSync(out).ino === ino, 'old file touched');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export refuses when the parent directory is swapped during the cookie read', async () => {
+    const real = path.join(authTmp, 'p'); const moved = path.join(authTmp, 'p-moved'); const elsewhere = path.join(authTmp, 'elsewhere');
+    fs.mkdirSync(real); fs.mkdirSync(elsewhere);
+    const msg = await refusal(withCookieHook(() => { fs.renameSync(real, moved); fs.symlinkSync(elsewhere, real); }), {
+      out: path.join(real, 'x.json'), domain: 'example.com',
+    });
+    assert(msg.includes('changed while exporting'), msg);
+    assert(fs.readdirSync(elsewhere).length === 0 && fs.readdirSync(moved).length === 0, 'something was written after the swap');
+  });
+
+  await test('auth export git check fails closed (dubious ownership) and never runs repo-config commands', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-auth-git2-'));
+    if (spawnSync('git', ['init', '-q', repo]).status !== 0) { console.log('    (git missing — skipped)'); return; }
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'auth.json\n');
+    const marker = path.join(repo, 'fsmonitor-ran');
+    const hook = path.join(repo, 'fsm.sh');
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+    spawnSync('git', ['-C', repo, 'config', 'core.fsmonitor', hook]);
+    const r = await exportAuth(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+    assert(r.cookies === 4, 'ignored path should export');
+    assert(!fs.existsSync(marker), 'repo core.fsmonitor ran');
+    fs.rmSync(path.join(repo, 'auth.json'));
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1';
+    try {
+      const msg = await refusal(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+      assert(msg.includes('git could not check'), msg);
+    } finally {
+      delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    }
+    assert(!fs.existsSync(path.join(repo, 'auth.json')), 'fail-closed refusal still wrote');
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  await test('record: a batch never carries auth.export (or other NEVER_RECORD steps) into a recording', async () => {
+    const exp = { cmd: 'auth.export', args: [], opts: { out: '/x' } };
+    const click = { cmd: 'click', args: ['@e1'] };
+    assert(recordableStep('auth.export', [], {}) === null, 'plain auth.export recorded');
+    assert(recordableStep('batch', [[exp]], {}) === null, 'all-excluded batch recorded');
+    const mixed = recordableStep('batch', [[click, exp, { cmd: 'batch', args: [[exp, click]] }]], {});
+    const steps = (mixed?.args[0] as Array<{ cmd: string }>) ?? [];
+    assert(JSON.stringify(mixed).includes('auth.export') === false, 'auth.export survived in a batch');
+    assert(steps.length === 2 && steps[0].cmd === 'click' && steps[1].cmd === 'batch', 'kept steps wrong');
+    assert(typeof mixed?.note === 'string' && mixed.note.includes('2'), 'no drop note');
+    assert(recordableStep('batch', [[click]], {})?.note === undefined, 'clean batch got a note');
   });
 
   await test('auth export refuses an --origin with no open tab and names no value', async () => {
