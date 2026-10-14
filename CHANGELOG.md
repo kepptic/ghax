@@ -5,6 +5,7 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
 ### Added
 - **Daemon discovery.** Every daemon registers in `~/.ghax/daemons/<pid>.json`
   and removes the entry when it exits; readers prune entries whose pid is dead.
@@ -14,15 +15,13 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `GHAX_STATE_FILE=` to set. `attach` never reuses another directory's daemon;
   `detach` lists them but only stops the one it resolves to. Fixes the
   "no daemon state" error when an agent attached from a different directory.
-
-- **One bridge daemon can bind several browsers (groundwork).** The bridge
+- **One bridge daemon can bind several browsers .** The bridge
   keeps one session per bound browser (state, queue, grace window, in-flight
   commands), so one browser dropping never stalls or fails another's work.
   `GHAX_BRIDGE_BROWSER=all` binds every connected browser at the end of the
   settle window and binds a late hello instead of parking it; `bridge use`
   then only moves which bound browser is active. Relayed events carry the
-  `instanceId` and `tabId` they came from. The CLI surface for this lands
-  separately.
+  `instanceId` and `tabId` they came from.
   A read interrupted on one browser is never replayed on another (it fails
   with `BRIDGE_PEER_CHANGED` naming the browser instead). Only the active
   browser's events, tab changes and hellos touch refs and the active tab.
@@ -35,7 +34,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   leaves the bound set, and an extension without an instance id is refused
   with a reload hint. Under `all`, browsers joining or returning after expiry
   no longer trip the "ownership is flapping" warning.
-
 - **Multi-browser surface for `--browser all`.** `ghax tabs` lists every bound
   browser's tabs numbered `#1..N` across all of them; a browser that errors or
   does not answer within 10 s becomes a `note:` row instead of hanging the
@@ -55,7 +53,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `/bridge-status.connected` is true when any bound browser is connected, and the daemon log no longer says "only 'all' may
   bind". `GHAX_BRIDGE_CONTROL=active` under `all` applies to the first bound
   browser only (now logged).
-
 - **`eval --timeout <ms>` and `eval --no-wait`.** The bridge capped every
   `Runtime.evaluate` at 30 s with no way to raise it. `--timeout` now sets
   the deadline on both transports (the CLI's own RPC budget already grows
@@ -98,7 +95,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so it also refuses when http/https or partitioned siblings share that triple
   (exit 2), passes `partitionKey` for CHIPS cookies, and re-reads the profile
   to confirm the removal (exit 4 if the cookie is still there).
-
 - **`expect`: a plan carries its own checks.** A step `{"cmd":"expect","opts":{...}}`
   in `batch`, `chain` and `replay` files, and `ghax expect` on its own, asserts
   one thing about the page and polls until it holds or `--timeout` ms
@@ -119,11 +115,6 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   file with `ok`, `exit`, `totalMs` and every step that ran (`ok`, `ms`, and
   `actual` for expects). `batch` results now carry `ms` per step.
 
-### Fixed
-- **`tabs --browser <x>` no longer picks the first of several matches.** A
-  selector naming two browsers (two Edge profiles without labels, say) is
-  refused with both listed, the same as `bridge use`.
-
 ### Changed
 - `click`, `fill`, `select`, `upload`, `box`, `is` with a missing or empty
   target now say `click: target is empty — pass an @ref or selector (unset
@@ -137,8 +128,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   every browser seen. `ghax bridge use` still picks one by hand (it refuses
   a selector that matches more than one instance and lists them, instead of
   taking the first), and a hello
-  after a bind still parks. Breaking: two browsers without `--browser` no
-  longer bind silently. `/bridge-status` gains a `selection` field.
+  after a bind still parks. `/bridge-status` gains a `selection` field.
   Daemon registry entries are written via temp file + rename; an unreadable
   entry whose pid is alive blocks adoption instead of being ignored.
   `GHAX_GLOBAL=1` disables daemon discovery like `GHAX_STATE_FILE`, and
@@ -173,6 +163,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   add `profile`, `alias` and `brandVersion`; `bridge use` accepts an alias.
   Design: `docs/design/plan/11-multi-browser.md` (phase 2).
 
+### Fixed
+- **`tabs --browser <x>` no longer picks the first of several matches.** A
+  selector naming two browsers (two Edge profiles without labels, say) is
+  refused with both listed, the same as `bridge use`.
+
 ### Breaking
 - **Bridge tab ids are strings.** `ghax tabs`, `find`, `tab`, `new-window`,
   `status.activeTabId` and `bridge control`'s `tabId` now carry
@@ -180,6 +175,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   number is in `chromeTabId`. `bridge instances` and `/bridge-status`
   `controlledTabId` stay numeric. Plain `ghax tabs` output changed from one
   JSON object per line to the text layout above; use `--json` to parse.
+- **Two browsers no longer bind silently.** `attach --extension` without
+  `--browser` exits 2 with `BRIDGE_AMBIGUOUS` when more than one connected
+  browser answers, instead of binding the first hello. Pass `--browser` (or
+  `GHAX_BRIDGE_BROWSER=all`).
 
 ## [0.9.0] - 2026-09-27
 ### Added
