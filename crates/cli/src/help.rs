@@ -8,6 +8,13 @@ Connection:
   attach --extension [--control-active] [--browser <bind-filter>] [--pair[=code]]
                                   # drive your REAL session via the bridge ext;
                                   #   --pair requires a code typed into the popup
+                                  #   Waits GHAX_BRIDGE_SETTLE_MS (1500) after the
+                                  #   first browser connects, then binds only if
+                                  #   exactly one matches --browser. More than one
+                                  #   exits 2 with BRIDGE_AMBIGUOUS. None matching keeps
+                                  #   waiting for one to connect, then exits 2 with
+                                  #   BRIDGE_NO_CANDIDATE at the attach timeout.
+                                  #   Both list each browser seen.
          [--headless] [--load-extension <path>] [--data-dir <path>]
          [--capture-bodies[=<url-glob>]] [--verbose]
          # Without --port, scans :9222-9230. Multiple running → picker.
@@ -23,7 +30,8 @@ Connection:
   restart
 
 Bridge (after attach --extension):
-  bridge control [--active | --tab-id <n> | --stop]  # point the bridge at a tab
+  bridge control [--active | --tab-id <#n|id> | --stop]
+                                      # point the bridge at a tab (same ids as 'tab')
   bridge instances                    # connected browsers, bound + parked
   bridge use <instance-id|browser|label>
                                       # bind a different browser
@@ -33,23 +41,42 @@ Bridge (after attach --extension):
 
 Tab:
   tabs [--browser <id|edge|chrome|label>]
+                                  # one line per tab:
+                                  #   #n  id  "title"  Browser · Profile  controlledBy=…
+                                  # bridge ids are <brand>-<profile>:<chrome tab id>,
+                                  #   e.g. edge-work:42 (profile = popup "Profile name")
                                   # bridge: --browser lists another connected
                                   #   browser's tabs without taking it over
-  tab <id> [--quiet]              # --quiet = don't bringToFront
+                                  # --browser all daemon: every bound browser,
+                                  #   numbered #1..N; a silent one is a `note:` row
+  tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
+                                  #   n alone only if exactly one tab has that
+                                  #   chrome tab id. --quiet = don't bringToFront
+                                  #   a tab in another bound browser makes it active
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
-  eval <js>                       # auto-retries once past a nav-in-flight
+  eval <js> [--timeout <ms>] [--no-wait]
+                                  # auto-retries once past a nav-in-flight
                                   #   awaits Promises/async IIFEs automatically
+                                  #   --timeout: per-call deadline (bridge default 30 s)
+                                  #   --no-wait: run on a 0 ms timer, return at once
+                                  #     ({ok,dispatched}); errors go to `ghax console`
   try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
-  screenshot [<@ref|selector>] [--path <p>] [--full-page]
+  screenshot [<@ref|selector>] [--path <p>] [--full-page] [--path-only]
+                                  # --path-only prints just the file path
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
            [--max-refs <n>] [--max-chars <n>] [--no-cap]
+           [--grep <regex> [--context <N>]]
+                                  # print only matching lines, their ancestors, and
+                                  #   N lines after each; applied before the cap.
+                                  #   Refs still all resolve. Use --grep=<re> for
+                                  #   a pattern that starts with a dash.
                                   # prints at most 250 refs / 32 KB by default and
                                   #   ends with "… N more refs omitted"; every ref
                                   #   stays clickable. --max-refs 0 = --no-cap.
@@ -82,11 +109,17 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
+  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps] [--tab <#n|id>] [--all]
+         # bridge mode: the active tab only; --tab <#n|id> picks another tab,
+         #   --all lifts the filter (every tab of every bound browser);
+         #   no active tab is an error, not an empty list. --last N counts
+         #   the selected tab's entries. --follow is NOT tab-filtered yet:
+         #   it streams every bound browser's entries
          # --since filters to entries newer than the epoch-ms timestamp
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
-  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
+  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>] [--tab <#n|id>] [--all]
+         # bridge mode: same tab scoping as console (and --follow caveat)
   cookies [--domain <d>] [--url <u>] [--all] [--values] [--has <name>]
          # Default: cookies applicable to the active tab's URL only
          #   (Playwright's own domain/path/secure applicability match).
@@ -97,6 +130,25 @@ Logs:
          #   the active tab.
          # --has <name> exits 0 if a cookie with that name is in scope,
          #   1 otherwise — scripting primitive for "did login land?".
+  cookies delete <name> [--domain <d>] [--url <u>] [--path <p>]
+         # Works on CDP and over the bridge. Deletes exactly one cookie:
+         #   scope is the active tab (or --all/--domain/--url); if the name
+         #   matches more than one domain/path it refuses and lists them
+         #   (name, domain, path; never values). --domain must equal the
+         #   cookie's domain, --path must equal its path.
+  auth export --out <path> --domain <d>[,<d>...] [--origin <url>...] [--force]
+         # Writes a Playwright storageState file (newContext({storageState}))
+         #   from the attached browser. Works on CDP and over the bridge.
+         # --domain is required: cookies whose domain equals a listed domain
+         #   or is a subdomain of it (list example.com to get .example.com).
+         # --origin adds that origin's localStorage, read from a tab already
+         #   open there (bridge: the controlled tab). Never navigates.
+         # The file is created 0600 and never printed. Refuses an existing
+         #   file without --force, a symlink, and an un-gitignored path in a
+         #   git work tree. Prints counts, path and earliest expiry only
+         #   (and the file mode on POSIX; Windows has none).
+         # --domain matches literally, public suffixes included: co.uk or
+         #   github.io would export every site under them. Name the site.
 
 Extensions (MV3):
   ext list
@@ -113,7 +165,8 @@ Extensions (MV3):
 Real user gestures:
   gesture click <x,y>
   gesture dblclick <x,y>
-  gesture scroll <up|down|left|right> [amount]
+  gesture scroll <up|down|left|right> [amount] [--on <@ref|selector>]
+                                  # --on aims the wheel at that element (scrolled into view)
   gesture key <key>
 
 Batch / recording:
@@ -124,6 +177,20 @@ Batch / recording:
   record stop
   record status
   replay <file>
+  (chain, batch and replay take --report <path>: JSON of every step's ok/ms/actual)
+
+Checks (poll until true or --timeout ms, default 5000; exit 1 when one fails):
+  expect --url <regex> | --title <regex>
+  expect --text <substring> [--selector <css>]
+  expect --visible <@ref|css> | --hidden <@ref|css>
+  expect --count <css> (--n N | --min N [--max N])
+  expect --value <@ref|css> --expected <text>
+  expect --eval <js>                (must be truthy)
+  expect ... [--timeout <ms>] [--report <path>]
+  As a plan step: {"cmd":"expect","opts":{"url":"dashboard","timeout":3000}}.
+  The first failed expect ends the plan, even with stopOnError off.
+  Exit codes: 0 ok, 1 usage error or failed expect, 2 not attached, 4 error
+  (including an expect that could not run, code EXPECT_ERROR: bridge gone, probe hung).
 
 Orchestrated:
   qa --url <u> [--url <u> ...] [--urls a,b,c]
@@ -149,6 +216,10 @@ Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
   0 = none); verbs with their own --timeout get that plus 30 s; batch gets
   120 s per step.
 Put -- before a value that starts with a dash (ghax eval -- '--i').
+No daemon for this directory? If exactly one ghax daemon is running anywhere
+  (registered in ~/.ghax/daemons/), commands use it and say so on stderr. More
+  than one: the error lists each with the GHAX_STATE_FILE to set. attach never
+  reuses another directory's daemon.
 Add --trace to any command for a one-line CDP call summary on stderr
   (count, time, heaviest methods). stdout is unchanged.
 "#;

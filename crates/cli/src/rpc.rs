@@ -141,8 +141,20 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
     Some(match cmd {
         // A whole plan: the ordinary budget per step, capped.
         "batch" => {
-            let steps = args.get(0).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(1).max(1);
-            Duration::from_secs((DEFAULT_RPC_TIMEOUT_SECS * steps as u64).min(BATCH_CAP_SECS))
+            let list = args.get(0).and_then(|v| v.as_array());
+            let steps = list.map(|a| a.len()).unwrap_or(1).max(1);
+            // An expect step polls for its own --timeout (default 5 s), on top
+            // of the per-step budget.
+            let polling: u64 = list
+                .map(|a| {
+                    a.iter()
+                        .filter(|s| s.get("cmd").and_then(|c| c.as_str()) == Some("expect"))
+                        .map(|s| num(s.get("opts").and_then(|o| o.get("timeout"))).unwrap_or(5000))
+                        .sum::<u64>()
+                        / 1000
+                })
+                .unwrap_or(0);
+            Duration::from_secs((DEFAULT_RPC_TIMEOUT_SECS * steps as u64 + polling).min(BATCH_CAP_SECS))
         }
         // perf --wait <ms>
         "perf" => base + Duration::from_millis(num(opts.get("wait")).unwrap_or(0)),
@@ -385,6 +397,10 @@ mod tests {
         // Own --timeout wins, with a margin.
         let own = json!({ "timeout": "600000" });
         assert_eq!(t("wait", &no_args, &own, None), Some(Duration::from_secs(630)));
+        // eval --timeout grows the CLI's budget too, so the daemon's answer wins.
+        let eval_own = json!({ "timeout": "90000" });
+        assert_eq!(t("eval", &json!(["x"]), &eval_own, None), Some(Duration::from_secs(120)));
+        assert_eq!(t("eval", &json!(["x"]), &eval_own, Some("5")), Some(Duration::from_secs(120)));
         let own_ms = json!({ "timeoutMs": 45000 });
         assert_eq!(t("bridge.reload", &no_args, &own_ms, Some("1")), Some(Duration::from_secs(75)));
         // Formerly unbounded verbs are bounded, and GHAX_RPC_TIMEOUT caps them.
@@ -393,6 +409,9 @@ mod tests {
         let many = json!([vec![json!({ "cmd": "a" }); 100]]);
         assert_eq!(t("batch", &many, &none, None), Some(Duration::from_secs(1800)));
         assert_eq!(t("batch", &three, &none, Some("10")), Some(Duration::from_secs(10)));
+        // An expect step's own polling window is added to the batch budget.
+        let with_expect = json!([[{ "cmd": "goto" }, { "cmd": "expect", "opts": { "timeout": 60000 } }, { "cmd": "expect" }]]);
+        assert_eq!(t("batch", &with_expect, &none, None), Some(Duration::from_secs(360 + 65)));
         assert_eq!(t("perf", &no_args, &json!({ "wait": "5000" }), None), Some(Duration::from_secs(125)));
         assert_eq!(t("profile", &no_args, &json!({ "duration": "30" }), None), Some(Duration::from_secs(630)));
         assert_eq!(t("ext.hot-reload", &no_args, &none, None), Some(Duration::from_secs(125)));

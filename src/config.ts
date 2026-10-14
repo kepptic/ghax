@@ -135,3 +135,54 @@ export function isProcessAlive(pid: number): boolean {
     return false;
   }
 }
+
+/**
+ * Daemon registry (plan 11, phase 1): one file per live daemon under
+ * `~/.ghax/daemons/<pid>.json`, so a CLI whose cwd resolves to a different
+ * state file can still find the daemon an agent attached from elsewhere.
+ * The daemon writes its entry once it's listening and removes it on exit;
+ * readers (crates/cli/src/state.rs) drop entries whose pid is dead, which
+ * covers SIGKILL. `GHAX_DAEMON_REGISTRY` moves the directory (tests).
+ */
+export interface DaemonRegistryEntry {
+  pid: number;
+  port: number;
+  stateFile: string;
+  cwd: string;
+  browserKind: string;
+  bridgePort: number | null;
+  startedAt: string;
+}
+
+export function daemonRegistryDir(env: Record<string, string | undefined> = process.env): string {
+  return env.GHAX_DAEMON_REGISTRY || path.join(os.homedir(), '.ghax', 'daemons');
+}
+
+export function registerDaemon(
+  entry: DaemonRegistryEntry,
+  dir: string = daemonRegistryDir(),
+  // Injectable so a test can observe where the bytes land first.
+  writeFile: (f: string, data: string, opts: fs.WriteFileOptions) => void = fs.writeFileSync,
+): string {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${entry.pid}.json`);
+  // Write beside the target and rename: readers (state.rs) must never see a
+  // half-written entry, and the temp name is not `.json` so they skip it.
+  const tmp = path.join(dir, `.${entry.pid}.json.${process.pid}.${Date.now()}.tmp`);
+  try {
+    writeFile(tmp, JSON.stringify(entry, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* never created */ }
+    throw err;
+  }
+  return file;
+}
+
+export function unregisterDaemon(file: string): void {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // Already gone (a reader pruned it, or the home dir moved) — nothing to undo.
+  }
+}

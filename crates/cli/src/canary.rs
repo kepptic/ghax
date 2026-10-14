@@ -20,7 +20,7 @@ use crate::args::Parsed;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_OK, EXIT_USAGE};
 use crate::qa_common;
 use crate::rpc;
-use crate::state;
+use crate::state::{self, Config};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -73,7 +73,7 @@ fn hostname_of(url: &str) -> String {
 
 // ── Main entry point ───────────────────────────────────────────────────────
 
-pub fn cmd_canary(parsed: &Parsed) -> Result<i32> {
+pub fn cmd_canary(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     let url = match parsed.positional.first() {
         Some(u) => u.clone(),
         None => {
@@ -94,8 +94,7 @@ pub fn cmd_canary(parsed: &Parsed) -> Result<i32> {
     let fail_fast = matches!(parsed.flags.get("fail-fast"), Some(Value::Bool(true)));
 
     // ── Daemon ──
-    let cfg = state::resolve_config();
-    let port = state::require_daemon(&cfg)?;
+    let port = state::require_daemon(cfg)?;
 
     // ── Log file path ──
     let log_path = {

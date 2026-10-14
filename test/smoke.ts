@@ -4,6 +4,8 @@
  *
  * Requirements:
  *   - A Chromium-family browser on --remote-debugging-port=9222
+ *     (or set GHAX_SMOKE_PORT=<port> to pin every attach to that port
+ *     instead of auto-scanning 9222-9230)
  *   - `npm run build` has been run so dist/ghax + dist/ghax-daemon.mjs exist
  *
  * Run:
@@ -31,6 +33,13 @@ import type { AddressInfo } from 'net';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const ghax = process.env.GHAX_BIN ?? path.join(root, 'dist', 'ghax');
+
+// Unset: bare `attach` auto-scans 9222-9230 (default behaviour). Set: every
+// attach the suite runs is pinned to this port, so it can't grab another
+// agent's browser that happens to sit on a lower port.
+const smokePort = process.env.GHAX_SMOKE_PORT;
+const attachArgs = (...extra: string[]): string[] =>
+  smokePort ? ['attach', '--port', smokePort, ...extra] : ['attach', ...extra];
 
 if (!fs.existsSync(ghax)) {
   fail(`${ghax} missing — run 'bun run build' first (or set GHAX_BIN to the correct binary path)`);
@@ -63,7 +72,11 @@ async function run(args: string[], opts: { stdin?: string; allowFailure?: boolea
   return res;
 }
 
+// fail() normally exits on the spot. The runner flips this on under
+// GHAX_SMOKE_CONTINUE=1 so a failed check throws and the loop can go on.
+let throwOnFail = false;
 function fail(msg: string): never {
+  if (throwOnFail) throw new Error(msg);
   console.error(`\n✗ ${msg}`);
   process.exit(1);
 }
@@ -102,6 +115,12 @@ async function snapRef(role: string, name?: string, extra: string[] = []): Promi
   return refOf(snap.stdout, role, name);
 }
 
+// example.com dropped its <h1> and its link (2026-10): the body is now one
+// <p> and only document.title says "Example Domain". Checks that need an
+// h1 or a clickable link use these hermetic data: pages instead.
+const H1_PAGE = `data:text/html,${encodeURIComponent('<!doctype html><title>Example Domain</title><h1>Example Domain</h1><p>fixture</p>')}`;
+const LINK_PAGE = `data:text/html,${encodeURIComponent('<!doctype html><title>Link Fixture</title><h1>Example Domain</h1><a href="#next" onclick="document.title=\'clicked\'">next</a>')}`;
+
 const checks: Array<{ name: string; fn: () => Promise<void> }> = [];
 const c = (name: string, fn: () => Promise<void>) => checks.push({ name, fn });
 
@@ -116,7 +135,7 @@ c('attach resolves daemon bundle from outside the project', async () => {
   spawnSync(ghax, ['detach'], { stdio: 'ignore' });
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.GHAX_DAEMON_BUNDLE;
-  const proc = spawn(ghax, ['attach'], { cwd: '/tmp', env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(ghax, attachArgs(), { cwd: '/tmp', env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   proc.stdout!.on('data', (c: Buffer) => { stdout += c.toString(); });
   proc.stderr!.on('data', (c: Buffer) => { stderr += c.toString(); });
@@ -132,7 +151,7 @@ c('attach resolves daemon bundle from outside the project', async () => {
 });
 
 c('attach is idempotent (first call attaches)', async () => {
-  const r = await run(['attach']);
+  const r = await run(attachArgs());
   // POSIX convention: fresh attach is silent on success (since TOK-07).
   // The idempotent re-attach still prints `already attached` because
   // that's informational — you asked to attach, we didn't.
@@ -143,7 +162,7 @@ c('attach is idempotent (first call attaches)', async () => {
 });
 
 c('attach is idempotent (second call reuses)', async () => {
-  const r = await run(['attach']);
+  const r = await run(attachArgs());
   assert(/already attached/.test(r.stdout), `second attach should reuse: ${r.stdout}`);
 });
 
@@ -153,7 +172,7 @@ c('daemon persists after a successful-looking attach (BUG 2026-06-06)', async ()
   // right after the health check passed. Lock in that a fresh attach is still
   // healthy a beat later — a genuine detach → attach → wait → status cycle.
   await run(['detach']);
-  await run(['attach']);
+  await run(attachArgs());
   await new Promise((r) => setTimeout(r, 1500));
   const r = await run(['status', '--json']);
   const s = parseJson<Record<string, unknown>>(r.stdout);
@@ -178,7 +197,7 @@ c('daemon survives parent process-group teardown (setsid detach)', async () => {
   const stateFile = `/tmp/ghax-smoke-setsid-${process.pid}.json`;
   const env: NodeJS.ProcessEnv = { ...process.env, GHAX_STATE_FILE: stateFile };
   try {
-    const proc = spawn(ghax, ['attach', '--port', '9222'], {
+    const proc = spawn(ghax, ['attach', '--port', smokePort ?? '9222'], {
       env,
       detached: true, // child becomes a new session/group leader: pgid === pid
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -308,6 +327,36 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('tabs rows carry index, browser and profile (CDP)', async () => {
+  const r = await run(['tabs', '--json']);
+  const tabs = parseJson<Array<{ index: number; id: string; chromeTabId: unknown; browser: string; profile: string; windowId: unknown }>>(r.stdout);
+  tabs.forEach((t, i) => {
+    assert(t.index === i + 1, `row ${i} should have index ${i + 1}, got ${t.index}`);
+    assert(typeof t.browser === 'string' && t.browser.length > 0, `browser missing: ${JSON.stringify(t)}`);
+    // CDP has no profile name and no chrome tab id; the id is the target id.
+    assert(t.profile === '—', `CDP profile should be '—', got ${t.profile}`);
+    assert(t.chromeTabId === null && t.windowId === null, `CDP rows: ${JSON.stringify(t)}`);
+  });
+  const text = (await run(['tabs'])).stdout.split('\n')[0];
+  assert(/^#1  \S+  ".*"  \S+ · —/.test(text), `tabs text line should be '#1  <id>  "<title>"  <Browser> · —', got: ${text}`);
+});
+
+c('tab #1 switches to row 1 of the last tabs listing; a bad #n refuses', async () => {
+  const tabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const before = tabs.find((t) => t.active)?.id;
+  try {
+    const r = await run(['tab', '#1', '--quiet', '--json']);
+    const t = parseJson<{ id: string; index: number }>(r.stdout);
+    assert(t.id === tabs[0].id && t.index === 1, `tab #1 should be ${tabs[0].id}, got ${JSON.stringify(t)}`);
+    const bad = await run(['tab', `#${tabs.length + 50}`], { allowFailure: true });
+    assert(bad.exitCode !== 0 && /no #\d+/.test(bad.stderr + bad.stdout), `out-of-range #n should refuse: ${bad.stderr || bad.stdout}`);
+    const bare = await run(['tab', '987654'], { allowFailure: true });
+    assert(bare.exitCode !== 0 && /No tab with id 987654/.test(bare.stderr + bare.stdout), `unknown id should refuse: ${bare.stderr || bare.stdout}`);
+  } finally {
+    if (before) await run(['tab', before, '--quiet'], { allowFailure: true });
+  }
+});
+
 c('wait --stable reports a settled page as stable', async () => {
   await run(['goto', 'https://example.com']);
   const r = await run(['wait', '--stable', '--json']);
@@ -394,10 +443,13 @@ c('goto example.com lands on example.com', async () => {
 
 c('text returns page body', async () => {
   const r = await run(['text']);
-  assert(/Example Domain/i.test(r.stdout), 'text should contain "Example Domain"');
+  assert(/documentation examples/i.test(r.stdout), `text should contain "documentation examples", got: ${r.stdout.slice(0, 120)}`);
+  const title = await run(['eval', 'document.title']);
+  assert(title.stdout.trim() === 'Example Domain', `document.title: ${title.stdout}`);
 });
 
 c('text --selector scopes to one element', async () => {
+  await run(['goto', H1_PAGE]);
   const r = await run(['text', '--selector', 'h1']);
   assert(/^\s*Example Domain\s*$/i.test(r.stdout), `expected only h1 text, got: ${r.stdout}`);
 });
@@ -416,11 +468,13 @@ c('text --skip skips leading chars', async () => {
 });
 
 c('html <selector> returns innerHTML', async () => {
+  await run(['goto', H1_PAGE]);
   const r = await run(['html', 'h1']);
   assert(/Example Domain/i.test(r.stdout), 'h1 innerHTML should include "Example Domain"');
 });
 
 c('snapshot -i produces @e refs', async () => {
+  await run(['goto', LINK_PAGE]);
   const r = await run(['snapshot', '-i']);
   assert(/@e\d+/.test(r.stdout), `snapshot didn't produce @e refs: ${r.stdout.slice(0, 200)}`);
 });
@@ -464,6 +518,7 @@ c('snapshot -C overrides --compact to force the cursor pass', async () => {
 
 c('snapshot -a writes annotated PNG', async () => {
   const outPath = `/tmp/ghax-smoke-anno-${Date.now()}.png`;
+  await run(['goto', LINK_PAGE]);
   const r = await run(['snapshot', '-i', '-a', '-o', outPath]);
   assert(fs.existsSync(outPath), `annotated PNG missing: ${outPath}`);
   const size = fs.statSync(outPath).size;
@@ -560,12 +615,13 @@ c('snapshot cursor scan pierces open shadow DOM', async () => {
 c('click @e<n> resolves against the last snapshot', async () => {
   // Need a fresh snapshot because viewport/responsive don't touch refs,
   // but click resolves the last ref map regardless of subsequent commands.
-  // example.com has one link.
+  await run(['goto', LINK_PAGE]);
   const link = await snapRef('link');
   await run(['click', link]);
-  // After clicking the link, URL should have changed from example.com home.
-  const r = await run(['eval', 'location.href']);
-  assert(r.stdout.trim() !== 'https://example.com/', `click @e1 should navigate away: ${r.stdout}`);
+  // The fixture link's onclick sets document.title (a #hash jump is not
+  // reliable on a data: URL).
+  const r = await run(['eval', 'document.title']);
+  assert(r.stdout.trim() === 'clicked', `click on the link should run its onclick: ${r.stdout}`);
 });
 
 c('click reports dialogDismissed when a modal closes', async () => {
@@ -792,7 +848,7 @@ c('batch runs a step sequence in one round-trip', async () => {
   assert(results.length === 3, `expected 3 results, got ${results.length}`);
   assert(results.every((s) => s.ok), `batch had failures: ${JSON.stringify(results)}`);
   const textStep = results[2];
-  assert(typeof textStep.data === 'string' && (textStep.data as string).toLowerCase().includes('example'),
+  assert(typeof textStep.data === 'string' && (textStep.data as string).toLowerCase().includes('documentation examples'),
     `expected example.com text, got ${JSON.stringify(textStep.data).slice(0, 100)}`);
 });
 
@@ -942,6 +998,24 @@ c('network --last returns entries', async () => {
   }
 });
 
+c('console/network output is unfiltered in CDP mode (tab scoping is bridge-only)', async () => {
+  // Multi-bind scopes bridge-mode logs to the active tab. CDP mode has one
+  // buffer for one browser: default, --all and a stray --tab must all agree.
+  const tag = `ghax-smoke-scope-${Date.now().toString(36)}`;
+  await run(['eval', `console.log(${JSON.stringify(tag)})`]);
+  await run(['wait', '200']);
+  const texts = async (extra: string[]) => {
+    const r = await run(['console', '--last', '500', '--json', ...extra]);
+    return parseJson<Array<{ text: string }>>(r.stdout).map((e) => e.text);
+  };
+  const plain = await texts([]);
+  assert(plain.includes(tag), 'default console output should include the marker');
+  assert(JSON.stringify(await texts(['--all'])) === JSON.stringify(plain), '--all must not change CDP console output');
+  assert(JSON.stringify(await texts(['--tab', '#1'])) === JSON.stringify(plain), '--tab must not filter CDP console output');
+  const net = async (extra: string[]) => parseJson<unknown[]>((await run(['network', '--last', '500', '--json', ...extra])).stdout).length;
+  assert((await net(['--all'])) === (await net([])), '--all must not change CDP network output');
+});
+
 c('cookies --json returns an array', async () => {
   const r = await run(['cookies', '--json']);
   const cookies = parseJson<unknown[]>(r.stdout);
@@ -1086,7 +1160,7 @@ c('gesture dblclick dispatches double press/release', async () => {
 });
 
 c('xpath query returns matches with text + tag + box', async () => {
-  await run(['goto', 'https://example.com']);
+  await run(['goto', H1_PAGE]);
   await run(['wait', '200']);
   const r = await run(['xpath', '//h1', '--json']);
   const data = parseJson<{
@@ -1101,7 +1175,7 @@ c('xpath query returns matches with text + tag + box', async () => {
 });
 
 c('box returns {x, y, width, height} for a selector', async () => {
-  await run(['goto', 'https://example.com']);
+  await run(['goto', H1_PAGE]);
   await run(['wait', '200']);
   const r = await run(['box', 'h1', '--json']);
   const box = parseJson<{ x: number; y: number; width: number; height: number }>(r.stdout);
@@ -1110,20 +1184,84 @@ c('box returns {x, y, width, height} for a selector', async () => {
 });
 
 c('box also resolves @e<n> refs from the last snapshot', async () => {
-  await run(['goto', 'https://example.com']);
+  await run(['goto', LINK_PAGE]);
   const r = await run(['box', await snapRef('link'), '--json']);
   const box = parseJson<{ width: number }>(r.stdout);
   assert(box.width > 0, 'ref box missing width');
 });
 
 c('is <check> asserts element state', async () => {
-  await run(['goto', 'https://example.com']);
+  await run(['goto', LINK_PAGE]);
   const r = await run(['is', 'visible', await snapRef('link'), '--json']);
   const data = parseJson<{ check: string; target: string; result: boolean }>(r.stdout);
   assert(data.check === 'visible' && data.result === true, `is visible <link ref> → ${JSON.stringify(data)}`);
 });
 
+c('cookies delete removes exactly one cookie and refuses ambiguity', async () => {
+  await run(['goto', 'https://example.com']);
+  const name = `ghax_smoke_del_${Date.now()}`;
+  await run(['eval', `document.cookie = '${name}=SECRETv1zz; path=/'; document.cookie = '${name}=SECRETv2zz; path=/ghaxsub'`]);
+  // Same name on two paths, only "/" applies to the tab URL; ask for the whole profile to see both.
+  const amb = await run(['cookies', 'delete', name, '--all'], { allowFailure: true });
+  assert(amb.exitCode !== 0, 'ambiguous delete should fail');
+  assert(/matches 2 cookies/.test(amb.stderr + amb.stdout), `expected refusal, got: ${amb.stderr}${amb.stdout}`);
+  assert(!/SECRETv/.test(amb.stderr + amb.stdout), 'refusal must not print values');
+  const del = await run(['cookies', 'delete', name, '--all', '--path', '/', '--json']);
+  const out = parseJson<{ deleted: Array<{ name: string; path: string }> }>(del.stdout);
+  assert(out.deleted.length === 1 && out.deleted[0].path === '/', `unexpected delete report: ${del.stdout}`);
+  const left = parseJson<Array<{ name: string; path: string }>>((await run(['cookies', '--all', '--json'])).stdout)
+    .filter((cc) => cc.name === name);
+  assert(left.length === 1 && left[0].path === '/ghaxsub', `expected only the /ghaxsub cookie left, got ${JSON.stringify(left)}`);
+  await run(['cookies', 'delete', name, '--all']);
+});
+
+c('auth export writes a 0600 storageState that Playwright loads', async () => {
+  await run(['goto', 'https://example.com']); // storage is disabled on data: URLs
+  const name = `ghax_smoke_auth_${Date.now()}`;
+  const raw = `SECRETauth${Date.now()}`;
+  await run(['eval', `document.cookie = '${name}=${raw}; path=/; max-age=3600'; localStorage.setItem('${name}', '${raw}')`]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-smoke-auth-'));
+  const out = path.join(dir, 'state.json');
+  const exportArgs = ['auth', 'export', '--out', out, '--domain', 'example.com', '--origin', 'https://example.com', '--json'];
+  try {
+    const r = await run(exportArgs);
+    assert(!(r.stdout + r.stderr).includes(raw), 'auth export printed a value');
+    const meta = parseJson<{ path: string; cookiesByDomain: Record<string, number>; origins: number; localStorageKeys: number }>(r.stdout);
+    assert(meta.cookiesByDomain['example.com'] >= 1 && meta.origins === 1 && meta.localStorageKeys >= 1, `unexpected report: ${r.stdout}`);
+    assert((fs.statSync(out).mode & 0o777) === 0o600, `mode ${(fs.statSync(out).mode & 0o777).toString(8)}, want 600`);
+
+    const again = await run(exportArgs, { allowFailure: true });
+    assert(again.exitCode !== 0 && /already exists/.test(again.stderr), `existing file without --force should refuse: ${again.stderr}`);
+    await run([...exportArgs, '--force']);
+    const noDomain = await run(['auth', 'export', '--out', path.join(dir, 'x.json')], { allowFailure: true });
+    assert(noDomain.exitCode !== 0 && !fs.existsSync(path.join(dir, 'x.json')), 'missing --domain should refuse');
+
+    // The point of the verb: a fresh headless browser runs as the exported session.
+    const { chromium } = await import('playwright');
+    let browser: import('playwright').Browser | null = null;
+    for (const channel of ['chrome', 'msedge', undefined]) {
+      try { browser = await chromium.launch({ channel, headless: true }); break; } catch { /* try the next channel */ }
+    }
+    assert(browser, 'no Chromium for chromium.launch (tried chrome, msedge, bundled)');
+    try {
+      const context = await browser!.newContext({ storageState: out });
+      const got = (await context.cookies('https://example.com')).find((cc) => cc.name === name);
+      assert(got && got.value === raw, `cookie did not load from storageState: ${JSON.stringify(got ?? null).slice(0, 120)}`);
+      const st = await context.storageState();
+      const ls = st.origins.find((o) => o.origin === 'https://example.com')?.localStorage ?? [];
+      assert(ls.some((i) => i.name === name && i.value === raw), 'localStorage did not load from storageState');
+    } finally {
+      await browser!.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    await run(['cookies', 'delete', name, '--domain', 'example.com', '--path', '/'], { allowFailure: true });
+    await run(['storage', 'local', 'remove', name], { allowFailure: true });
+  }
+});
+
 c('storage local round-trips set/get/remove', async () => {
+  await run(['goto', 'https://example.com']); // storage is disabled on data: URLs
   const key = `ghax-smoke-${Date.now()}`;
   await run(['storage', 'local', 'set', key, 'hello']);
   const getRes = (await run(['storage', 'local', 'get', key])).stdout.trim();
@@ -1617,14 +1755,22 @@ c('attach --browser <kind> reports the kind-mismatch clearly', async () => {
   // final "detach" check at the bottom of the file does a full daemon
   // teardown — we reuse attach afterwards to restore state.
   await run(['detach'], { allowFailure: true });
-  const r = await run(['attach', '--browser', 'chromium'], { allowFailure: true });
-  const out = r.stderr + r.stdout;
-  assert(
-    /only .* on :\d+ running|--browser chromium requested/i.test(out),
-    `expected kind-mismatch error, got: ${out.slice(0, 300)}`,
-  );
-  // Re-attach so the rest of the suite can run (this test sits mid-suite).
-  await run(['attach']);
+  try {
+    const r = await run(attachArgs('--browser', 'chromium'), { allowFailure: true });
+    const out = r.stderr + r.stdout;
+    // With GHAX_SMOKE_PORT pinned, the filtered scan finds nothing on that
+    // port and the CLI prints the generic launch instructions instead.
+    assert(
+      /only .* on :\d+ running|--browser chromium requested/i.test(out) ||
+        (smokePort && /No running browser found on CDP port/.test(out)),
+      `expected kind-mismatch error, got: ${out.slice(0, 300)}`,
+    );
+    assert(r.exitCode !== 0, 'kind-mismatch attach should exit non-zero');
+  } finally {
+    // Always restore the attach so the rest of the suite can run, even if the
+    // assertion above failed (this test sits mid-suite).
+    await run(attachArgs());
+  }
 });
 
 c('back / forward / reload navigate history', async () => {
@@ -2032,7 +2178,7 @@ c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {
   assert(!!originalId && !!secondaryId && originalId !== secondaryId, 'need two distinct tab ids');
 
   // Land on a page with a stable locator, snapshot, grab @e1.
-  await run(['goto', 'https://example.com']);
+  await run(['goto', LINK_PAGE]);
   await run(['wait', '300']);
   const snap = await run(['snapshot', '-i']);
   const firstRef = snap.stdout.match(/@(e\d+)/)?.[1];
@@ -2164,7 +2310,7 @@ c('downloads land in --downloads-dir with the site-suggested name', async () => 
       proc.on('exit', (code) => resolve({ stdout, stderr, exitCode: code ?? 0 }));
     });
   try {
-    await runIso(['attach', '--downloads-dir', scratch]);
+    await runIso(attachArgs('--downloads-dir', scratch));
     await runIso(['new-window', 'about:blank']);
     // Hermetic: a blob download, no network.
     await runIso(['eval',
@@ -2230,6 +2376,157 @@ c('--trace prints a trace line on stderr and leaves stdout alone', async () => {
   assert(/^trace: /m.test(leading.stderr), `leading --trace ignored: ${leading.stderr}`);
 });
 
+// ─── expect ─────────────────────────────────────────────────────
+
+/** Serve a small page whose #late element appears 600 ms after load. */
+async function withExpectPage(fn: (base: string) => Promise<void>): Promise<void> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<!doctype html><title>Dash board</title><body>
+      <h1>Welcome back</h1>
+      <input id="name" value="ada">
+      <ul><li>a</li><li>b</li><li>c</li></ul>
+      <div id="gone" style="display:none">hidden thing</div>
+      <button id="go">Go</button>
+      <script>setTimeout(() => { const d = document.createElement('div'); d.id = 'late'; d.textContent = 'arrived'; document.body.append(d); }, 600);</script>
+    </body>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  try {
+    await fn(`http://127.0.0.1:${(server.address() as AddressInfo).port}/dashboard`);
+  } finally {
+    await new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); });
+  }
+}
+
+type ExpectOut = { ok: boolean; expect: string; actual: unknown; elapsedMs: number };
+
+c('expect: every kind passes on a matching page, exit 0', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const btn = await snapRef('button', 'Go');
+    const ok = async (args: string[]) => {
+      const r = await run(['expect', ...args, '--timeout', '2000']);
+      const out = parseJson<ExpectOut>(r.stdout);
+      assert(out.ok === true, `expect ${args.join(' ')} => ${r.stdout}`);
+      return out;
+    };
+    assert((await ok(['--url', '/dash.*$'])).actual === url, 'url actual is the page url');
+    await ok(['--title', '^Dash']);
+    await ok(['--text', 'Welcome back']);
+    await ok(['--text', 'Welcome', '--selector', 'h1']);
+    await ok(['--visible', '#name']);
+    await ok(['--visible', btn]);
+    await ok(['--hidden', '#gone']);
+    await ok(['--hidden', '#nope']);
+    assert((await ok(['--count', 'li', '--n', '3'])).actual === 3, 'count actual');
+    await ok(['--count', 'li', '--min', '2', '--max', '5']);
+    await ok(['--value', '#name', '--expected', 'ada']);
+    await ok(['--eval', 'document.querySelectorAll("li").length === 3']);
+  });
+});
+
+c('expect: a failing check exits 1 with {expect, actual, elapsedMs}; --timeout bounds the poll', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const started = Date.now();
+    const r = await run(['expect', '--text', 'Goodbye', '--timeout', '700'], { allowFailure: true });
+    const took = Date.now() - started;
+    assert(r.exitCode === 1, `failed expect must exit 1, got ${r.exitCode}: ${r.stderr}`);
+    const out = parseJson<ExpectOut>(r.stdout);
+    assert(out.ok === false && out.expect === 'text', `result: ${r.stdout}`);
+    assert(typeof out.actual === 'string' && (out.actual as string).includes('Welcome back'), `actual should show the page text: ${r.stdout}`);
+    assert(out.elapsedMs >= 600 && out.elapsedMs < 3000, `polled for ~700 ms, elapsedMs=${out.elapsedMs}`);
+    assert(took < 6000, `timeout not honoured: ${took} ms`);
+    const count = await run(['expect', '--count', 'li', '--n', '9', '--timeout', '0'], { allowFailure: true });
+    assert(count.exitCode === 1 && parseJson<ExpectOut>(count.stdout).actual === 3, `count failure: ${count.stdout}`);
+    const usage = await run(['expect', '--url', 'a', '--title', 'b'], { allowFailure: true });
+    assert(usage.exitCode === 1 && /one check per step/.test(usage.stderr), `two checks is a usage error: ${usage.stderr}`);
+  });
+});
+
+c('expect: polls until an element that appears late is there', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const r = await run(['expect', '--visible', '#late', '--timeout', '3000']);
+    const out = parseJson<ExpectOut>(r.stdout);
+    assert(out.ok && out.elapsedMs >= 200, `should have waited for #late, elapsedMs=${out.elapsedMs}`);
+    // With no budget the same check is a single look and fails.
+    await run(['goto', url]);
+    const now = await run(['expect', '--visible', '#late', '--timeout', '0'], { allowFailure: true });
+    assert(now.exitCode === 1, `timeout 0 is one look, got exit ${now.exitCode}`);
+  });
+});
+
+c('expect in batch: first failure stops the plan, exit 1, --report lists every step', async () => {
+  await withExpectPage(async (url) => {
+    const report = `/tmp/ghax-expect-report-${process.pid}.json`;
+    const plan = JSON.stringify([
+      { cmd: 'goto', args: [url] },
+      { cmd: 'expect', opts: { url: '/dashboard$', timeout: 2000 } },
+      { cmd: 'expect', opts: { text: 'Never on this page', timeout: 300 } },
+      { cmd: 'eval', args: ['window.__after = 1'] },
+    ]);
+    const r = await run(['batch', plan, '--report', report], { allowFailure: true });
+    assert(r.exitCode === 1, `batch with a failed expect must exit 1, got ${r.exitCode}: ${r.stdout}`);
+    const steps = parseJson<Array<{ cmd: string; ok: boolean; code?: string; step?: number; expect?: string; actual?: unknown; elapsedMs?: number }>>(r.stdout);
+    assert(steps.length === 3, `plan must stop at the failed expect, got ${steps.length} results`);
+    assert(steps[1].ok && steps[2].ok === false && steps[2].code === 'EXPECT_FAILED'
+      && steps[2].step === 2 && steps[2].expect === 'text' && typeof steps[2].elapsedMs === 'number'
+      && typeof steps[2].actual === 'string', `failed step: ${JSON.stringify(steps[2])}`);
+    const after = await run(['eval', 'String(window.__after)']);
+    assert(after.stdout.trim() === 'undefined', 'the step after the failed expect must not have run');
+    const rep = parseJson<{ ok: boolean; exit: number; steps: Array<{ cmd: string; ok: boolean; ms: number; actual?: unknown }> }>(
+      fs.readFileSync(report, 'utf8'));
+    assert(rep.ok === false && rep.exit === 1 && rep.steps.length === 3, `report: ${JSON.stringify(rep)}`);
+    assert(rep.steps.every((st) => typeof st.ms === 'number') && rep.steps[1].actual === url && rep.steps[2].ok === false, `report steps: ${JSON.stringify(rep.steps)}`);
+    fs.rmSync(report, { force: true });
+    // An unrelated step failure is still exit 4, not an assertion.
+    const broken = await run(['batch', JSON.stringify([{ cmd: 'no-such-verb' }])], { allowFailure: true });
+    assert(broken.exitCode === 4, `a non-expect failure keeps exit 4, got ${broken.exitCode}`);
+  });
+});
+
+c('expect: nested batch failure stops the outer plan; bare --report is a usage error', async () => {
+  await withExpectPage(async (url) => {
+    const plan = JSON.stringify([
+      { cmd: 'goto', args: [url] },
+      { cmd: 'batch', args: [[{ cmd: 'expect', opts: { text: 'Never on this page', timeout: 200 } }]] },
+      { cmd: 'eval', args: ['window.__after2 = 1'] },
+    ]);
+    const r = await run(['batch', plan], { allowFailure: true });
+    assert(r.exitCode === 1, `nested failed expect must exit 1, got ${r.exitCode}: ${r.stdout}`);
+    const steps = parseJson<Array<{ cmd: string; ok: boolean; code?: string }>>(r.stdout);
+    assert(steps.length === 2 && steps[1].cmd === 'batch' && steps[1].code === 'EXPECT_FAILED', `outer plan stops: ${r.stdout}`);
+    const after = await run(['eval', 'String(window.__after2)']);
+    assert(after.stdout.trim() === 'undefined', 'step after the nested failure must not have run');
+    const chain = await run(['chain'], { stdin: JSON.stringify([{ cmd: 'batch', args: [[{ cmd: 'expect', opts: { text: 'Never on this page', timeout: 200 } }]] }]), allowFailure: true });
+    assert(chain.exitCode === 1 && parseJson<Array<{ code?: string }>>(chain.stdout)[0].code === 'EXPECT_FAILED', `chain nested: ${chain.exitCode} ${chain.stdout}`);
+    for (const argv of [['expect', '--url', '.', '--report'], ['batch', '[]', '--report']]) {
+      const bare = await run(argv, { allowFailure: true });
+      assert(bare.exitCode === 1 && /--report needs a file path/.test(bare.stderr), `bare --report on ${argv[0]}: ${bare.exitCode} ${bare.stderr}`);
+    }
+  });
+});
+
+c('expect in chain and replay files: failure exits 1', async () => {
+  await withExpectPage(async (url) => {
+    const steps = [{ cmd: 'goto', args: [url] }, { cmd: 'expect', opts: { title: 'Nope', timeout: 200 } }, { cmd: 'text' }];
+    const chain = await run(['chain'], { stdin: JSON.stringify(steps), allowFailure: true });
+    assert(chain.exitCode === 1, `chain exit: ${chain.exitCode} ${chain.stdout}`);
+    const res = parseJson<Array<{ cmd: string; code?: string }>>(chain.stdout);
+    assert(res.length === 2 && res[1].code === 'EXPECT_FAILED', `chain stops at the failed expect: ${chain.stdout}`);
+    const file = `/tmp/ghax-expect-replay-${process.pid}.json`;
+    fs.writeFileSync(file, JSON.stringify({ steps }));
+    const replay = await run(['replay', file], { allowFailure: true });
+    assert(replay.exitCode === 1 && /✗ expect/.test(replay.stderr), `replay: ${replay.exitCode} ${replay.stderr}`);
+    fs.writeFileSync(file, JSON.stringify({ steps: [steps[0], { cmd: 'expect', opts: { title: 'Dash', timeout: 1000 } }] }));
+    const good = await run(['replay', file]);
+    assert(/✓ expect/.test(good.stdout), `passing replay: ${good.stdout}`);
+    fs.rmSync(file, { force: true });
+  });
+});
+
 c('GHAX_RPC_TIMEOUT bounds a call that never answers', async () => {
   const prev = process.env.GHAX_RPC_TIMEOUT;
   process.env.GHAX_RPC_TIMEOUT = '2';
@@ -2255,6 +2552,88 @@ c('-- ends flags, so --trace (or any dash value) can be passed literally (findin
   assert(lead.stdout.trim() === '3' && /^trace: /m.test(lead.stderr), `leading --trace with a terminator: ${lead.stdout} ${lead.stderr}`);
 });
 
+c('eval --timeout gives up on a never-settling promise with a clear error', async () => {
+  const started = Date.now();
+  const r = await run(['eval', 'new Promise(() => {})', '--timeout', '1500'], { allowFailure: true });
+  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
+  assert(/timed out after 1500ms/.test(r.stderr), `message: ${r.stderr}`);
+  assert(Date.now() - started < 10000, 'should give up near the --timeout, not the 120 s default');
+  const ok = await run(['eval', 'new Promise((r) => setTimeout(() => r(7), 200))', '--timeout', '5000']);
+  assert(ok.stdout.trim() === '7', `a slow-but-in-budget eval still returns: ${ok.stdout}`);
+  const bad = await run(['eval', '1', '--timeout', 'soon'], { allowFailure: true });
+  assert(bad.exitCode === 2 && /positive number/.test(bad.stderr), `bad --timeout: ${bad.exitCode} ${bad.stderr}`);
+  const bare = await run(['eval', '1', '--timeout'], { allowFailure: true });
+  assert(bare.exitCode === 2 && /positive number/.test(bare.stderr), `bare --timeout: ${bare.exitCode} ${bare.stderr}`);
+});
+
+c('eval --no-wait returns at once, runs later, and logs errors to the console', async () => {
+  await run(['goto', `data:text/html,${encodeURIComponent('<title>nowait</title><p>x</p>')}`]);
+  await run(['eval', 'window.__nw = 0; 1']);
+  // Flag before the code: the CLI must not read the code as the flag's value.
+  const r = await run(['eval', '--no-wait', 'window.__nw = 41 + 1', '--json']);
+  const data = parseJson<{ ok: boolean; dispatched: boolean }>(r.stdout);
+  assert(data.ok === true && data.dispatched === true, `no-wait result: ${r.stdout}`);
+  await run(['wait', '200']);
+  const v = await run(['eval', 'window.__nw']);
+  assert(v.stdout.trim() === '42', `the code ran on the timer: ${v.stdout}`);
+  await run(['eval', 'throw new Error("nowait-boom")', '--no-wait']);
+  await run(['wait', '200']);
+  const con = await run(['console', '--json']);
+  assert(/nowait-boom/.test(con.stdout), `the throw lands in the console buffer: ${con.stdout.slice(0, 300)}`);
+});
+
+c('gesture scroll --on aims the wheel at an element', async () => {
+  const html = '<body style="margin:0"><div id="box" style="position:absolute;left:300px;top:100px;width:200px;height:150px;overflow:auto"><div style="height:2000px">tall</div></div><div style="height:3000px"></div></body>';
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['gesture', 'scroll', 'down', '200', '--on', '#box', '--json']);
+  const data = parseJson<{ x: number; y: number; on: string }>(r.stdout);
+  assert(Math.abs(data.x - 400) < 2 && Math.abs(data.y - 175) < 2, `wheel aimed at the box centre: ${r.stdout}`);
+  await run(['wait', '200']);
+  const top = await run(['eval', 'document.getElementById("box").scrollTop']);
+  assert(Number(top.stdout.trim()) > 0, `the box scrolled, not the page: ${top.stdout}`);
+  const page = await run(['eval', 'window.scrollY']);
+  assert(Number(page.stdout.trim()) === 0, `the page did not scroll: ${page.stdout}`);
+  const miss = await run(['gesture', 'scroll', 'down', '--on', ''], { allowFailure: true });
+  assert(miss.exitCode === 2 && /target is empty/.test(miss.stderr), `empty --on: ${miss.exitCode} ${miss.stderr}`);
+});
+
+c('snapshot --grep keeps matches, their ancestors and --context lines', async () => {
+  const html = '<main><nav><a href="#a">Alpha link</a><a href="#b">Beta link</a></nav><section><h2>Reports</h2><button>Export</button><button>Print</button></section></main>';
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const all = await run(['snapshot', '-i']);
+  const g = await run(['snapshot', '-i', '--grep', 'Beta']);
+  assert(/Beta/.test(g.stdout) && !/Alpha/.test(g.stdout), `only Beta matches: ${g.stdout}`);
+  assert(g.stdout.trim().split('\n').length < all.stdout.trim().split('\n').length, 'grep output is shorter than the full tree');
+  const ctx = await run(['snapshot', '-i', '--grep=Export', '--context', '1']);
+  assert(/Export/.test(ctx.stdout) && /Print/.test(ctx.stdout), `--context 1 includes the next line: ${ctx.stdout}`);
+  // Refs from the full tree still resolve after a filtered print.
+  const ref = /@e\d+/.exec(g.stdout)?.[0];
+  assert(ref, `grep output has a ref: ${g.stdout}`);
+  await run(['box', ref]);
+  const none = await run(['snapshot', '-i', '--grep', 'zzz-no-such']);
+  assert(/no snapshot line matches/.test(none.stdout), `a miss says so: ${none.stdout}`);
+  const bad = await run(['snapshot', '--grep', '('], { allowFailure: true });
+  assert(bad.exitCode === 2 && /not a valid regex/.test(bad.stderr), `bad regex: ${bad.exitCode} ${bad.stderr}`);
+});
+
+c('screenshot --path-only prints just the path', async () => {
+  const out = path.join(os.tmpdir(), `ghax-pathonly-${Date.now()}.png`);
+  const r = await run(['screenshot', '--path-only', '--path', out]);
+  assert(r.stdout.trim() === out, `stdout is the bare path: ${JSON.stringify(r.stdout)}`);
+  assert(fs.existsSync(out), 'file written');
+  const r2 = await run(['screenshot', '--path', out, '--path-only']);
+  assert(r2.stdout.trim() === out, `flag order does not matter: ${JSON.stringify(r2.stdout)}`);
+  fs.unlinkSync(out);
+});
+
+c('an empty click/fill/select/upload target names the cause and exits 2', async () => {
+  for (const argv of [['click', ''], ['click'], ['fill', '', 'x'], ['select', ''], ['upload', '', '/tmp/x'], ['box', '']]) {
+    const r = await run(argv, { allowFailure: true });
+    assert(r.exitCode === 2, `${argv.join(' ')} should exit 2, got ${r.exitCode}: ${r.stderr}`);
+    assert(/target is empty — pass an @ref or selector \(unset shell variable\?\)/.test(r.stderr), `${argv.join(' ')}: ${r.stderr}`);
+  }
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);
@@ -2268,15 +2647,29 @@ c('detach shuts the daemon', async () => {
 (async () => {
   const start = Date.now();
   console.log(`ghax smoke — ${checks.length} checks\n`);
+  // Default: stop at the first failure. GHAX_SMOKE_CONTINUE=1 keeps going,
+  // then prints every failure and exits 1 if any check failed.
+  const keepGoing = process.env.GHAX_SMOKE_CONTINUE === '1';
+  throwOnFail = keepGoing;
   let passed = 0;
+  const failures: Array<{ name: string; msg: string }> = [];
   for (const { name, fn } of checks) {
     step(name);
     try {
       await fn();
       passed++;
     } catch (err: any) {
-      fail(`FAIL ${name}: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      if (!keepGoing) fail(`FAIL ${name}: ${msg}`);
+      console.error(`\n✗ FAIL ${name}: ${msg}\n`);
+      failures.push({ name, msg });
     }
   }
-  console.log(`\n✓ ${passed}/${checks.length} checks passed in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+  const secs = ((Date.now() - start) / 1000).toFixed(1);
+  if (failures.length > 0) {
+    console.error(`\n✗ ${passed}/${checks.length} checks passed, ${failures.length} failed in ${secs}s`);
+    for (const f of failures) console.error(`  - ${f.name}`);
+    process.exit(1);
+  }
+  console.log(`\n✓ ${passed}/${checks.length} checks passed in ${secs}s`);
 })();

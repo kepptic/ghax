@@ -17,7 +17,7 @@ use crate::rpc;
 use crate::state::{self, Config};
 
 const USAGE: &str = "Usage: ghax bridge <control|instances|use|reload|stats> [...]\n  \
-control [--active | --tab-id <n> | --stop]   point the bridge at a tab\n  \
+control [--active | --tab-id <#n|id> | --stop]   point the bridge at a tab\n  \
 instances                                    list connected browsers (bound + parked)\n  \
 use <instance-id|browser|label>              bind a different browser\n  \
 reload [--timeout <ms>] [--force]            reload the bridge extension (no click in edge://extensions)\n  \
@@ -67,7 +67,19 @@ fn cmd_bridge_instances(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     }
     for inst in instances {
         let role = inst.get("role").and_then(|v| v.as_str()).unwrap_or("?");
-        let marker = if role == "bound" { "*" } else { " " };
+        // `active` (daemon >= multi-bind) marks the one browser verbs act on;
+        // older daemons only report role, where bound means active.
+        let is_active = inst
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(role == "bound");
+        let marker = if is_active {
+            "*"
+        } else if role == "bound" {
+            "+"
+        } else {
+            " "
+        };
         let browser = inst.get("browser").and_then(|v| v.as_str()).unwrap_or("browser");
         let id = inst.get("instanceId").and_then(|v| v.as_str()).unwrap_or("");
         let short: String = id.chars().take(6).collect();
@@ -122,11 +134,13 @@ fn cmd_bridge_use(cfg: &Config, parsed: &Parsed) -> Result<i32> {
 
 fn cmd_bridge_control(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     let stop = matches!(parsed.flags.get("stop"), Some(Value::Bool(true)));
-    let tab_id: Option<i64> = parsed
+    // `#n`, a full `<alias>:<n>` id, or a bare chrome tab id. The daemon
+    // resolves it exactly like `ghax tab` and refuses anything ambiguous.
+    let tab_id: Option<String> = parsed
         .flags
         .get("tab-id")
         .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok());
+        .map(str::to_string);
 
     // Mode precedence: --stop, then --tab-id, then --active. With no target
     // flag we default to --active (the common "drive my current tab" case).

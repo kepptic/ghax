@@ -4,10 +4,12 @@
 
 mod args;
 mod attach;
+mod auth;
 mod bridge;
 mod canary;
 mod cookies;
 mod dispatch;
+mod expect;
 mod help;
 mod output;
 mod qa;
@@ -19,6 +21,7 @@ mod ship;
 mod small;
 mod sse;
 mod state;
+mod tabs;
 mod time_util;
 mod update;
 mod version;

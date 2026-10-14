@@ -14,9 +14,10 @@
 
 use crate::args;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_NOT_ATTACHED, EXIT_OK, EXIT_USAGE};
+use crate::expect::{failed_expect, failed_expect_entry, Report};
 use crate::output;
 use crate::rpc::{self, RpcError};
-use crate::state::{self, read_state};
+use crate::state::{self, read_state, Config};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -29,20 +30,19 @@ use std::io::Read as _;
 /// If not attached (no state or daemon unreachable) prints "not attached" and
 /// returns EXIT_NOT_ATTACHED.  Otherwise does RPC `status` and pretty-prints
 /// tabs / targets / extensions / uptime, or `--json` for the raw object.
-pub fn cmd_status(rest: &[String]) -> Result<i32> {
+pub fn cmd_status(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
-    let cfg = state::resolve_config();
-    let Some(daemon_state) = read_state(&cfg) else {
+    let Some(daemon_state) = read_state(cfg) else {
         println!("not attached");
-        print_daemon_log_hint(&cfg);
+        print_daemon_log_hint(cfg);
         return Ok(EXIT_NOT_ATTACHED);
     };
     // Health-check the daemon; treat failure as "not attached".
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(_) => {
             println!("not attached");
-            print_daemon_log_hint(&cfg);
+            print_daemon_log_hint(cfg);
             return Ok(EXIT_NOT_ATTACHED);
         }
     };
@@ -58,7 +58,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
             "browserKind": daemon_state.browser_kind,
             "attachedAt":  daemon_state.attached_at,
             "cwd":         daemon_state.cwd,
-            "daemonLog":   daemon_log_path(&cfg).display().to_string(),
+            "daemonLog":   daemon_log_path(cfg).display().to_string(),
         });
         if let (Some(m), Some(data_obj)) = (merged.as_object_mut(), data.as_object()) {
             for (k, v) in data_obj {
@@ -93,7 +93,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
         println!("targets     {}", data.get("targetCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("extensions  {}", data.get("extensionCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("cwd         {}", daemon_state.cwd);
-        println!("log         {}", daemon_log_path(&cfg).display());
+        println!("log         {}", daemon_log_path(cfg).display());
     }
     Ok(EXIT_OK)
 }
@@ -131,13 +131,12 @@ fn print_daemon_log_hint(cfg: &state::Config) {
 ///
 /// Only the `status` subcommand is shipped; the broader `pair` suite is
 /// deferred as noted in CLAUDE.md.
-pub fn cmd_pair(rest: &[String]) -> Result<i32> {
+pub fn cmd_pair(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let sub = parsed.positional.first().map(|s| s.as_str()).unwrap_or("status");
     match sub {
         "status" | "info" => {
-            let cfg = state::resolve_config();
-            let Some(daemon_state) = read_state(&cfg) else {
+            let Some(daemon_state) = read_state(cfg) else {
                 println!("not attached — run `ghax attach` first");
                 return Ok(EXIT_NOT_ATTACHED);
             };
@@ -378,7 +377,7 @@ fn diff_values(path: &str, a: &Value, b: &Value, out: &mut Vec<DiffEntry>) {
 ///
 /// `chain` always prints results as JSON (the TS implementation hard-codes
 /// `printResult(results, true)`). Returns EXIT_CDP_ERROR if any step failed.
-pub fn cmd_chain(rest: &[String]) -> Result<i32> {
+pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let stop_on_error = parsed
         .flags
@@ -409,8 +408,7 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
         }
     };
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -420,6 +418,11 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
 
     let mut results: Vec<Value> = Vec::new();
     let mut any_failed = false;
+    let mut expect_exit: Option<i32> = None;
+    let mut report = match Report::from_flags(&parsed) {
+        Ok(r) => r,
+        Err(c) => return Ok(c),
+    };
 
     for step in &steps {
         let cmd = match step.get("cmd").and_then(|v| v.as_str()) {
@@ -435,8 +438,19 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
         };
         let args = step.get("args").cloned().unwrap_or(Value::Array(vec![]));
         let opts = step.get("opts").cloned().unwrap_or(json!({}));
+        let t = std::time::Instant::now();
         match rpc::call(port, &cmd, args, opts) {
             Ok(data) => {
+                if let Some(f) = failed_expect(&cmd, &data) {
+                    // A failed check ends the plan whatever stopOnError says:
+                    // the steps after it assume it held.
+                    report.push(&cmd, false, t.elapsed().as_millis(), Some(&data), Some(&f.message));
+                    results.push(failed_expect_entry(&cmd, results.len(), &f));
+                    expect_exit = Some(f.exit());
+                    any_failed = true;
+                    break;
+                }
+                report.push(&cmd, true, t.elapsed().as_millis(), Some(&data), None);
                 results.push(json!({ "cmd": cmd, "ok": true, "data": data }));
             }
             Err(err) => {
@@ -445,6 +459,7 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
                 } else {
                     err.to_string()
                 };
+                report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
                 results.push(json!({ "cmd": cmd, "ok": false, "error": msg }));
                 any_failed = true;
                 if stop_on_error {
@@ -456,7 +471,15 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
 
     // chain always outputs JSON (mirrors TS: `printResult(results, Boolean(parsed.flags.json) || true)`)
     output::print(&Value::Array(results), true);
-    Ok(if any_failed { EXIT_CDP_ERROR } else { EXIT_OK })
+    let code = if let Some(c) = expect_exit {
+        c
+    } else if any_failed {
+        EXIT_CDP_ERROR
+    } else {
+        EXIT_OK
+    };
+    report.write(code);
+    Ok(code)
 }
 
 // ─── batch ───────────────────────────────────────────────────────────────────
@@ -468,7 +491,7 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
 /// and re-snapshots between steps that reference `@e<n>` refs. That fixes
 /// the mid-sequence ref-shift on framework-heavy forms where the ARIA tree
 /// reindexes mid-plan.
-pub fn cmd_batch(rest: &[String]) -> Result<i32> {
+pub fn cmd_batch(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let Some(json_src) = parsed.positional.first() else {
         eprintln!("Usage: ghax batch '[{{\"cmd\":\"click\",\"args\":[\"@e7\"]}}, …]'");
@@ -486,8 +509,7 @@ pub fn cmd_batch(rest: &[String]) -> Result<i32> {
         return Ok(EXIT_USAGE);
     }
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -495,19 +517,38 @@ pub fn cmd_batch(rest: &[String]) -> Result<i32> {
         }
     };
 
-    // The daemon handler reads `args[0]` as the step array.
+    // The daemon handler reads `args[0]` as the step array. `--report` is the
+    // CLI's; the daemon never sees it.
+    let mut report = match Report::from_flags(&parsed) {
+        Ok(r) => r,
+        Err(c) => return Ok(c),
+    };
+    let mut opts = parsed.opts_without_json();
+    if let Value::Object(m) = &mut opts {
+        m.remove("report");
+    }
     let args_payload = Value::Array(vec![steps]);
-    let data = rpc::call(port, "batch", args_payload, parsed.opts_without_json())?;
+    let data = rpc::call(port, "batch", args_payload, opts)?;
     // `batch` results are always JSON — printing them any other way
     // would defeat the machine-readability that motivates the verb.
     output::print(&data, true);
+    report.push_batch(&data);
 
-    // Exit non-zero if any step failed, mirroring `chain`.
+    // Exit non-zero if any step failed, mirroring `chain`. A failed expect is
+    // its own code: the page did what it was told, it just was not right.
     let any_failed = data
         .as_array()
         .map(|arr| arr.iter().any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true)))
         .unwrap_or(false);
-    Ok(if any_failed { EXIT_CDP_ERROR } else { EXIT_OK })
+    let code = if let Some(f) = failed_expect("batch", &data) {
+        f.exit()
+    } else if any_failed {
+        EXIT_CDP_ERROR
+    } else {
+        EXIT_OK
+    };
+    report.write(code);
+    Ok(code)
 }
 
 // ─── replay ──────────────────────────────────────────────────────────────────
@@ -517,7 +558,7 @@ pub fn cmd_batch(rest: &[String]) -> Result<i32> {
 /// Reads a recording file (JSON with a top-level `steps` array or a bare
 /// array), executes each step in order, and prints `✓`/`✗` per step.
 /// Aborts on the first failure.
-pub fn cmd_replay(rest: &[String]) -> Result<i32> {
+pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let file = match parsed.positional.first() {
         Some(f) => f.clone(),
@@ -555,8 +596,7 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
         }
     };
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -564,11 +604,16 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
         }
     };
 
+    let mut report = match Report::from_flags(&parsed) {
+        Ok(r) => r,
+        Err(c) => return Ok(c),
+    };
     for step in &steps {
         let cmd = match step.get("cmd").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => {
                 eprintln!("✗ <missing cmd> — step missing cmd field");
+                report.write(EXIT_CDP_ERROR);
                 return Ok(EXIT_CDP_ERROR);
             }
         };
@@ -583,9 +628,18 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
         } else {
             String::new()
         };
+        let t = std::time::Instant::now();
         match rpc::call(port, &cmd, args, opts) {
-            Ok(_) => {
+            Ok(data) => {
+                // Covers a recorded `expect` step and a `batch` step holding one.
+                if let Some(f) = failed_expect(&cmd, &data) {
+                    eprintln!("✗ {cmd} — {}", f.message);
+                    report.push(&cmd, false, t.elapsed().as_millis(), Some(&data), Some(&f.message));
+                    report.write(f.exit());
+                    return Ok(f.exit());
+                }
                 println!("✓ {cmd}{args_display}");
+                report.push(&cmd, true, t.elapsed().as_millis(), Some(&data), None);
             }
             Err(err) => {
                 let msg = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
@@ -594,10 +648,13 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
                     err.to_string()
                 };
                 eprintln!("✗ {cmd} — {msg}");
+                report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
+                report.write(EXIT_CDP_ERROR);
                 return Ok(EXIT_CDP_ERROR);
             }
         }
     }
+    report.write(EXIT_OK);
     Ok(EXIT_OK)
 }
 
@@ -611,7 +668,7 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
 ///
 /// Default delay: 1000ms, default scale: 800px.
 /// Exit code 4 if ffmpeg is not on PATH.
-pub fn cmd_gif(rest: &[String]) -> Result<i32> {
+pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let rec_file = match parsed.positional.first() {
         Some(f) => f.clone(),
@@ -685,8 +742,7 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
 
     println!("rendering {} steps → {}", steps.len(), out_gif);
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");

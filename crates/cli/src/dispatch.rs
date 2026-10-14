@@ -10,11 +10,58 @@ use serde_json::{json, Value};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
+/// A plan's `expect` (or `ghax expect`) did not hold. Shares the value 1 with
+/// usage errors on purpose: both mean "the check, not the browser, said no".
+pub const EXIT_ASSERT: i32 = 1;
 pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
+/// A verb that needs an element got an empty target; same code the daemon
+/// uses for the same mistake.
+pub const EXIT_BAD_TARGET: i32 = 2;
+
+/// `Some(exit code)` after printing the empty-target message when the first
+/// positional is missing or blank. The usual cause is an unset shell
+/// variable (`ghax click "$REF"`), so the message says so.
+fn empty_target(verb: &str, parsed: &Parsed) -> Option<i32> {
+    match parsed.positional.first() {
+        Some(t) if !t.trim().is_empty() => None,
+        _ => {
+            eprintln!("ghax: {verb}: target is empty — pass an @ref or selector (unset shell variable?)");
+            Some(EXIT_BAD_TARGET)
+        }
+    }
+}
+
+/// `--no-wait` and `--path-only` are switches, but `args::parse` hands them
+/// the next bare token as a value (`eval --no-wait 'js'`). Give that token
+/// back to the positionals and make the flag a plain true.
+fn take_switch(parsed: &mut Parsed, name: &str) -> bool {
+    match parsed.flags.get(name).cloned() {
+        // `--no-wait=true` / `--no-wait=false` is the flag's own value, not a
+        // token to hand back.
+        Some(Value::String(v)) if v == "true" || v == "false" => {
+            let on = v == "true";
+            parsed.flags.insert(name.to_string(), Value::Bool(on));
+            on
+        }
+        Some(Value::String(swallowed)) => {
+            parsed.positional.insert(0, swallowed);
+            parsed.flags.insert(name.to_string(), Value::Bool(true));
+            true
+        }
+        Some(Value::Bool(true)) => true,
+        _ => false,
+    }
+}
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
-    let cfg = state::resolve_config();
+    let cfg = match resolve_for_verb(verb, rest) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("ghax: {err}");
+            return EXIT_NOT_ATTACHED;
+        }
+    };
     // `--trace` is global: pull it out before any per-verb parser sees it, so
     // `ghax click --trace @e3` can't read "@e3" as the flag's value. Tokens
     // after a `--` terminator are values and stay put (args::take_trace).
@@ -46,21 +93,78 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
     }
 }
 
+/// Verbs that never talk to a daemon, so discovery (and its ambiguity /
+/// unreadable-registry errors) has no business running for them: `diff-state`
+/// compares two files on disk, and plain `version` prints the CLI banner
+/// (only `version --full` looks for a daemon). `help`/`--help`/`--version`
+/// return in main.rs before dispatch. Every other verb in `dispatch_inner`
+/// calls `require_daemon` or reads daemon state.
+fn is_local_only(verb: &str, rest: &[String]) -> bool {
+    match verb {
+        "diff-state" => true,
+        "version" => !args::parse(rest).flags.contains_key("full"),
+        _ => false,
+    }
+}
+
+/// Which state file a verb talks to. `attach`/`restart` never adopt another
+/// directory's daemon (they'd pair with it instead of starting their own), and
+/// `detach` never stops one it wasn't pointed at. Local-only verbs never look
+/// for a daemon. Everything else goes through discovery (state.rs
+/// `resolve_config_for_use`).
+fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
+    if is_local_only(verb, rest) {
+        return Ok(state::resolve_config());
+    }
+    match verb {
+        "attach" | "restart" | "detach" | "review" | "ship" | "update" | "shell" => {
+            Ok(state::resolve_config())
+        }
+        // `ghax version --full` must work with no daemon at all; an ambiguous
+        // registry only costs it the daemon half.
+        "version" => Ok(state::resolve_config_for_use().unwrap_or_else(|err| {
+            eprintln!("ghax: {err}");
+            state::resolve_config()
+        })),
+        _ => state::resolve_config_for_use(),
+    }
+}
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn local_only_verbs_skip_discovery() {
+        assert!(is_local_only("diff-state", &v(&["a.json", "b.json"])));
+        assert!(is_local_only("version", &v(&[])));
+        assert!(is_local_only("version", &v(&["--json"])));
+        assert!(!is_local_only("version", &v(&["--full"])));
+        assert!(!is_local_only("tabs", &v(&[])));
+        assert!(!is_local_only("status", &v(&[])));
+    }
+}
+
 fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     match verb {
         "attach" => return attach::cmd_attach(&args::parse(rest), cfg),
         "detach" => return attach::cmd_detach(cfg),
         "restart" => return attach::cmd_restart(&args::parse(rest), cfg),
         "bridge" => return crate::bridge::cmd_bridge(cfg, rest),
-        "status" => return small::cmd_status(rest),
-        "pair" => return small::cmd_pair(rest),
+        "status" => return small::cmd_status(cfg, rest),
+        "pair" => return small::cmd_pair(cfg, rest),
         "diff-state" => return small::cmd_diff_state(rest),
-        "chain" => return small::cmd_chain(rest),
-        "batch" => return small::cmd_batch(rest),
-        "replay" => return small::cmd_replay(rest),
-        "gif" => return small::cmd_gif(rest),
-        "qa" => return qa::cmd_qa(&args::parse(rest)),
-        "canary" => return canary::cmd_canary(&args::parse(rest)),
+        "chain" => return small::cmd_chain(cfg, rest),
+        "batch" => return small::cmd_batch(cfg, rest),
+        "replay" => return small::cmd_replay(cfg, rest),
+        "expect" => return crate::expect::cmd_expect(cfg, rest),
+        "gif" => return small::cmd_gif(cfg, rest),
+        "qa" => return qa::cmd_qa(cfg, &args::parse(rest)),
+        "canary" => return canary::cmd_canary(cfg, &args::parse(rest)),
         "review" => return review::cmd_review(&args::parse(rest)),
         "ship" => return ship::cmd_ship(&args::parse(rest)),
         "update" => return update::cmd_update(&args::parse(rest)),
@@ -70,7 +174,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     }
 
     match verb {
-        "tabs" | "back" | "forward" | "reload" | "text" | "downloads" => {
+        "tabs" => crate::tabs::cmd_tabs(cfg, &args::parse(rest)),
+
+        "back" | "forward" | "reload" | "text" | "downloads" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }
@@ -80,16 +186,38 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             crate::cookies::cmd_cookies(cfg, &parsed)
         }
 
+        "auth" => {
+            let parsed = args::parse(rest);
+            crate::auth::cmd_auth(cfg, &parsed)
+        }
+
         "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
-        | "type" | "html" | "screenshot" | "wait" | "viewport" | "responsive" | "diff"
+        | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
         | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }
 
         "eval" => {
-            let parsed = args::parse(rest);
+            let mut parsed = args::parse(rest);
+            take_switch(&mut parsed, "no-wait");
             simple(cfg, "eval", parsed)
+        }
+
+        "screenshot" => {
+            let mut parsed = args::parse(rest);
+            let path_only = take_switch(&mut parsed, "path-only");
+            parsed.flags.remove("path-only");
+            if !path_only || parsed.json() {
+                return simple(cfg, "screenshot", parsed);
+            }
+            let port = state::require_daemon(cfg)?;
+            let data = rpc::call(port, "screenshot", parsed.positional_value(), parsed.opts_without_json())?;
+            match data.get("path").and_then(|v| v.as_str()) {
+                Some(p) => println!("{p}"),
+                None => output::print(&data, false),
+            }
+            Ok(EXIT_OK)
         }
 
         "snapshot" => {
@@ -104,6 +232,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "fill" => {
             let parsed = args::parse(rest);
+            if let Some(code) = empty_target("fill", &parsed) {
+                return Ok(code);
+            }
             if parsed.positional.len() < 2 {
                 eprintln!("Usage: ghax fill <@ref|selector> <value>");
                 return Ok(EXIT_USAGE);
@@ -113,6 +244,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "upload" => {
             let parsed = args::parse(rest);
+            if let Some(code) = empty_target("upload", &parsed) {
+                return Ok(code);
+            }
             if parsed.positional.len() < 2 {
                 eprintln!("Usage: ghax upload <@ref|selector> <path>[,<path>…]");
                 return Ok(EXIT_USAGE);
@@ -122,11 +256,8 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "select" => {
             let parsed = args::parse(rest);
-            if parsed.positional.is_empty() {
-                eprintln!(
-                    "Usage: ghax select <@ref|selector> <value>\n   or: ghax select <@ref|selector> --index <n>\n   or: ghax select <@ref|selector> --by-value <val>"
-                );
-                return Ok(EXIT_USAGE);
+            if let Some(code) = empty_target("select", &parsed) {
+                return Ok(code);
             }
             simple(cfg, "select", parsed)
         }
@@ -328,5 +459,45 @@ fn dispatch_record(cfg: &Config, rest: &[String]) -> Result<i32> {
             eprintln!("Unknown record subcommand: {other}");
             Ok(EXIT_USAGE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(xs: &[&str]) -> Parsed {
+        args::parse(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn switch_gives_a_swallowed_token_back() {
+        let mut a = p(&["--no-wait", "window.x = 1"]);
+        assert!(take_switch(&mut a, "no-wait"));
+        assert_eq!(a.positional, vec!["window.x = 1".to_string()]);
+        assert_eq!(a.flags.get("no-wait"), Some(&Value::Bool(true)));
+        let mut b = p(&["window.x = 1", "--no-wait"]);
+        assert!(take_switch(&mut b, "no-wait"));
+        assert_eq!(b.positional.len(), 1);
+        let mut c = p(&["window.x = 1"]);
+        assert!(!take_switch(&mut c, "no-wait"));
+    }
+
+    #[test]
+    fn switch_reads_literal_true_false_as_the_value() {
+        let mut a = p(&["window.x=1", "--no-wait=true"]);
+        assert!(take_switch(&mut a, "no-wait"));
+        assert_eq!(a.positional, vec!["window.x=1".to_string()]);
+        let mut b = p(&["window.x=1", "--no-wait=false"]);
+        assert!(!take_switch(&mut b, "no-wait"));
+        assert_eq!(b.positional, vec!["window.x=1".to_string()]);
+        assert_eq!(b.flags.get("no-wait"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn empty_target_catches_missing_and_blank() {
+        assert_eq!(empty_target("click", &p(&[])), Some(EXIT_BAD_TARGET));
+        assert_eq!(empty_target("click", &p(&[""])), Some(EXIT_BAD_TARGET));
+        assert_eq!(empty_target("click", &p(&["@e3"])), None);
     }
 }

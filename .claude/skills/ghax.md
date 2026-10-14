@@ -90,10 +90,13 @@ this.
 | `ghax attach` prints "No running browser found on CDP port" / nothing on `:9222` / no `DevToolsActivePort` file | Expected on the real profile since Edge 150. Do **not** relaunch the real Edge with `--remote-debugging-port` — it's silently ignored. Use Lane 1 (bridge) for the real session, or Lane 2 (`--launch`) for a scratch instance. |
 | Tempted to **copy the real profile** into a non-default `--user-data-dir` to get CDP + logins | **Don't.** The copy gets extensions/settings but **zero logins** — cookies/passwords are encrypted per data-dir and won't decrypt in a copy (verified 2026-07-12). Use the bridge. |
 | Clean-room / CI / extension dev / you explicitly don't want the real session | **Lane 2** — `ghax attach --launch` (scratch profile). |
-| Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (cookies, storage, viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
+| Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
 | Bridge connected but `goto`/commands return "Cannot attach to this target" | The controlled tab landed on a privileged page (`chrome://`, `edge://`, cert-error/`chrome-error://` interstitial) — `chrome.debugger` can't attach there. `goto` self-recovers via `chrome.tabs.update`; if stuck, `ghax bridge control --active` after navigating the tab to a normal page. |
 | A scratch (`--user-data-dir`) Edge is the only Edge running and the user says extensions/sign-ins "vanished" | Dock-icon hijack, **not** data loss — check `ps aux | grep -i "Microsoft Edge" \| grep user-data-dir`; make sure their normal (no-flags) Edge is also running. |
-| Two bridge extensions competing (e.g. real Edge + a test scratch Edge both on `:9223`) | The bridge accepts one connection, latest-wins — isolate a test instance on a different `--bridge-port` and pin the test extension's `DEFAULT_PORT` to match. |
+| `attach --extension` exits with `BRIDGE_AMBIGUOUS` | More than one browser (or profile) has the bridge extension loaded and nothing said which to drive. Re-run with `--browser edge\|chrome\|<label>`, or keep the daemon and `ghax bridge use <id\|browser\|label>`. Never pick one at random: ask the user which browser if it isn't obvious. |
+| Several browsers must be driven from one daemon (compare two profiles, copy between them) | `ghax attach --extension --browser all`. `ghax tabs` then lists every bound browser (`#1..N`; a silent browser appears as a `note:` row), `ghax tab '#n'` in another browser switches the active browser and clears refs, and `console`/`network` cover the active tab only (`--tab '#n'\|<id>` for another, `--all` for every tab). `ghax bridge instances` marks the active one. |
+| `attach --extension` exits with `BRIDGE_NO_CANDIDATE` | Browsers connected but none matches `--browser` by the end of the attach timeout (attach keeps waiting until then). The error lists what it saw; fix the filter, or wait for the right browser (the daemon keeps running and binds it when it connects). |
+| A command says "no daemon here, using the one attached from <dir>" | Expected: this cwd has no daemon, exactly one is registered in `~/.ghax/daemons/`, and ghax used it. If that's the wrong one, set the printed `GHAX_STATE_FILE`. With several running, the error lists each one's `GHAX_STATE_FILE`; set one, don't guess. |
 
 So there are two lanes; pick by what the task needs.
 
@@ -111,14 +114,14 @@ inside the ghax CLI.
 #   → <repo>/extension  (persists in the profile; reload after ghax updates)
 ghax attach --extension --control-active   # drives the active tab, no popup
 ghax snapshot -i                            # then the full verb surface works
-ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
+ghax bridge control [--active | --tab-id '#n'|<id> | --stop]   # (re)point mid-session
 ```
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
-snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box,
-tabs/tab/new-window, wait, console/network, batch. **Not (yet) over the
+snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box, gestures,
+tabs/tab/new-window, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
-yet": cookies, storage, viewport/responsive, qa/perf/profile, gestures,
+yet": viewport/responsive, qa/perf/profile,
 and the `ext` family (SW/panel/hot-reload).
 
 Bridge caveats:
@@ -145,6 +148,11 @@ Bridge caveats:
   is debugging this browser" banner — expected, not an error.
 - **One controlled tab.** The bridge drives the tab you point it at
   (`--control-active` or `bridge control --tab-id`). `tabs` lists them.
+- **Tab ids name the browser.** Bridge ids are `<brand>-<profile>:<chrome tab id>`
+  (`edge-work:42`; `edge-3f2a1b:42` when the popup has no Profile name), because
+  two browsers can both have a tab 42. Pick by `'#n'` from the last `tabs`
+  or by full id. A bare `42` is refused when it matches more than one tab:
+  read the listing it prints and choose, never guess.
 - **Fallback:** if the bridge extension isn't installed and can't be, use
   the Claude-in-Chrome extension (same `chrome.debugger` mechanism, but
   slower cloud relay, outside ghax).
@@ -198,15 +206,18 @@ ghax detach                              # clean daemon shutdown
 ghax attach --extension --control-active # drive the active real tab, no popup
 ghax attach --extension                  # connect only; then pick a tab:
 ghax bridge control --active             #   control the current active tab
-ghax bridge control --tab-id <n>         #   control a specific tab (see `tabs`)
+ghax bridge control --tab-id '#2'        #   control row 2 of the last `tabs`
 ghax bridge control --stop               #   release the tab (banner clears)
 ghax attach --extension --bridge-port N  # non-default WS port (default 9223)
 ghax bridge reload                       # reload the extension, no edge://extensions click
 ghax bridge reload --force               # also proceed if another agent has a tab claimed
 
 # Tab work
-ghax tabs                                # list {id, title, url, active}
-ghax tab <id>                            # switch active tab
+ghax tabs                                # #n  id  "title"  Browser · Profile  controlledBy=…
+ghax tabs --json                         # + index, chromeTabId, browser, profile, windowId
+ghax tab '#2'                            # row 2 of the last `tabs` (refused if it closed)
+ghax tab edge-work:42                    # full id: <brand>-<profile>:<chrome tab id> on the bridge
+ghax tab 42                              # only if exactly one tab has id 42, else refused
 ghax goto https://example.com
 ghax text                                # clean page text
 ghax html [<selector>]                   # innerHTML
@@ -216,6 +227,10 @@ ghax snapshot -i                         # interactive-only a11y tree with @e re
 ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
 ghax snapshot -i -s '#main'              # narrow when the output ends "… N more refs omitted"
 ghax snapshot -i --no-cap                # or lift the 250-ref / 32 KB default budget
+ghax snapshot -i --grep 'Save|Cancel' --context 2   # only matching lines + ancestors + 2 after (before the cap; refs still resolve)
+ghax screenshot --path-only              # prints just the file path
+ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
+ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console
 ghax click @e3                           # click by ref (refuses covered/disabled targets)
 ghax click @e3 --force                   # skip the actionability checks
 ghax fill @e5 "hello"                    # React-safe input fill
@@ -236,6 +251,7 @@ ghax ext hot-reload <ext-id> --verbose   # per-tab injection report
 ghax gesture click 100,200               # real Input.dispatchMouseEvent
 ghax gesture dblclick 100,200
 ghax gesture scroll down 400             # mouseWheel event at viewport center
+ghax gesture scroll down 400 --on @e7    # aim the wheel at an element (inner panel); works over the bridge too
 ghax gesture key Enter
 
 # Orchestrated QA pass
@@ -277,6 +293,11 @@ ghax storage session set flash "hi"
 ghax viewport 375x667
 ghax responsive /tmp/shot                # mobile + tablet + desktop
 ghax diff https://prod.example.com https://staging.example.com
+
+# Check a flow with no model in the loop (exit 1 on the first failed expect)
+ghax expect --url 'dashboard' --timeout 3000
+ghax expect --visible @e7
+ghax batch '[{"cmd":"goto","args":["https://app.example.com"]},{"cmd":"expect","opts":{"title":"Sign in"}}]' --report /tmp/run.json
 
 # Batch + record
 echo '[{"cmd":"goto","args":["https://example.com"]},{"cmd":"snapshot","opts":{"interactive":true}}]' | ghax chain
@@ -329,6 +350,36 @@ ghax ext sw <ext-id> eval "await fetch('/me', {headers:{Authorization:'Bearer '+
 ghax ext storage <ext-id> local set someKey null
 ```
 
+### Run a check as one batch with expects
+
+When a flow is known, don't read every page to see whether it worked. Put the
+checks in the plan; ghax runs it with no model in the loop and stops at the
+first thing that is wrong.
+
+```bash
+ghax batch '[
+  {"cmd":"goto","args":["https://app.example.com/login"]},
+  {"cmd":"expect","opts":{"visible":"#email"}},
+  {"cmd":"fill","args":["#email","qa@example.com"]},
+  {"cmd":"fill","args":["#password","'"$QA_PASSWORD"'"]},
+  {"cmd":"click","args":["button[type=submit]"]},
+  {"cmd":"expect","opts":{"url":"/dashboard$","timeout":8000}},
+  {"cmd":"expect","opts":{"text":"Welcome back","selector":"h1"}},
+  {"cmd":"expect","opts":{"count":"table tbody tr","min":1}}
+]' --report /tmp/login-check.json
+echo $?   # 0 = every check held, 1 = an expect failed, 4 = a step errored or an expect could not run (EXPECT_ERROR)
+```
+
+- Checks: `url`/`title` (regex), `text` (substring, optional `selector`),
+  `visible`/`hidden` (`@ref` or selector), `count` (`n` or `min`/`max`),
+  `value` (+ `expected`), `eval` (truthy JS). Each polls until `timeout` ms
+  (default 5000); `timeout: 0` looks once.
+- On failure, read the failing step: `{step, expect, expected, actual,
+  elapsedMs}`. Act on that and `/tmp/login-check.json`; only open a snapshot
+  if `actual` doesn't explain it.
+- The same steps work in `chain` and in a `replay` file, so a recording can be
+  edited to carry its checks.
+
 ### Verify a deploy by diffing text against staging
 
 ```bash
@@ -362,7 +413,8 @@ walking them and no automation tool can force entry.
 ## Exit codes
 
 - `0` — success
-- `1` — usage error
+- `1` — usage error, or an `expect` that did not hold (stdout has the result)
+- `4` also covers an `expect` that could not run (`EXPECT_ERROR`: bridge disconnect, hung probe)
 - `2` — not attached (run `ghax attach` first)
 - `3` — target not found (wrong ext-id, wrong tab id)
 - `4` — CDP error

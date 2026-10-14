@@ -177,11 +177,11 @@ Since Edge 150 / Chrome 136, `--remote-debugging-port` is ignored on the default
 #   edge://extensions → Developer mode → Load unpacked → ./extension
 ghax attach --extension --control-active   # drive the active tab, no popup click
 ghax snapshot -i                            # full verb surface over your real session
-ghax bridge control --tab-id <n>            # or point it at a specific tab (see `tabs`)
+ghax bridge control --tab-id '#2'           # or point it at a specific tab (see `tabs`)
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
-Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Browser-context verbs (`cookies`, `storage`, `viewport`, `qa`, `perf`, gestures, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax goto data:...` is refused over the bridge (Chrome blocks extensions from opening `data:` URLs); serve the page over http instead. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
+Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/type/upload, screenshot, tabs, console, network, batch, …). Gestures (`gesture click|dblclick|scroll|key`), `cookies`, `cookies delete`, `storage` and `auth export` work over the bridge too (note: `cookies --all --values` there returns every HttpOnly cookie in your real profile, so never paste it into chat, commits or logs). Browser-context verbs (`viewport`, `qa`, `perf`, the `ext` family) return a clear "not supported over the extension bridge yet". Notes: attaching shows Chrome's persistent "extension is debugging this browser" banner (visible consent); the bridge WebSocket is localhost-only but currently unauthenticated (a handshake token is planned) — run it as a deliberate foreground act. `ghax goto data:...` is refused over the bridge (Chrome blocks extensions from opening `data:` URLs); serve the page over http instead. `ghax upload` over the bridge requires an absolute path — there's no Playwright to resolve a relative one against the directory you ran the command from, so relative paths are rejected rather than guessed at.
 
 **Keeping the extension current — no click in edge://extensions.** After a `git pull` + `npm run build`, the extension's service worker is still running the OLD code and has cached the old `extension/build-info.json` for its own lifetime — `ghax version --full` will show it reporting a stale (or missing) sha until something makes it reload.
 
@@ -201,6 +201,34 @@ ghax bridge use chrome                   # rebind (by id, browser, or label)
 ghax tabs --browser chrome               # peek at a parked browser's tabs
 ghax attach --extension --browser edge   # only Edge may bind; others park
 ```
+
+`attach --extension` doesn't bind the first browser that says hello. It waits 1.5 s after the first one (`GHAX_BRIDGE_SETTLE_MS`), then binds only if exactly one connected browser matches `--browser`. Two browsers and no `--browser` exits 2 with `BRIDGE_AMBIGUOUS`; a `--browser` nothing matches keeps waiting for it to connect, then exits 2 with `BRIDGE_NO_CANDIDATE` when the attach timeout ends. Both list every browser seen as `browser · label · instanceId · port`:
+
+```
+ghax: BRIDGE_AMBIGUOUS: 2 browsers connected and no --browser picks one:
+  edge · Work · 3f2a1b9c-... · :9223
+  chrome · - · 9c8d7e10-... · :9223
+```
+
+Re-run with `--browser edge` (or a label), or keep the daemon and pick with `ghax bridge use <id|browser|label>`. Two profiles of the same brand need distinct labels in the extension popup.
+
+**Driving several browsers at once.** `ghax attach --extension --browser all` (or `GHAX_BRIDGE_BROWSER=all`) binds every connected browser instead of parking all but one. One bound browser is **active**: it is the one `snapshot`, `click`, `eval` and the rest act on, and `ghax bridge instances` marks it (`*` active, `+` bound, blank parked). Then:
+
+- `ghax tabs` lists every bound browser's tabs, numbered `#1..N` across all of them. A browser that fails or takes over 10 s to answer shows as a `note:` line instead of hanging the listing.
+- `ghax tab '#5'` (or a full id such as `chrome-home:42`) in another bound browser controls the tab there first, then makes that browser active. Refs are cleared, as on any tab switch. If that browser refuses the tab (another agent owns it, it can't attach), the daemon stays on the browser it was driving. A tab in a browser that isn't bound is refused with a `ghax bridge use` hint.
+- A command runs start to finish on the browser that was active when it started. A `tab` switch from another shell mid-command never sends the rest of it to the other browser.
+- `ghax console` and `ghax network` show the active tab only. `--tab '#n'|<id>` picks another tab, `--all` shows every tab of every bound browser. `--last N` counts the selected tab's entries. With no active tab they error instead of printing nothing. Caveat: `console --follow` and `network --follow` are not tab-filtered yet; they stream every bound browser's entries.
+- Every bound browser records console and network from the tab it controls, active or not.
+- `GHAX_BRIDGE_CONTROL=active` (`--control-active`) applies to the first browser that binds only.
+
+**Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:
+
+```
+#1  work:7   "Inbox"                    Edge · Work  controlledBy=:9223  active
+#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
+```
+
+The id is `<brand>-<profile>:<chrome tab id>` (e.g. `edge-work:42`). Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). Aliases are unique: a collision appends the instance prefix, and a live browser keeps its alias when another with the same name connects. `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab edge-work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches (including a same-number tab in a browser your last `ghax tabs --browser` listed). A `#n` is also refused after the browser restarts.
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 
@@ -236,6 +264,7 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 ### Snapshot and interact
 
 - Accessibility-tree snapshots with `@e<n>` refs. Click by role and name, not brittle CSS selectors.
+- `ghax snapshot --grep <regex> [--context N]` prints only the matching lines, their ancestors and N lines after each, before the cap below. Refs still all resolve. `ghax screenshot --path-only` prints just the path. `ghax eval <js> --timeout <ms>` raises the bridge's 30 s eval deadline; `--no-wait` fires the code on a timer and returns at once (errors go to `ghax console`). `ghax gesture scroll down 300 --on @e7` aims the wheel at that element.
 - Snapshots print at most 250 refs / 32 KB by default and end with `… N more refs omitted` when they cut, so a huge page doesn't flood an agent's context. Every ref stays clickable. Narrow with `--selector`/`--depth`, or lift it with `--max-refs <n>`, `--max-chars <n>`, `--no-cap`.
 - Stable refs on both transports. On CDP a ref is minted by Playwright and cached on the element; over the bridge the daemon keeps the same mapping itself. Either way `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
@@ -260,7 +289,8 @@ One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's
 - Source-map resolution: `console --source-maps` maps `main.abc123.js:1:48291` back to `src/AuthForm.tsx:42:12`.
 - Core Web Vitals (`ghax perf`): LCP with the element that triggered it, FCP, CLS, TTFB, full nav timing. Buffered observers catch entries that fired before the call.
 - Live SSE tail: `console --follow`, `network --follow`, `ext sw <id> logs --follow`.
-- `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect.
+- `ghax cookies` scopes to the **active tab's URL by default** (Playwright's own domain/path/secure applicability match — handles subdomains, localhost, and IP+port correctly) and **redacts values** (`value: "<redacted, N chars>"`) unless you pass `--values`. `--all` opts into the whole-profile dump (every domain the browser profile has ever set a cookie for — the old, unscoped default); `--domain <d>` filters that dump by domain substring/suffix; `--url <u>` scopes applicability to an explicit URL instead of the current tab. `ghax cookies --has <name>` exits `0`/`1` — the scripting primitive for "did login land?" instead of inferring auth state from a redirect. `ghax cookies delete <name> [--domain d] [--url u] [--path p]` removes exactly one cookie (same scope rules; works on CDP and the bridge) and prints what it deleted, never the value. If the name matches more than one domain/path it refuses and lists them: that is how you expire an access token instantly instead of waiting out its lifetime.
+- `ghax auth export --out auth.json --domain example.com[,sso.example.com] [--origin https://app.example.com]` writes a Playwright storageState file from the attached browser (CDP or bridge), so a headless suite runs as you: `browser.newContext({ storageState: 'auth.json' })`. Cookies come only from the listed domains and their subdomains (`--domain` is required; list the parent `example.com` to include `.example.com` cookies). `--origin` adds localStorage from a tab already open at that origin (over the bridge: the controlled tab); ghax never navigates your tab for it. The file is written by the daemon with mode `0600`, never printed; it refuses to overwrite without `--force` (the write is a temp file plus atomic link/rename, never in place), refuses symlinks, and refuses a path inside a git work tree unless `git check-ignore` says it is ignored. `--domain` matches literally, so a public suffix like `co.uk` or `github.io` would export every site under it: name the site. The printed result is counts, path, earliest cookie expiry and (POSIX only) the file mode. The file is a live session: treat it like a password.
 
 ### Clicks that refuse to guess
 
@@ -294,6 +324,7 @@ as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
 
 - `ghax batch '<json-array>'` ships a whole plan in one round-trip and auto-re-snapshots before a ref-using step when the page changed since the last snapshot, so a mid-plan combobox reshuffle doesn't break later refs and a quiet page doesn't pay for a snapshot per step. Each ref step reports `autoSnapshot: "skipped"` or `"taken"`.
 - `ghax chain` reads the same shape from stdin for ad-hoc flows.
+- `ghax expect` asserts one thing and polls until it holds: `--url <regex>`, `--title <regex>`, `--text <substring> [--selector <css>]`, `--visible <@ref|css>`, `--hidden <@ref|css>`, `--count <css> --n N` (or `--min` / `--max`), `--value <@ref|css> --expected <text>`, `--eval <js>` (truthy), each with `--timeout <ms>` (default 5000). Put the same thing in a plan as `{"cmd":"expect","opts":{"url":"dashboard","timeout":3000}}` and `batch`, `chain` and `replay` files check as they go. The first failed `expect` stops the plan and exits `1`; the result names the step, what was expected, what was there, and how long it waited. `--report <path>` on `batch`, `chain`, `replay` or `expect` writes every step's `ok`, `ms` and `actual` to a JSON file. Works on CDP and the bridge.
 - `ghax try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]` mutates the running page, measures a result, and screenshots in one call. Revert = reload.
 - `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.
 - `ghax shell` is a REPL that keeps the CLI process alive between commands, ~1.8× faster for multi-turn agent sessions.
@@ -322,6 +353,8 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
 
 Same browser process, separate windows and separate daemon state. Neither agent sees the other's active-tab pointer.
 
+**Finding a daemon from another directory.** The state file follows the git root of your cwd, so a daemon attached from `~/work/a` used to be invisible from `~/work/b`. Every daemon now registers in `~/.ghax/daemons/<pid>.json` (removed when it exits; entries for dead pids are pruned on read). When your directory has no live daemon and `GHAX_STATE_FILE` is unset, ghax uses the one registered daemon and prints one stderr line naming its cwd and browser. With several running it refuses and lists each with the `GHAX_STATE_FILE=` to set. `ghax attach` never reuses another directory's daemon, and `ghax detach` only stops the one it resolves to.
+
 The same recipe works over the bridge — swap `ghax attach` for `ghax attach --extension`. The daemons auto-pick adjacent bridge ports and the extension multiplexes between them; a tab may only be driven by one agent at a time. See [Real session via the ghax bridge](#real-session-via-the-ghax-bridge-experimental-v05).
 
 ---
@@ -335,7 +368,7 @@ ghax --help           # full surface — authoritative
 ghax --help | less    # scroll it
 ```
 
-Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error, `2` not attached, `4` CDP error, `10` build/bootstrap failure.
+Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error or failed `expect` (an `expect` that could not run, e.g. bridge disconnect, is `4`), `2` not attached, `4` CDP error, `10` build/bootstrap failure.
 
 ---
 
