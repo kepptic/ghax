@@ -72,6 +72,7 @@ import {
   type BridgeTab,
   type ControlTarget,
 } from './bridge';
+import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
@@ -196,6 +197,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'bridge.stats',
+  'cookies', 'cookies.delete', 'storage',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
 
@@ -221,7 +223,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
  * Console/network need no replay at all — they read daemon-local buffers.
  */
 const BRIDGE_RETRY_SAFE = new Set([
-  'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait',
+  'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait', 'cookies',
 ]);
 
 function register(name: string, fn: Handler) {
@@ -3009,58 +3011,39 @@ function buildHar(entries: NetworkEntry[]): unknown {
   };
 }
 
-/**
- * Redact a cookie's value unless the caller opted into raw values.
- * Everything else (name, domain, path, expires, httpOnly, secure,
- * sameSite) is safe to print — it's the raw session/auth value that's
- * the privacy hazard (see docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md).
- */
-function redactCookie(cookie: import('playwright').Cookie, showValues: boolean): Record<string, unknown> {
-  if (showValues) return { ...cookie };
-  const { value, ...rest } = cookie;
-  const len = typeof value === 'string' ? value.length : 0;
-  return { ...rest, value: `<redacted, ${len} chars>` };
+function cookieBackend(ctx: Ctx): CookieBackend {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    return {
+      activeUrl: async () => String(await bridgeEval(ctx, 'location.href')),
+      list: async (urls) => {
+        const r = (urls
+          ? await bridge.send('Network.getCookies', { urls })
+          : await bridge.send('Network.getAllCookies')) as { cookies?: Array<Record<string, unknown>> };
+        return (r.cookies ?? []).map(fromCdpCookie);
+      },
+      remove: async (c) => { await bridge.send('Network.deleteCookies', c); },
+    };
+  }
+  return {
+    activeUrl: async () => (await activePage(ctx)).url(),
+    list: async (urls) => {
+      const context = (await activePage(ctx)).context();
+      return (urls ? await context.cookies(urls) : await context.cookies()) as unknown as Cookie[];
+    },
+    remove: async (c) => { await (await activePage(ctx)).context().clearCookies(c); },
+  };
 }
 
-register('cookies', async (ctx, _args, opts) => {
-  const page = await activePage(ctx);
-  const context = page.context();
+register('cookies', async (ctx, _args, opts) => listCookies(cookieBackend(ctx), opts));
 
-  const showValues = opts.values === true;
-  const wantAll = opts.all === true;
-  const domainFilter = typeof opts.domain === 'string' ? opts.domain.toLowerCase() : undefined;
-  const urlFilter = typeof opts.url === 'string' ? opts.url : undefined;
-  const hasName = typeof opts.has === 'string' ? opts.has : undefined;
-
-  // Scope resolution:
-  //   --url <u>          → cookies applicable to that URL (Playwright's own
-  //                        domain/path/secure applicability match — handles
-  //                        subdomains, localhost, IP literals, and ports
-  //                        correctly; don't hand-roll this).
-  //   --all / --domain    → whole-profile dump, filtered by --domain if given.
-  //   (default)           → cookies applicable to the active tab's URL only.
-  let cookies: import('playwright').Cookie[];
-  if (urlFilter) {
-    cookies = await context.cookies([urlFilter]);
-  } else if (wantAll || domainFilter) {
-    cookies = await context.cookies();
-  } else {
-    cookies = await context.cookies([page.url()]);
+register('cookies.delete', async (ctx, args, opts) => {
+  try {
+    return await deleteCookie(cookieBackend(ctx), String(args[0] ?? ''), opts);
+  } catch (err) {
+    if (err instanceof CookieDeleteError) throw new DaemonError(err.message, 2);
+    throw err;
   }
-
-  if (domainFilter) {
-    cookies = cookies.filter((c) => {
-      const d = String(c.domain ?? '').replace(/^\./, '').toLowerCase();
-      return d.includes(domainFilter);
-    });
-  }
-
-  if (hasName !== undefined) {
-    const exists = cookies.some((c) => c.name === hasName);
-    return { name: hasName, exists };
-  }
-
-  return cookies.map((c) => redactCookie(c, showValues));
 });
 
 register('storage', async (ctx, args) => {
@@ -3070,11 +3053,12 @@ register('storage', async (ctx, args) => {
     throw new Error(`Unknown storage area: ${area} (expected local or session)`);
   }
   const api = area === 'local' ? 'localStorage' : 'sessionStorage';
-  const page = await activePage(ctx);
-
+  // Bridge: no Playwright page, so run the same expression through
+  // Runtime.evaluate on the controlled tab. Same expressions, same output.
+  const page = ctx.bridgeMode ? null : await activePage(ctx);
   const evalAndReturn = async (expr: string) => {
-    const r = await page.evaluate(expr);
-    return r;
+    if (ctx.bridgeMode) return await bridgeEval(ctx, expr);
+    return await page!.evaluate(expr);
   };
 
   switch (op) {

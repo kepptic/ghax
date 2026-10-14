@@ -6,7 +6,16 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- **`cookies`, `cookies delete` and `storage` work over the extension bridge.**
+  Cookies read through `Network.getCookies` / `getAllCookies` with the same
+  scoping, redaction and `--has` exit codes as on CDP; `storage` runs over
+  `Runtime.evaluate` on the controlled tab.
+- **`ghax cookies delete <name> [--domain d] [--url u] [--path p]`** on CDP
+  and the bridge. Deletes exactly one cookie and reports its name, domain and
+  path (never the value). A name that matches more than one domain/path
+  refuses and lists the candidates. Expire an access token instantly instead
+  of waiting out its lifetime.
 
 ## [0.9.0] - 2026-09-27
 ### Added

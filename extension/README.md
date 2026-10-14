@@ -194,7 +194,7 @@ minted one. Leave `--pair` off and nothing changes.
 The extension drives one tab at a time, but `tabs`, `tab <id>`, and
 `new-window <url>` can enumerate and move that control. Switching control
 invalidates all snapshot refs. The `ext` family and browser-level operations
-such as cookies, storage, uploads, profiling, and viewport emulation remain on
+such as profiling, and viewport emulation remain on
 the normal CDP-port transport and fail clearly in bridge mode.
 
 Certificate interstitials can temporarily make a tab refuse

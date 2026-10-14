@@ -1149,6 +1149,24 @@ c('is <check> asserts element state', async () => {
   assert(data.check === 'visible' && data.result === true, `is visible <link ref> → ${JSON.stringify(data)}`);
 });
 
+c('cookies delete removes exactly one cookie and refuses ambiguity', async () => {
+  await run(['goto', 'https://example.com']);
+  const name = `ghax_smoke_del_${Date.now()}`;
+  await run(['eval', `document.cookie = '${name}=SECRETv1zz; path=/'; document.cookie = '${name}=SECRETv2zz; path=/ghaxsub'`]);
+  // Same name on two paths, only "/" applies to the tab URL; ask for the whole profile to see both.
+  const amb = await run(['cookies', 'delete', name, '--all'], { allowFailure: true });
+  assert(amb.exitCode !== 0, 'ambiguous delete should fail');
+  assert(/matches 2 cookies/.test(amb.stderr + amb.stdout), `expected refusal, got: ${amb.stderr}${amb.stdout}`);
+  assert(!/SECRETv/.test(amb.stderr + amb.stdout), 'refusal must not print values');
+  const del = await run(['cookies', 'delete', name, '--all', '--path', '/', '--json']);
+  const out = parseJson<{ deleted: Array<{ name: string; path: string }> }>(del.stdout);
+  assert(out.deleted.length === 1 && out.deleted[0].path === '/', `unexpected delete report: ${del.stdout}`);
+  const left = parseJson<Array<{ name: string; path: string }>>((await run(['cookies', '--all', '--json'])).stdout)
+    .filter((cc) => cc.name === name);
+  assert(left.length === 1 && left[0].path === '/ghaxsub', `expected only the /ghaxsub cookie left, got ${JSON.stringify(left)}`);
+  await run(['cookies', 'delete', name, '--all']);
+});
+
 c('storage local round-trips set/get/remove', async () => {
   await run(['goto', 'https://example.com']); // storage is disabled on data: URLs
   const key = `ghax-smoke-${Date.now()}`;

@@ -31,6 +31,7 @@ import {
   bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
+import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
@@ -289,6 +290,71 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('bridge simulator — no browser required\n');
+
+  // Cookie logic is shared by both transports; the backend here fakes the
+  // bridge's Network.getCookies / deleteCookies replies (CDP shape).
+  const fakeCookies = (): { be: CookieBackend; removed: Array<Record<string, string>> } => {
+    const jar: Cookie[] = [
+      { name: 'access', domain: 'app.example.com', path: '/', secure: true, sameSite: 'Lax' },
+      { name: 'dup', domain: 'app.example.com', path: '/', secure: false },
+      { name: 'dup', domain: '.example.com', path: '/', secure: false },
+      { name: 'dup', domain: 'app.example.com', path: '/api', secure: false },
+    ].map((c) => fromCdpCookie({ ...c, value: 'SECRET-VALUE-123', expires: -1, httpOnly: true }));
+    const removed: Array<Record<string, string>> = [];
+    return {
+      removed,
+      be: {
+        activeUrl: async () => 'https://app.example.com/',
+        list: async () => jar.filter((c) => !removed.some((r) => r.name === c.name && r.domain === c.domain && r.path === c.path)),
+        remove: async (c) => { removed.push(c); },
+      },
+    };
+  };
+
+  await test('cookies list redacts values by default and --values shows them', async () => {
+    const { be } = fakeCookies();
+    const red = JSON.stringify(await listCookies(be, {}));
+    assert(!red.includes('SECRET-VALUE-123'), 'default listing leaked a value');
+    assert(red.includes('<redacted, 16 chars>'), 'expected redaction marker');
+    assert(JSON.stringify(await listCookies(be, { values: true })).includes('SECRET-VALUE-123'), '--values should show');
+    const has = (await listCookies(be, { has: 'access' })) as { exists: boolean };
+    assert(has.exists === true, '--has should find access');
+  });
+
+  await test('cookies delete removes exactly one unambiguous cookie', async () => {
+    const { be, removed } = fakeCookies();
+    const r = await deleteCookie(be, 'access', {});
+    assert(removed.length === 1 && removed[0].name === 'access' && removed[0].domain === 'app.example.com', 'wrong removal');
+    assert(!JSON.stringify(r).includes('SECRET'), 'delete report leaked a value');
+  });
+
+  await test('cookies delete refuses an ambiguous name and lists candidates without values', async () => {
+    const { be, removed } = fakeCookies();
+    let msg = '';
+    try { await deleteCookie(be, 'dup', {}); } catch (e) { assert(e instanceof CookieDeleteError, 'wrong error type'); msg = (e as Error).message; }
+    assert(msg.includes('matches 3 cookies'), `expected refusal, got: ${msg}`);
+    assert(msg.includes('domain=.example.com') && msg.includes('path=/api'), 'candidates not listed');
+    assert(!msg.includes('SECRET'), 'refusal leaked a value');
+    assert(removed.length === 0, 'must not delete when ambiguous');
+  });
+
+  await test('cookies delete narrows by --domain (exact) and --path', async () => {
+    const { be, removed } = fakeCookies();
+    await deleteCookie(be, 'dup', { domain: 'example.com', path: '/' });
+    assert(removed.length === 1 && removed[0].domain === '.example.com', `expected the .example.com one, got ${JSON.stringify(removed)}`);
+    let threw = false;
+    try { await deleteCookie(fakeCookies().be, 'dup', { domain: 'app.example.com' }); } catch { threw = true; }
+    assert(threw, 'domain app.example.com still matches two paths and must refuse');
+    const f = fakeCookies();
+    await deleteCookie(f.be, 'dup', { domain: 'app.example.com', path: '/api' });
+    assert(f.removed.length === 1 && f.removed[0].path === '/api', 'path narrowing failed');
+  });
+
+  await test('cookies delete on a missing name errors', async () => {
+    let threw = false;
+    try { await deleteCookie(fakeCookies().be, 'nope', {}); } catch (e) { threw = e instanceof CookieDeleteError; }
+    assert(threw, 'expected CookieDeleteError');
+  });
 
   // Regression: the self-heal in bridgeEval is gated on this predicate, so a
   // string it fails to match is a silent post-navigation failure for the user.

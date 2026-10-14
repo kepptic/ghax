@@ -90,7 +90,7 @@ this.
 | `ghax attach` prints "No running browser found on CDP port" / nothing on `:9222` / no `DevToolsActivePort` file | Expected on the real profile since Edge 150. Do **not** relaunch the real Edge with `--remote-debugging-port` — it's silently ignored. Use Lane 1 (bridge) for the real session, or Lane 2 (`--launch`) for a scratch instance. |
 | Tempted to **copy the real profile** into a non-default `--user-data-dir` to get CDP + logins | **Don't.** The copy gets extensions/settings but **zero logins** — cookies/passwords are encrypted per data-dir and won't decrypt in a copy (verified 2026-07-12). Use the bridge. |
 | Clean-room / CI / extension dev / you explicitly don't want the real session | **Lane 2** — `ghax attach --launch` (scratch profile). |
-| Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (cookies, storage, viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
+| Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
 | Bridge connected but `goto`/commands return "Cannot attach to this target" | The controlled tab landed on a privileged page (`chrome://`, `edge://`, cert-error/`chrome-error://` interstitial) — `chrome.debugger` can't attach there. `goto` self-recovers via `chrome.tabs.update`; if stuck, `ghax bridge control --active` after navigating the tab to a normal page. |
 | A scratch (`--user-data-dir`) Edge is the only Edge running and the user says extensions/sign-ins "vanished" | Dock-icon hijack, **not** data loss — check `ps aux | grep -i "Microsoft Edge" \| grep user-data-dir`; make sure their normal (no-flags) Edge is also running. |
 | Two bridge extensions competing (e.g. real Edge + a test scratch Edge both on `:9223`) | The bridge accepts one connection, latest-wins — isolate a test instance on a different `--bridge-port` and pin the test extension's `DEFAULT_PORT` to match. |
@@ -116,9 +116,9 @@ ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
 snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box,
-tabs/tab/new-window, wait, console/network, batch. **Not (yet) over the
+tabs/tab/new-window, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage. **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
-yet": cookies, storage, viewport/responsive, qa/perf/profile, gestures,
+yet": viewport/responsive, qa/perf/profile, gestures,
 and the `ext` family (SW/panel/hot-reload).
 
 Bridge caveats:

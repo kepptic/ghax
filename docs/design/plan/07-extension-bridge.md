@@ -196,7 +196,7 @@ the extension bridge.
 takes a `backendNodeId` directly, so it reuses the exact ref-resolution path
 `click`/`fill` already established above instead of needing new CDP surface.
 See `register('upload', ...)` in `src/daemon.ts` and `BRIDGE_SUPPORTED_COMMANDS`.
-cookies/storage remain genuinely un-ported (browser-context, not page-context).
+**Update (2026-10-13):** `cookies`, `cookies delete` and `storage` are ported. Cookies use `Network.getCookies`/`getAllCookies`/`deleteCookies` through the existing `chrome.debugger` session (the extension already holds `debugger` + `<all_urls>`, no new permission); `storage` runs the CDP expressions via `Runtime.evaluate` on the controlled tab. Shared logic lives in `src/cookies.ts`.
 
 Remaining product work is handshake authentication and packaging (signed
 `.crx` / store listing versus unpacked team use). Authentication is deliberately

@@ -97,6 +97,12 @@ Logs:
          #   the active tab.
          # --has <name> exits 0 if a cookie with that name is in scope,
          #   1 otherwise — scripting primitive for "did login land?".
+  cookies delete <name> [--domain <d>] [--url <u>] [--path <p>]
+         # Works on CDP and over the bridge. Deletes exactly one cookie:
+         #   scope is the active tab (or --all/--domain/--url); if the name
+         #   matches more than one domain/path it refuses and lists them
+         #   (name, domain, path; never values). --domain must equal the
+         #   cookie's domain, --path must equal its path.
 
 Extensions (MV3):
   ext list
