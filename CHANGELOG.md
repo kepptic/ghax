@@ -26,6 +26,29 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolves. A bad regex exits 2; no match prints a one-line note.
 - **`screenshot --path-only`** prints just the file path, for
   `shot=$(ghax screenshot --path-only)`.
+- **`ghax auth export --out <path> --domain <d>[,<d>...] [--origin <url>...]`**
+  writes a Playwright storageState file from the attached browser, on CDP and
+  over the bridge, so a headless suite can reuse your real SSO login without
+  CDP on the default profile. Cookies are limited to the listed domains and
+  their subdomains (`--domain` is required); `--origin` adds localStorage from
+  a tab already open at that origin and never navigates. The daemon writes the
+  file itself (temp file 0600 then atomic `link`/`rename`, so an existing file
+  is never truncated in place; refuses symlinks and un-gitignored paths inside
+  a git work tree, with hardened git that fails closed), so values never cross the RPC
+  socket or reach stdout. Output is the path, per-domain cookie counts, origin
+  count and earliest expiry.
+- **`cookies`, `cookies delete` and `storage` work over the extension bridge.**
+  Cookies read through `Network.getCookies` / `getAllCookies` with the same
+  scoping, redaction and `--has` exit codes as on CDP; `storage` runs over
+  `Runtime.evaluate` on the controlled tab.
+- **`ghax cookies delete <name> [--domain d] [--url u] [--path p]`** on CDP
+  and the bridge. Deletes exactly one cookie and reports its name, domain and
+  path (never the value). A name that matches more than one domain/path
+  refuses and lists the candidates. Expire an access token instantly instead
+  of waiting out its lifetime. The browser deletes by name+domain+path only,
+  so it also refuses when http/https or partitioned siblings share that triple
+  (exit 2), passes `partitionKey` for CHIPS cookies, and re-reads the profile
+  to confirm the removal (exit 4 if the cookie is still there).
 
 ### Changed
 - `click`, `fill`, `select`, `upload`, `box`, `is` with a missing or empty

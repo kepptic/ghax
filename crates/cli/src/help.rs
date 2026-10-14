@@ -107,6 +107,25 @@ Logs:
          #   the active tab.
          # --has <name> exits 0 if a cookie with that name is in scope,
          #   1 otherwise — scripting primitive for "did login land?".
+  cookies delete <name> [--domain <d>] [--url <u>] [--path <p>]
+         # Works on CDP and over the bridge. Deletes exactly one cookie:
+         #   scope is the active tab (or --all/--domain/--url); if the name
+         #   matches more than one domain/path it refuses and lists them
+         #   (name, domain, path; never values). --domain must equal the
+         #   cookie's domain, --path must equal its path.
+  auth export --out <path> --domain <d>[,<d>...] [--origin <url>...] [--force]
+         # Writes a Playwright storageState file (newContext({storageState}))
+         #   from the attached browser. Works on CDP and over the bridge.
+         # --domain is required: cookies whose domain equals a listed domain
+         #   or is a subdomain of it (list example.com to get .example.com).
+         # --origin adds that origin's localStorage, read from a tab already
+         #   open there (bridge: the controlled tab). Never navigates.
+         # The file is created 0600 and never printed. Refuses an existing
+         #   file without --force, a symlink, and an un-gitignored path in a
+         #   git work tree. Prints counts, path and earliest expiry only
+         #   (and the file mode on POSIX; Windows has none).
+         # --domain matches literally, public suffixes included: co.uk or
+         #   github.io would export every site under them. Name the site.
 
 Extensions (MV3):
   ext list

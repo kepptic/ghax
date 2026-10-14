@@ -32,6 +32,13 @@ import {
   bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
+import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
+import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
+import { recordableStep } from '../src/record-filter';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
 
@@ -290,6 +297,332 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('bridge simulator — no browser required\n');
+
+  // Cookie logic is shared by both transports; the backend here fakes the
+  // bridge's Network.getCookies / deleteCookies replies (CDP shape).
+  const fakeCookies = (
+    extra: Array<Record<string, unknown>> = [],
+    opt: { noop?: boolean; base?: boolean } = {},
+  ): { be: CookieBackend; removed: Array<Record<string, unknown>>; jar: Cookie[] } => {
+    const base = opt.base === false ? [] : [
+      { name: 'access', domain: 'app.example.com', path: '/', secure: true, sameSite: 'Lax', sourceScheme: 'Secure', sourcePort: 443 },
+      { name: 'dup', domain: 'app.example.com', path: '/', secure: false },
+      { name: 'dup', domain: '.example.com', path: '/', secure: false },
+      { name: 'dup', domain: 'app.example.com', path: '/api', secure: false },
+    ];
+    const jar: Cookie[] = [...base, ...extra].map((c) => fromCdpCookie({ value: 'SECRET-VALUE-123', expires: -1, httpOnly: true, ...c }));
+    const removed: Array<Record<string, unknown>> = [];
+    return {
+      removed,
+      jar,
+      be: {
+        activeUrl: async () => 'https://app.example.com/',
+        // A URL-scoped read only returns cookies sent to that URL (origin-bound scheme), as the browser does.
+        list: async (urls) => jar.filter((c) => !urls || c.sourceScheme === undefined
+          || urls.some((u) => (new URL(u).protocol === 'https:') === (c.sourceScheme === 'Secure'))),
+        // Mimics Chromium: filter is name+domain+path(+partitionKey); scheme/port ignored.
+        // Without a partitionKey only unpartitioned cookies match (the "skips partitioned" reading).
+        remove: async (c) => {
+          removed.push({ ...c });
+          if (opt.noop) return;
+          for (let i = jar.length - 1; i >= 0; i--) {
+            const j = jar[i];
+            const keyMatch = c.partitionKey === undefined
+              ? j.partitionKey === undefined
+              : JSON.stringify(j.partitionKey) === JSON.stringify(c.partitionKey);
+            if (j.name === c.name && j.domain === c.domain && j.path === c.path && keyMatch) jar.splice(i, 1);
+          }
+        },
+      },
+    };
+  };
+
+  await test('cookies list redacts values by default and --values shows them', async () => {
+    const { be } = fakeCookies();
+    const red = JSON.stringify(await listCookies(be, {}));
+    assert(!red.includes('SECRET-VALUE-123'), 'default listing leaked a value');
+    assert(red.includes('<redacted, 16 chars>'), 'expected redaction marker');
+    assert(JSON.stringify(await listCookies(be, { values: true })).includes('SECRET-VALUE-123'), '--values should show');
+    const has = (await listCookies(be, { has: 'access' })) as { exists: boolean };
+    assert(has.exists === true, '--has should find access');
+  });
+
+  await test('cookies delete removes exactly one unambiguous cookie', async () => {
+    const { be, removed } = fakeCookies();
+    const r = await deleteCookie(be, 'access', {});
+    assert(removed.length === 1 && removed[0].name === 'access' && removed[0].domain === 'app.example.com', 'wrong removal');
+    assert(!JSON.stringify(r).includes('SECRET'), 'delete report leaked a value');
+  });
+
+  await test('cookies delete refuses an ambiguous name and lists candidates without values', async () => {
+    const { be, removed } = fakeCookies();
+    let msg = '';
+    try { await deleteCookie(be, 'dup', {}); } catch (e) { assert(e instanceof CookieDeleteError, 'wrong error type'); msg = (e as Error).message; }
+    assert(msg.includes('matches 3 cookies'), `expected refusal, got: ${msg}`);
+    assert(msg.includes('domain=.example.com') && msg.includes('path=/api'), 'candidates not listed');
+    assert(!msg.includes('SECRET'), 'refusal leaked a value');
+    assert(removed.length === 0, 'must not delete when ambiguous');
+  });
+
+  await test('cookies delete narrows by --domain (exact) and --path', async () => {
+    const { be, removed } = fakeCookies();
+    await deleteCookie(be, 'dup', { domain: 'example.com', path: '/' });
+    assert(removed.length === 1 && removed[0].domain === '.example.com', `expected the .example.com one, got ${JSON.stringify(removed)}`);
+    let threw = false;
+    try { await deleteCookie(fakeCookies().be, 'dup', { domain: 'app.example.com' }); } catch { threw = true; }
+    assert(threw, 'domain app.example.com still matches two paths and must refuse');
+    const f = fakeCookies();
+    await deleteCookie(f.be, 'dup', { domain: 'app.example.com', path: '/api' });
+    assert(f.removed.length === 1 && f.removed[0].path === '/api', 'path narrowing failed');
+  });
+
+  await test('cookies delete on a missing name errors', async () => {
+    let threw = false;
+    try { await deleteCookie(fakeCookies().be, 'nope', {}); } catch (e) { threw = e instanceof CookieDeleteError; }
+    assert(threw, 'expected CookieDeleteError');
+  });
+
+  await test('cookies delete refuses http+https cookies sharing name/domain/path', async () => {
+    const f = fakeCookies([
+      { name: 'sid', domain: 'a.test', path: '/', sourceScheme: 'Secure', sourcePort: 443 },
+      { name: 'sid', domain: 'a.test', path: '/', sourceScheme: 'NonSecure', sourcePort: 80 },
+    ], { base: false });
+    let msg = '';
+    try { await deleteCookie(f.be, 'sid', { url: 'https://a.test/' }); } catch (e) { assert(e instanceof CookieDeleteError, 'wrong error type'); msg = (e as Error).message; }
+    assert(msg.includes('cannot delete just one'), `expected collision refusal, got: ${msg}`);
+    assert(msg.includes('scheme=NonSecure') && msg.includes('port=80') && msg.includes('scheme=Secure'), 'siblings not listed');
+    assert(!msg.includes('SECRET'), 'refusal leaked a value');
+    assert(f.removed.length === 0 && f.jar.length === 2, 'must not delete on collision');
+  });
+
+  await test('cookies delete passes partitionKey for a partitioned cookie and verifies', async () => {
+    const pk = { topLevelSite: 'https://top.test', hasCrossSiteAncestor: false };
+    const f = fakeCookies([{ name: 'chips', domain: 'emb.test', path: '/', partitionKey: pk, sourceScheme: 'Secure', sourcePort: 443 }], { base: false });
+    const r = await deleteCookie(f.be, 'chips', { all: true });
+    assert(f.removed.length === 1 && JSON.stringify(f.removed[0].partitionKey) === JSON.stringify(pk), `partitionKey not passed: ${JSON.stringify(f.removed)}`);
+    assert(r.deleted.length === 1 && f.jar.length === 0, 'cookie should be gone');
+    assert(!JSON.stringify(r).includes('SECRET'), 'report leaked a value');
+  });
+
+  await test('cookies delete refuses an unpartitioned target that shares its triple with a partitioned cookie', async () => {
+    const f = fakeCookies([
+      { name: 'p', domain: 'emb.test', path: '/', partitionKey: { topLevelSite: 'https://one.test' } },
+      { name: 'p', domain: 'emb.test', path: '/' },
+    ], { base: false });
+    // Unpartitioned target with a partitioned sibling: refused, since a key-less delete is ambiguous.
+    let threw = false;
+    try { await deleteCookie(f.be, 'p', { all: true }); } catch (e) { threw = e instanceof CookieDeleteError; }
+    assert(threw, 'unpartitioned target with a partitioned sibling must refuse');
+    assert(f.removed.length === 0, 'must not delete');
+  });
+
+  await test('cookies delete errors when the browser ignores the delete', async () => {
+    const f = fakeCookies([], { noop: true });
+    let err: unknown;
+    try { await deleteCookie(f.be, 'access', {}); } catch (e) { err = e; }
+    assert(err instanceof CookieVerifyError, `expected CookieVerifyError, got ${String(err)}`);
+    assert(!(err instanceof CookieDeleteError), 'verify failure must not map to exit 2');
+    assert((err as Error).message.includes('browser did not delete'), (err as Error).message);
+    assert(!(err as Error).message.includes('SECRET'), 'leaked a value');
+  });
+
+  // `auth export`: the bridge source is the same fake CDP jar, plus a fake
+  // controlled tab for localStorage. Files go to a fresh tmp dir (no git).
+  const authTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-auth-sim-'));
+  const authJar = () => [
+    { name: 'sid', domain: 'app.example.com', path: '/', expires: 2000000000, sameSite: 'None', secure: true },
+    { name: 'parent', domain: '.example.com', path: '/', expires: 1900000000 },
+    { name: 'sso', domain: '.login.example.com', path: '/' },
+    { name: 'chips', domain: 'emb.example.com', path: '/', partitionKey: { topLevelSite: 'https://top.test', hasCrossSiteAncestor: true } },
+    { name: 'lookalike', domain: 'notexample.com', path: '/' },
+    { name: 'other', domain: 'evil.test', path: '/' },
+  ].map((c) => fromCdpCookie({ value: 'SECRET-VALUE-123', httpOnly: true, ...c }));
+  const authSrc = (opt: { tabOrigin?: string } = {}): AuthSource & { reads: number } => {
+    const src = {
+      reads: 0,
+      cookies: async () => { src.reads++; return authJar(); },
+      localStorage: async (origin: string) => {
+        if (origin !== (opt.tabOrigin ?? 'https://app.example.com')) throw new AuthExportError(`no open tab at ${origin}.`);
+        return [{ name: 'token', value: 'SECRET-LS-456' }];
+      },
+    };
+    return src;
+  };
+  const refusal = async (src: AuthSource, opts: Record<string, unknown>): Promise<string> => {
+    try { await exportAuth(src, opts); } catch (e) { assert(e instanceof AuthExportError, `wrong error type: ${String(e)}`); return (e as Error).message; }
+    throw new Error(`expected a refusal for ${JSON.stringify(opts)}`);
+  };
+
+  await test('auth export keeps only allow-listed domains, writes 0600, prints no values', async () => {
+    const out = path.join(authTmp, 'a.json');
+    const r = await exportAuth(authSrc(), { out, domain: 'app.example.com,.login.example.com,emb.example.com', origin: ['https://app.example.com/some/path'] });
+    const text = JSON.stringify(r);
+    assert(!text.includes('SECRET'), `result leaked a value: ${text}`);
+    assert(r.cookies === 3, `expected 3 cookies, got ${r.cookies}`);
+    assert(r.cookiesByDomain['app.example.com'] === 1 && r.cookiesByDomain['login.example.com'] === 1, text);
+    assert(r.origins === 1 && r.localStorageKeys === 1 && r.partitionedCookies === 1, text);
+    assert(r.earliestExpiry === new Date(2000000000 * 1000).toISOString(), `earliestExpiry ${r.earliestExpiry}`);
+    assert((fs.statSync(out).mode & 0o777) === 0o600, `mode ${(fs.statSync(out).mode & 0o777).toString(8)}`);
+    const state = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const names = state.cookies.map((c: { name: string }) => c.name).sort();
+    assert(JSON.stringify(names) === '["chips","sid","sso"]', `cookies in file: ${names}`);
+    const chips = state.cookies.find((c: { name: string }) => c.name === 'chips');
+    assert(chips.partitionKey === 'https://top.test' && chips._crHasCrossSiteAncestor === true, `partitionKey shape: ${JSON.stringify(chips)}`);
+    assert(state.cookies.every((c: Record<string, unknown>) => c.value === 'SECRET-VALUE-123' && ['Strict', 'Lax', 'None'].includes(String(c.sameSite)) && !('sourceScheme' in c)), 'Playwright cookie shape');
+    assert(state.origins[0].origin === 'https://app.example.com' && state.origins[0].localStorage[0].value === 'SECRET-LS-456', 'origins');
+
+    // The parent domain pulls in .example.com and every subdomain, never the lookalike.
+    const out2 = path.join(authTmp, 'b.json');
+    const r2 = await exportAuth(authSrc(), { out: out2, domain: ['example.com'] });
+    assert(r2.cookies === 4 && r2.cookiesByDomain['example.com'] === 4, `parent allow-list: ${JSON.stringify(r2)}`);
+    assert(!fs.readFileSync(out2, 'utf8').includes('lookalike'), 'notexample.com matched example.com');
+  });
+
+  await test('auth export refuses missing --domain/--out before reading any cookie', async () => {
+    const src = authSrc();
+    assert((await refusal(src, { out: path.join(authTmp, 'x.json') })).includes('--domain is required'), 'missing --domain');
+    assert((await refusal(src, { out: path.join(authTmp, 'x.json'), domain: true })).includes('--domain is required'), 'valueless --domain');
+    assert((await refusal(src, { domain: 'example.com' })).includes('--out <path> is required'), 'missing --out');
+    assert((await refusal(src, { out: 'rel.json', domain: 'example.com' })).includes('absolute'), 'relative --out');
+    assert((await refusal(src, { out: path.join(authTmp, 'x.json'), domain: 'com' })).includes('bare label'), 'bare TLD');
+    assert((await refusal(src, { out: path.join(authTmp, 'x.json'), domain: 'https://example.com' })).includes('not a hostname'), 'scheme in --domain');
+    assert((await refusal(src, { out: path.join(authTmp, 'x.json'), domain: 'example.com', origin: 'https://evil.test' })).includes('outside the --domain allow-list'), 'origin outside allow-list');
+    assert((await refusal(src, { out: path.join(authTmp, 'nope', 'x.json'), domain: 'example.com' })).includes('does not exist'), 'missing dir');
+    assert(src.reads === 0, `cookies were read ${src.reads}x before refusing`);
+    assert(!fs.existsSync(path.join(authTmp, 'x.json')), 'a refused export wrote a file');
+  });
+
+  await test('auth export refuses an existing file without --force, symlinks even with it', async () => {
+    const out = path.join(authTmp, 'exists.json');
+    fs.writeFileSync(out, 'old', { mode: 0o644 });
+    assert((await refusal(authSrc(), { out, domain: 'example.com' })).includes('--force'), 'existing file');
+    assert(fs.readFileSync(out, 'utf8') === 'old', 'refusal touched the file');
+    await exportAuth(authSrc(), { out, domain: 'example.com', force: true });
+    assert((fs.statSync(out).mode & 0o777) === 0o600, '--force must chmod 0600');
+    assert(JSON.parse(fs.readFileSync(out, 'utf8')).cookies.length === 4, '--force overwrite content');
+
+    const victim = path.join(authTmp, 'victim.txt');
+    fs.writeFileSync(victim, 'keep');
+    const link = path.join(authTmp, 'link.json');
+    fs.symlinkSync(victim, link);
+    assert((await refusal(authSrc(), { out: link, domain: 'example.com' })).includes('already exists'), 'symlink without --force');
+    assert((await refusal(authSrc(), { out: link, domain: 'example.com', force: true })).includes('symlink'), 'symlink with --force');
+    assert(fs.readFileSync(victim, 'utf8') === 'keep', 'wrote through a symlink');
+  });
+
+  await test('auth export refuses an un-gitignored path in a git work tree', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-auth-git-'));
+    if (spawnSync('git', ['init', '-q', repo]).status !== 0) { console.log('    (git missing — skipped)'); return; }
+    const msg = await refusal(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+    assert(msg.includes('not gitignored'), msg);
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'auth.json\n');
+    const r = await exportAuth(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+    assert(r.cookies === 4, 'ignored path should export');
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  const leftovers = (dir: string) => fs.readdirSync(dir).filter((n) => n.endsWith('.tmp'));
+  const withCookieHook = (hook: () => void): AuthSource => ({ ...authSrc(), cookies: async () => { hook(); return authJar(); } });
+
+  await test('auth export --force replaces by rename: an open reader of the old file keeps the old bytes', async () => {
+    const out = path.join(authTmp, 'inode.json');
+    fs.writeFileSync(out, 'old-secret', { mode: 0o644 });
+    const reader = fs.openSync(out, 'r');
+    const oldIno = fs.fstatSync(reader).ino;
+    await exportAuth(authSrc(), { out, domain: 'example.com', force: true });
+    const buf = Buffer.alloc(32);
+    const n = fs.readSync(reader, buf, 0, 32, 0);
+    fs.closeSync(reader);
+    assert(buf.toString('utf8', 0, n) === 'old-secret', 'old inode was modified in place');
+    assert(fs.statSync(out).ino !== oldIno, 'target was not replaced by a new inode');
+    assert((fs.statSync(out).mode & 0o777) === 0o600, 'new file not 0600');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export without --force loses a create race with EEXIST and leaves the winner intact', async () => {
+    const out = path.join(authTmp, 'race.json');
+    const msg = await refusal(withCookieHook(() => fs.writeFileSync(out, 'winner')), { out, domain: 'example.com' });
+    assert(msg.includes('already exists'), msg);
+    assert(fs.readFileSync(out, 'utf8') === 'winner', 'racing file was clobbered');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export --force swapped to a symlink mid-export is refused, victim and old file untouched', async () => {
+    const out = path.join(authTmp, 'swap.json');
+    const victim = path.join(authTmp, 'victim2.txt');
+    fs.writeFileSync(victim, 'keep');
+    const msg = await refusal(withCookieHook(() => fs.symlinkSync(victim, out)), { out, domain: 'example.com', force: true });
+    assert(msg.includes('symlink'), msg);
+    assert(fs.readFileSync(victim, 'utf8') === 'keep', 'wrote through the symlink');
+    assert(fs.lstatSync(out).isSymbolicLink(), 'symlink was removed');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('writeSecretFile: a failed forced write leaves the old file byte-identical', async () => {
+    const out = path.join(authTmp, 'keep.json');
+    fs.writeFileSync(out, 'precious', { mode: 0o644 });
+    const ino = fs.statSync(out).ino;
+    let threw = false;
+    try { writeSecretFile(out, 'new', true, () => { throw new Error('boom'); }); } catch { threw = true; }
+    assert(threw, 'beforeCommit failure should propagate');
+    assert(fs.readFileSync(out, 'utf8') === 'precious' && fs.statSync(out).ino === ino, 'old file touched');
+    assert(leftovers(authTmp).length === 0, 'temp file left behind');
+  });
+
+  await test('auth export refuses when the parent directory is swapped during the cookie read', async () => {
+    const real = path.join(authTmp, 'p'); const moved = path.join(authTmp, 'p-moved'); const elsewhere = path.join(authTmp, 'elsewhere');
+    fs.mkdirSync(real); fs.mkdirSync(elsewhere);
+    const msg = await refusal(withCookieHook(() => { fs.renameSync(real, moved); fs.symlinkSync(elsewhere, real); }), {
+      out: path.join(real, 'x.json'), domain: 'example.com',
+    });
+    assert(msg.includes('changed while exporting'), msg);
+    assert(fs.readdirSync(elsewhere).length === 0 && fs.readdirSync(moved).length === 0, 'something was written after the swap');
+  });
+
+  await test('auth export git check fails closed (dubious ownership) and never runs repo-config commands', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-auth-git2-'));
+    if (spawnSync('git', ['init', '-q', repo]).status !== 0) { console.log('    (git missing — skipped)'); return; }
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'auth.json\n');
+    const marker = path.join(repo, 'fsmonitor-ran');
+    const hook = path.join(repo, 'fsm.sh');
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+    spawnSync('git', ['-C', repo, 'config', 'core.fsmonitor', hook]);
+    const r = await exportAuth(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+    assert(r.cookies === 4, 'ignored path should export');
+    assert(!fs.existsSync(marker), 'repo core.fsmonitor ran');
+    fs.rmSync(path.join(repo, 'auth.json'));
+    process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1';
+    try {
+      const msg = await refusal(authSrc(), { out: path.join(repo, 'auth.json'), domain: 'example.com' });
+      assert(msg.includes('git could not check'), msg);
+    } finally {
+      delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    }
+    assert(!fs.existsSync(path.join(repo, 'auth.json')), 'fail-closed refusal still wrote');
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  await test('record: a batch never carries auth.export (or other NEVER_RECORD steps) into a recording', async () => {
+    const exp = { cmd: 'auth.export', args: [], opts: { out: '/x' } };
+    const click = { cmd: 'click', args: ['@e1'] };
+    assert(recordableStep('auth.export', [], {}) === null, 'plain auth.export recorded');
+    assert(recordableStep('batch', [[exp]], {}) === null, 'all-excluded batch recorded');
+    const mixed = recordableStep('batch', [[click, exp, { cmd: 'batch', args: [[exp, click]] }]], {});
+    const steps = (mixed?.args[0] as Array<{ cmd: string }>) ?? [];
+    assert(JSON.stringify(mixed).includes('auth.export') === false, 'auth.export survived in a batch');
+    assert(steps.length === 2 && steps[0].cmd === 'click' && steps[1].cmd === 'batch', 'kept steps wrong');
+    assert(typeof mixed?.note === 'string' && mixed.note.includes('2'), 'no drop note');
+    assert(recordableStep('batch', [[click]], {})?.note === undefined, 'clean batch got a note');
+  });
+
+  await test('auth export refuses an --origin with no open tab and names no value', async () => {
+    const msg = await refusal(authSrc({ tabOrigin: 'https://other.example.com' }), {
+      out: path.join(authTmp, 'o.json'), domain: 'example.com', origin: 'https://app.example.com',
+    });
+    assert(msg.includes('no open tab at https://app.example.com') && !msg.includes('SECRET'), msg);
+    assert(!fs.existsSync(path.join(authTmp, 'o.json')), 'refused export wrote a file');
+    fs.rmSync(authTmp, { recursive: true, force: true });
+  });
 
   // Regression: the self-heal in bridgeEval is gated on this predicate, so a
   // string it fails to match is a silent post-navigation failure for the user.

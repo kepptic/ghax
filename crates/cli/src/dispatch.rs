@@ -118,6 +118,11 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             crate::cookies::cmd_cookies(cfg, &parsed)
         }
 
+        "auth" => {
+            let parsed = args::parse(rest);
+            crate::auth::cmd_auth(cfg, &parsed)
+        }
+
         "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
         | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
         | "storage" | "perf" | "profile" => {

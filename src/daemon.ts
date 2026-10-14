@@ -72,6 +72,9 @@ import {
   type BridgeTab,
   type ControlTarget,
 } from './bridge';
+import { recordableStep } from './record-filter';
+import { AuthExportError, exportAuth, LOCAL_STORAGE_EXPR, originOf, parseLocalStorage, type AuthSource } from './auth-export';
+import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as path from 'path';
@@ -87,6 +90,7 @@ interface RecordedStep {
   args: unknown[];
   opts: Record<string, unknown>;
   at: number;
+  note?: string;
 }
 
 interface Recording {
@@ -196,6 +200,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'bridge.stats',
+  'cookies', 'cookies.delete', 'storage', 'auth.export',
   'batch', 'record.start', 'record.stop', 'record.status',
   'gesture.click', 'gesture.dblclick', 'gesture.scroll', 'gesture.key',
 ]);
@@ -222,7 +227,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
  * Console/network need no replay at all — they read daemon-local buffers.
  */
 const BRIDGE_RETRY_SAFE = new Set([
-  'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait',
+  'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait', 'cookies',
 ]);
 
 function register(name: string, fn: Handler) {
@@ -3062,58 +3067,85 @@ function buildHar(entries: NetworkEntry[]): unknown {
   };
 }
 
-/**
- * Redact a cookie's value unless the caller opted into raw values.
- * Everything else (name, domain, path, expires, httpOnly, secure,
- * sameSite) is safe to print — it's the raw session/auth value that's
- * the privacy hazard (see docs/reports/resolved/2026-06-23-setsail-localhost-dev-session.md).
- */
-function redactCookie(cookie: import('playwright').Cookie, showValues: boolean): Record<string, unknown> {
-  if (showValues) return { ...cookie };
-  const { value, ...rest } = cookie;
-  const len = typeof value === 'string' ? value.length : 0;
-  return { ...rest, value: `<redacted, ${len} chars>` };
+function cookieBackend(ctx: Ctx): CookieBackend {
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    return {
+      activeUrl: async () => String(await bridgeEval(ctx, 'location.href')),
+      list: async (urls) => {
+        const r = (urls
+          ? await bridge.send('Network.getCookies', { urls })
+          : await bridge.send('Network.getAllCookies')) as { cookies?: Array<Record<string, unknown>> };
+        return (r.cookies ?? []).map(fromCdpCookie);
+      },
+      remove: async (c) => { await bridge.send('Network.deleteCookies', { ...c }); },
+    };
+  }
+  return {
+    activeUrl: async () => (await activePage(ctx)).url(),
+    list: async (urls) => {
+      const context = (await activePage(ctx)).context();
+      return (urls ? await context.cookies(urls) : await context.cookies()) as unknown as Cookie[];
+    },
+    remove: async (c) => { await (await activePage(ctx)).context().clearCookies(c); },
+  };
 }
 
-register('cookies', async (ctx, _args, opts) => {
-  const page = await activePage(ctx);
-  const context = page.context();
+register('cookies', async (ctx, _args, opts) => listCookies(cookieBackend(ctx), opts));
 
-  const showValues = opts.values === true;
-  const wantAll = opts.all === true;
-  const domainFilter = typeof opts.domain === 'string' ? opts.domain.toLowerCase() : undefined;
-  const urlFilter = typeof opts.url === 'string' ? opts.url : undefined;
-  const hasName = typeof opts.has === 'string' ? opts.has : undefined;
-
-  // Scope resolution:
-  //   --url <u>          → cookies applicable to that URL (Playwright's own
-  //                        domain/path/secure applicability match — handles
-  //                        subdomains, localhost, IP literals, and ports
-  //                        correctly; don't hand-roll this).
-  //   --all / --domain    → whole-profile dump, filtered by --domain if given.
-  //   (default)           → cookies applicable to the active tab's URL only.
-  let cookies: import('playwright').Cookie[];
-  if (urlFilter) {
-    cookies = await context.cookies([urlFilter]);
-  } else if (wantAll || domainFilter) {
-    cookies = await context.cookies();
-  } else {
-    cookies = await context.cookies([page.url()]);
+register('cookies.delete', async (ctx, args, opts) => {
+  try {
+    return await deleteCookie(cookieBackend(ctx), String(args[0] ?? ''), opts);
+  } catch (err) {
+    if (err instanceof CookieDeleteError) throw new DaemonError(err.message, 2);
+    throw err;
   }
+});
 
-  if (domainFilter) {
-    cookies = cookies.filter((c) => {
-      const d = String(c.domain ?? '').replace(/^\./, '').toLowerCase();
-      return d.includes(domainFilter);
-    });
+// `auth export`: a Playwright storageState file for headless suites. The
+// file is written HERE, not in the CLI, so cookie and localStorage values
+// never travel back over the RPC socket (see src/auth-export.ts). Not
+// retry-safe: a replay after the file landed would hit O_EXCL.
+function authSource(ctx: Ctx): AuthSource {
+  const cookies = async () => cookieBackend(ctx).list(null);
+  if (ctx.bridgeMode) {
+    return {
+      cookies,
+      // The bridge evaluates only in the tab it controls, so that tab must
+      // already be at the origin. Never navigate it for an export.
+      localStorage: async (origin) => {
+        const at = originOf(String(await bridgeEval(ctx, 'location.href')));
+        if (at !== origin) {
+          throw new AuthExportError(
+            `the controlled tab is at ${at ?? 'a non-web page'}, not ${origin}. Open ${origin} in a tab and ` +
+              '`ghax tab <id>` to it first; ghax does not navigate your tabs for an export.',
+          );
+        }
+        return parseLocalStorage(await bridgeEval(ctx, LOCAL_STORAGE_EXPR), origin);
+      },
+    };
   }
+  return {
+    cookies,
+    localStorage: async (origin) => {
+      const page = (await allPages(ctx)).find((p) => originOf(p.url()) === origin);
+      if (!page) {
+        throw new AuthExportError(
+          `no open tab at ${origin}. Open it in the browser first; ghax does not navigate your tabs for an export.`,
+        );
+      }
+      return parseLocalStorage(await page.evaluate(LOCAL_STORAGE_EXPR), origin);
+    },
+  };
+}
 
-  if (hasName !== undefined) {
-    const exists = cookies.some((c) => c.name === hasName);
-    return { name: hasName, exists };
+register('auth.export', async (ctx, _args, opts) => {
+  try {
+    return await exportAuth(authSource(ctx), opts);
+  } catch (err) {
+    if (err instanceof AuthExportError) throw new DaemonError(err.message, 2);
+    throw err;
   }
-
-  return cookies.map((c) => redactCookie(c, showValues));
 });
 
 register('storage', async (ctx, args) => {
@@ -3123,11 +3155,12 @@ register('storage', async (ctx, args) => {
     throw new Error(`Unknown storage area: ${area} (expected local or session)`);
   }
   const api = area === 'local' ? 'localStorage' : 'sessionStorage';
-  const page = await activePage(ctx);
-
+  // Bridge: no Playwright page, so run the same expression through
+  // Runtime.evaluate on the controlled tab. Same expressions, same output.
+  const page = ctx.bridgeMode ? null : await activePage(ctx);
   const evalAndReturn = async (expr: string) => {
-    const r = await page.evaluate(expr);
-    return r;
+    if (ctx.bridgeMode) return await bridgeEval(ctx, expr);
+    return await page!.evaluate(expr);
   };
 
   switch (op) {
@@ -4275,19 +4308,6 @@ register('perf', async (ctx, _args, opts) => {
 
 // ─── Recording ─────────────────────────────────────────────────
 
-// Commands we never store in a recording — they're either meta-operations
-// on the recorder itself, or expensive read-only queries a replay should
-// not re-run as the user's "actions".
-const NEVER_RECORD = new Set([
-  'record.start', 'record.stop', 'record.status',
-  'status', 'health',
-  'tabs', 'console', 'network', 'cookies', 'text', 'html',
-  // Read-only queries that don't change page state — replay would re-fire
-  // the measurement, not the action, and waste time. Add every new
-  // read-only handler here.
-  'find', 'is', 'perf', 'xpath', 'box',
-]);
-
 register('record.start', async (ctx, args) => {
   const name = String(args[0] ?? `rec-${Date.now()}`);
   ctx.recording = { name, startedAt: Date.now(), steps: [] };
@@ -4692,8 +4712,9 @@ async function main() {
     if (!handler) throw new Error(`Unknown command: ${cmd}`);
     lastActivity = Date.now();
     const result = await handler(ctx, args, opts);
-    if (ctx.recording && !NEVER_RECORD.has(cmd)) {
-      ctx.recording.steps.push({ cmd, args, opts, at: Date.now() });
+    if (ctx.recording) {
+      const step = recordableStep(cmd, args, opts);
+      if (step) ctx.recording.steps.push({ ...step, at: Date.now() });
     }
     return result;
   };

@@ -1149,6 +1149,69 @@ c('is <check> asserts element state', async () => {
   assert(data.check === 'visible' && data.result === true, `is visible <link ref> → ${JSON.stringify(data)}`);
 });
 
+c('cookies delete removes exactly one cookie and refuses ambiguity', async () => {
+  await run(['goto', 'https://example.com']);
+  const name = `ghax_smoke_del_${Date.now()}`;
+  await run(['eval', `document.cookie = '${name}=SECRETv1zz; path=/'; document.cookie = '${name}=SECRETv2zz; path=/ghaxsub'`]);
+  // Same name on two paths, only "/" applies to the tab URL; ask for the whole profile to see both.
+  const amb = await run(['cookies', 'delete', name, '--all'], { allowFailure: true });
+  assert(amb.exitCode !== 0, 'ambiguous delete should fail');
+  assert(/matches 2 cookies/.test(amb.stderr + amb.stdout), `expected refusal, got: ${amb.stderr}${amb.stdout}`);
+  assert(!/SECRETv/.test(amb.stderr + amb.stdout), 'refusal must not print values');
+  const del = await run(['cookies', 'delete', name, '--all', '--path', '/', '--json']);
+  const out = parseJson<{ deleted: Array<{ name: string; path: string }> }>(del.stdout);
+  assert(out.deleted.length === 1 && out.deleted[0].path === '/', `unexpected delete report: ${del.stdout}`);
+  const left = parseJson<Array<{ name: string; path: string }>>((await run(['cookies', '--all', '--json'])).stdout)
+    .filter((cc) => cc.name === name);
+  assert(left.length === 1 && left[0].path === '/ghaxsub', `expected only the /ghaxsub cookie left, got ${JSON.stringify(left)}`);
+  await run(['cookies', 'delete', name, '--all']);
+});
+
+c('auth export writes a 0600 storageState that Playwright loads', async () => {
+  await run(['goto', 'https://example.com']); // storage is disabled on data: URLs
+  const name = `ghax_smoke_auth_${Date.now()}`;
+  const raw = `SECRETauth${Date.now()}`;
+  await run(['eval', `document.cookie = '${name}=${raw}; path=/; max-age=3600'; localStorage.setItem('${name}', '${raw}')`]);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-smoke-auth-'));
+  const out = path.join(dir, 'state.json');
+  const exportArgs = ['auth', 'export', '--out', out, '--domain', 'example.com', '--origin', 'https://example.com', '--json'];
+  try {
+    const r = await run(exportArgs);
+    assert(!(r.stdout + r.stderr).includes(raw), 'auth export printed a value');
+    const meta = parseJson<{ path: string; cookiesByDomain: Record<string, number>; origins: number; localStorageKeys: number }>(r.stdout);
+    assert(meta.cookiesByDomain['example.com'] >= 1 && meta.origins === 1 && meta.localStorageKeys >= 1, `unexpected report: ${r.stdout}`);
+    assert((fs.statSync(out).mode & 0o777) === 0o600, `mode ${(fs.statSync(out).mode & 0o777).toString(8)}, want 600`);
+
+    const again = await run(exportArgs, { allowFailure: true });
+    assert(again.exitCode !== 0 && /already exists/.test(again.stderr), `existing file without --force should refuse: ${again.stderr}`);
+    await run([...exportArgs, '--force']);
+    const noDomain = await run(['auth', 'export', '--out', path.join(dir, 'x.json')], { allowFailure: true });
+    assert(noDomain.exitCode !== 0 && !fs.existsSync(path.join(dir, 'x.json')), 'missing --domain should refuse');
+
+    // The point of the verb: a fresh headless browser runs as the exported session.
+    const { chromium } = await import('playwright');
+    let browser: import('playwright').Browser | null = null;
+    for (const channel of ['chrome', 'msedge', undefined]) {
+      try { browser = await chromium.launch({ channel, headless: true }); break; } catch { /* try the next channel */ }
+    }
+    assert(browser, 'no Chromium for chromium.launch (tried chrome, msedge, bundled)');
+    try {
+      const context = await browser!.newContext({ storageState: out });
+      const got = (await context.cookies('https://example.com')).find((cc) => cc.name === name);
+      assert(got && got.value === raw, `cookie did not load from storageState: ${JSON.stringify(got ?? null).slice(0, 120)}`);
+      const st = await context.storageState();
+      const ls = st.origins.find((o) => o.origin === 'https://example.com')?.localStorage ?? [];
+      assert(ls.some((i) => i.name === name && i.value === raw), 'localStorage did not load from storageState');
+    } finally {
+      await browser!.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    await run(['cookies', 'delete', name, '--domain', 'example.com', '--path', '/'], { allowFailure: true });
+    await run(['storage', 'local', 'remove', name], { allowFailure: true });
+  }
+});
+
 c('storage local round-trips set/get/remove', async () => {
   await run(['goto', 'https://example.com']); // storage is disabled on data: URLs
   const key = `ghax-smoke-${Date.now()}`;
