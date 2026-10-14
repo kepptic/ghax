@@ -21,13 +21,21 @@ export interface Cookie {
   [k: string]: unknown;
 }
 
+/** What a delete sends: the triple, plus partitionKey for a CHIPS cookie. */
+export interface CookieTarget {
+  name: string;
+  domain: string;
+  path: string;
+  partitionKey?: unknown;
+}
+
 export interface CookieBackend {
   /** URL of the active tab. */
   activeUrl(): Promise<string>;
   /** Cookies applicable to `urls`, or the whole profile when null. */
   list(urls: string[] | null): Promise<Cookie[]>;
   /** Delete exactly the cookie with this name/domain/path. */
-  remove(c: { name: string; domain: string; path: string }): Promise<void>;
+  remove(c: CookieTarget): Promise<void>;
 }
 
 export interface CookieOpts {
@@ -52,6 +60,12 @@ export function fromCdpCookie(c: Record<string, unknown>): Cookie {
     secure: c.secure === true,
   };
   if (typeof c.sameSite === 'string') out.sameSite = c.sameSite;
+  // Identity fields the delete path needs: Chromium's delete filter ignores
+  // scheme/port, and a partitioned cookie is invisible to a delete that
+  // carries no partitionKey.
+  if (c.partitionKey !== undefined && c.partitionKey !== null) out.partitionKey = c.partitionKey;
+  if (typeof c.sourceScheme === 'string') out.sourceScheme = c.sourceScheme;
+  if (typeof c.sourcePort === 'number') out.sourcePort = c.sourcePort;
   return out;
 }
 
@@ -84,6 +98,21 @@ export async function listCookies(be: CookieBackend, opts: CookieOpts): Promise<
 }
 
 export class CookieDeleteError extends Error {}
+/** The browser accepted the delete but the cookie state says otherwise (exit 4). */
+export class CookieVerifyError extends Error {}
+
+const hasPartition = (c: Cookie): boolean => c.partitionKey !== undefined && c.partitionKey !== null;
+const samePartition = (a: Cookie, b: Cookie): boolean =>
+  hasPartition(a) === hasPartition(b) && (!hasPartition(a) || JSON.stringify(a.partitionKey) === JSON.stringify(b.partitionKey));
+const sameTriple = (a: Cookie, b: Cookie): boolean => a.name === b.name && a.domain === b.domain && a.path === b.path;
+const sameCookie = (a: Cookie, b: Cookie): boolean =>
+  sameTriple(a, b) && samePartition(a, b) && a.sourceScheme === b.sourceScheme && a.sourcePort === b.sourcePort;
+
+/** Describe a cookie for an error message: identity only, never the value. */
+function describe(c: Cookie): string {
+  const part = hasPartition(c) ? `  partition=${JSON.stringify(c.partitionKey)}` : '';
+  return `  ${c.name}  domain=${c.domain}  path=${c.path}  scheme=${c.sourceScheme ?? '?'}  port=${c.sourcePort ?? '?'}${part}`;
+}
 
 /**
  * Delete one cookie by name. Scope is the same as listing (active tab by
@@ -91,12 +120,18 @@ export class CookieDeleteError extends Error {}
  * cookie's domain (leading dot ignored) so a short substring can't widen the
  * match; --path must equal exactly. More than one match refuses and lists
  * name/domain/path only.
+ *
+ * The browser's delete filter is only name+domain+path(+partitionKey), so
+ * after narrowing to one target we re-read the whole profile: if a sibling
+ * with the same triple exists (e.g. http and https origin-bound cookies) the
+ * delete cannot be exact and we refuse. After deleting we re-read again and
+ * only report success if the target is really gone.
  */
 export async function deleteCookie(
   be: CookieBackend,
   name: string,
   opts: CookieOpts,
-): Promise<{ deleted: Array<{ name: string; domain: string; path: string }> }> {
+): Promise<{ deleted: Array<{ name: string; domain: string; path: string }>; alsoRemoved?: string[] }> {
   if (!name) throw new CookieDeleteError('Usage: cookies delete <name> [--domain <d>] [--url <u>] [--path <p>]');
   const hasDomain = typeof opts.domain === 'string';
   const domainWant = hasDomain ? String(opts.domain).replace(/^\./, '').toLowerCase() : '';
@@ -112,12 +147,40 @@ export async function deleteCookie(
     );
   }
   if (cookies.length > 1) {
-    const lines = cookies.map((c) => `  ${c.name}  domain=${c.domain}  path=${c.path}`).join('\n');
+    const lines = cookies.map(describe).join('\n');
     throw new CookieDeleteError(
       `"${name}" matches ${cookies.length} cookies; refusing to guess. Re-run with --domain and/or --path:\n${lines}`,
     );
   }
-  const target = { name: cookies[0].name, domain: cookies[0].domain, path: cookies[0].path };
+  const picked = cookies[0];
+
+  // Collision check against the FULL profile, not the scoped view. A target
+  // without a partitionKey collides with anything sharing its triple (a
+  // delete with no key may sweep partitions); a partitioned target only with
+  // siblings in the same partition, since the key makes the delete exact there.
+  const before = await be.list(null);
+  const siblings = before.filter((c) => sameTriple(c, picked) && (hasPartition(picked) ? samePartition(c, picked) : true));
+  if (siblings.length > 1) {
+    throw new CookieDeleteError(
+      `"${name}" at domain=${picked.domain} path=${picked.path} exists ${siblings.length} times (scheme/port/partition differ), ` +
+        `and the browser can only delete by name+domain+path, so it cannot delete just one of them. Nothing was deleted:\n${siblings.map(describe).join('\n')}`,
+    );
+  }
+
+  const target: CookieTarget = { name: picked.name, domain: picked.domain, path: picked.path };
+  if (hasPartition(picked)) target.partitionKey = picked.partitionKey;
   await be.remove(target);
-  return { deleted: [target] };
+
+  const after = await be.list(null);
+  if (after.some((c) => sameCookie(c, picked))) {
+    throw new CookieVerifyError(
+      `browser did not delete "${name}" (domain=${picked.domain} path=${picked.path}${hasPartition(picked) ? ' partitioned' : ''}); it is still present after the delete call.`,
+    );
+  }
+  const collateral = before.filter((c) => !sameCookie(c, picked) && sameTriple(c, picked) && !after.some((a) => sameCookie(a, c)));
+  const out: { deleted: Array<{ name: string; domain: string; path: string }>; alsoRemoved?: string[] } = {
+    deleted: [{ name: picked.name, domain: picked.domain, path: picked.path }],
+  };
+  if (collateral.length) out.alsoRemoved = collateral.map((c) => describe(c).trim());
+  return out;
 }

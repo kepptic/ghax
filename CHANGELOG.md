@@ -15,7 +15,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the bridge. Deletes exactly one cookie and reports its name, domain and
   path (never the value). A name that matches more than one domain/path
   refuses and lists the candidates. Expire an access token instantly instead
-  of waiting out its lifetime.
+  of waiting out its lifetime. The browser deletes by name+domain+path only,
+  so it also refuses when http/https or partitioned siblings share that triple
+  (exit 2), passes `partitionKey` for CHIPS cookies, and re-reads the profile
+  to confirm the removal (exit 4 if the cookie is still there).
 
 ## [0.9.0] - 2026-09-27
 ### Added

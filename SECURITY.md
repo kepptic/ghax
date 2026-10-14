@@ -61,7 +61,7 @@ to 127.0.0.1.
 ### Data exposure
 
 ghax can read:
-- Every tab's DOM, cookies, localStorage, sessionStorage.
+- Every tab's DOM, cookies, localStorage, sessionStorage. Over the bridge, `ghax cookies --all --values` returns every cookie in the real profile, HttpOnly ones included.
 - Every extension's `chrome.storage.*` (auth tokens often live here).
 - Full console + network capture (5k rolling buffers each).
 - Page errors including stack traces and source locations.

@@ -116,7 +116,7 @@ ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
 snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box,
-tabs/tab/new-window, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage. **Not (yet) over the
+tabs/tab/new-window, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs). **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
 yet": viewport/responsive, qa/perf/profile, gestures,
 and the `ext` family (SW/panel/hot-reload).

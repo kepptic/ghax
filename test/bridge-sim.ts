@@ -31,7 +31,7 @@ import {
   bridgeSnapshot,
   isStaleContextError,
 } from '../src/bridge';
-import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
+import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
 
@@ -293,20 +293,39 @@ async function main(): Promise<void> {
 
   // Cookie logic is shared by both transports; the backend here fakes the
   // bridge's Network.getCookies / deleteCookies replies (CDP shape).
-  const fakeCookies = (): { be: CookieBackend; removed: Array<Record<string, string>> } => {
-    const jar: Cookie[] = [
-      { name: 'access', domain: 'app.example.com', path: '/', secure: true, sameSite: 'Lax' },
+  const fakeCookies = (
+    extra: Array<Record<string, unknown>> = [],
+    opt: { noop?: boolean; base?: boolean } = {},
+  ): { be: CookieBackend; removed: Array<Record<string, unknown>>; jar: Cookie[] } => {
+    const base = opt.base === false ? [] : [
+      { name: 'access', domain: 'app.example.com', path: '/', secure: true, sameSite: 'Lax', sourceScheme: 'Secure', sourcePort: 443 },
       { name: 'dup', domain: 'app.example.com', path: '/', secure: false },
       { name: 'dup', domain: '.example.com', path: '/', secure: false },
       { name: 'dup', domain: 'app.example.com', path: '/api', secure: false },
-    ].map((c) => fromCdpCookie({ ...c, value: 'SECRET-VALUE-123', expires: -1, httpOnly: true }));
-    const removed: Array<Record<string, string>> = [];
+    ];
+    const jar: Cookie[] = [...base, ...extra].map((c) => fromCdpCookie({ value: 'SECRET-VALUE-123', expires: -1, httpOnly: true, ...c }));
+    const removed: Array<Record<string, unknown>> = [];
     return {
       removed,
+      jar,
       be: {
         activeUrl: async () => 'https://app.example.com/',
-        list: async () => jar.filter((c) => !removed.some((r) => r.name === c.name && r.domain === c.domain && r.path === c.path)),
-        remove: async (c) => { removed.push(c); },
+        // A URL-scoped read only returns cookies sent to that URL (origin-bound scheme), as the browser does.
+        list: async (urls) => jar.filter((c) => !urls || c.sourceScheme === undefined
+          || urls.some((u) => (new URL(u).protocol === 'https:') === (c.sourceScheme === 'Secure'))),
+        // Mimics Chromium: filter is name+domain+path(+partitionKey); scheme/port ignored.
+        // Without a partitionKey only unpartitioned cookies match (the "skips partitioned" reading).
+        remove: async (c) => {
+          removed.push({ ...c });
+          if (opt.noop) return;
+          for (let i = jar.length - 1; i >= 0; i--) {
+            const j = jar[i];
+            const keyMatch = c.partitionKey === undefined
+              ? j.partitionKey === undefined
+              : JSON.stringify(j.partitionKey) === JSON.stringify(c.partitionKey);
+            if (j.name === c.name && j.domain === c.domain && j.path === c.path && keyMatch) jar.splice(i, 1);
+          }
+        },
       },
     };
   };
@@ -354,6 +373,50 @@ async function main(): Promise<void> {
     let threw = false;
     try { await deleteCookie(fakeCookies().be, 'nope', {}); } catch (e) { threw = e instanceof CookieDeleteError; }
     assert(threw, 'expected CookieDeleteError');
+  });
+
+  await test('cookies delete refuses http+https cookies sharing name/domain/path', async () => {
+    const f = fakeCookies([
+      { name: 'sid', domain: 'a.test', path: '/', sourceScheme: 'Secure', sourcePort: 443 },
+      { name: 'sid', domain: 'a.test', path: '/', sourceScheme: 'NonSecure', sourcePort: 80 },
+    ], { base: false });
+    let msg = '';
+    try { await deleteCookie(f.be, 'sid', { url: 'https://a.test/' }); } catch (e) { assert(e instanceof CookieDeleteError, 'wrong error type'); msg = (e as Error).message; }
+    assert(msg.includes('cannot delete just one'), `expected collision refusal, got: ${msg}`);
+    assert(msg.includes('scheme=NonSecure') && msg.includes('port=80') && msg.includes('scheme=Secure'), 'siblings not listed');
+    assert(!msg.includes('SECRET'), 'refusal leaked a value');
+    assert(f.removed.length === 0 && f.jar.length === 2, 'must not delete on collision');
+  });
+
+  await test('cookies delete passes partitionKey for a partitioned cookie and verifies', async () => {
+    const pk = { topLevelSite: 'https://top.test', hasCrossSiteAncestor: false };
+    const f = fakeCookies([{ name: 'chips', domain: 'emb.test', path: '/', partitionKey: pk, sourceScheme: 'Secure', sourcePort: 443 }], { base: false });
+    const r = await deleteCookie(f.be, 'chips', { all: true });
+    assert(f.removed.length === 1 && JSON.stringify(f.removed[0].partitionKey) === JSON.stringify(pk), `partitionKey not passed: ${JSON.stringify(f.removed)}`);
+    assert(r.deleted.length === 1 && f.jar.length === 0, 'cookie should be gone');
+    assert(!JSON.stringify(r).includes('SECRET'), 'report leaked a value');
+  });
+
+  await test('cookies delete refuses an unpartitioned target that shares its triple with a partitioned cookie', async () => {
+    const f = fakeCookies([
+      { name: 'p', domain: 'emb.test', path: '/', partitionKey: { topLevelSite: 'https://one.test' } },
+      { name: 'p', domain: 'emb.test', path: '/' },
+    ], { base: false });
+    // Unpartitioned target with a partitioned sibling: refused, since a key-less delete is ambiguous.
+    let threw = false;
+    try { await deleteCookie(f.be, 'p', { all: true }); } catch (e) { threw = e instanceof CookieDeleteError; }
+    assert(threw, 'unpartitioned target with a partitioned sibling must refuse');
+    assert(f.removed.length === 0, 'must not delete');
+  });
+
+  await test('cookies delete errors when the browser ignores the delete', async () => {
+    const f = fakeCookies([], { noop: true });
+    let err: unknown;
+    try { await deleteCookie(f.be, 'access', {}); } catch (e) { err = e; }
+    assert(err instanceof CookieVerifyError, `expected CookieVerifyError, got ${String(err)}`);
+    assert(!(err instanceof CookieDeleteError), 'verify failure must not map to exit 2');
+    assert((err as Error).message.includes('browser did not delete'), (err as Error).message);
+    assert(!(err as Error).message.includes('SECRET'), 'leaked a value');
   });
 
   // Regression: the self-heal in bridgeEval is gated on this predicate, so a

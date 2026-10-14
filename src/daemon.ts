@@ -3022,7 +3022,7 @@ function cookieBackend(ctx: Ctx): CookieBackend {
           : await bridge.send('Network.getAllCookies')) as { cookies?: Array<Record<string, unknown>> };
         return (r.cookies ?? []).map(fromCdpCookie);
       },
-      remove: async (c) => { await bridge.send('Network.deleteCookies', c); },
+      remove: async (c) => { await bridge.send('Network.deleteCookies', { ...c }); },
     };
   }
   return {
