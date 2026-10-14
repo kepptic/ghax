@@ -121,9 +121,11 @@ INNER="$TMP_DIR/ghax-$TRIPLE"
 [ -f "$INNER/ghax-daemon.mjs" ] || { echo "install-release: daemon bundle missing in archive" >&2; exit 1; }
 mkdir -p "$BIN_DIR" "$SHARE_DIR" \
   || { echo "install-release: cannot create $BIN_DIR or $SHARE_DIR. Set GHAX_BIN_DIR to a writable dir and re-run" >&2; exit 1; }
-cp "$INNER/ghax" "$BIN_DIR/ghax" \
-  || { echo "install-release: cannot write $BIN_DIR/ghax. Set GHAX_BIN_DIR to a writable dir and re-run" >&2; exit 1; }
-chmod +x "$BIN_DIR/ghax"
+# Copy to a temp name then rename: overwriting a signed Mach-O in place can
+# leave the kernel's cached code signature stale ("Killed: 9" on macOS).
+BIN_TMP="$BIN_DIR/.ghax.tmp.$$"
+{ cp "$INNER/ghax" "$BIN_TMP" && chmod +x "$BIN_TMP" && mv -f "$BIN_TMP" "$BIN_DIR/ghax"; } \
+  || { rm -f "$BIN_TMP"; echo "install-release: cannot write $BIN_DIR/ghax. Set GHAX_BIN_DIR to a writable dir and re-run" >&2; exit 1; }
 cp "$INNER/ghax-daemon.mjs" "$SHARE_DIR/ghax-daemon.mjs"
 
 # Bootstrap node_modules. The shared helper handles version-mismatch
@@ -162,7 +164,13 @@ if [ -z "$ACTIVE" ] || [ "$(resolve_path "$ACTIVE")" != "$(resolve_path "$BIN_DI
   else
     echo "install-release: 'ghax' on your PATH is $ACTIVE, not the one just installed ($BIN_DIR/ghax)." >&2
     if [ -L "$ACTIVE" ]; then
-      echo "                It is a symlink to $(readlink "$ACTIVE") (likely an in-repo dev build)." >&2
+      LINK_TARGET="$(readlink "$ACTIVE")"
+      case "$LINK_TARGET" in
+        *target/release/ghax|*target/debug/ghax)
+          echo "                It is a symlink to $LINK_TARGET (likely an in-repo dev build)." >&2 ;;
+        *)
+          echo "                It is a symlink to $LINK_TARGET." >&2 ;;
+      esac
     fi
     echo "                Fix, either:" >&2
     echo "                  1. rm \"$ACTIVE\"  (PATH falls through to $BIN_DIR)" >&2
