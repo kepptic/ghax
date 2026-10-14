@@ -34,23 +34,28 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Design: `docs/design/plan/11-multi-browser.md` (phase 1).
 - **Every tab says which browser and profile it's in.** `ghax tabs` prints
   one line per tab:
-  `#3  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224`.
+  `#3  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224`.
   `--json` rows add `index`, `chromeTabId`, `browser`, `profile` and
   `windowId`. On the bridge the id is `<alias>:<chromeTabId>`, where the
-  alias is the extension popup's new **Profile name** (slugged), else
-  `<brand>-<first 6 of instanceId>`. Two browsers can both have a tab 42;
+  alias is `<brand>-<profile>` from the extension popup's new **Profile name**
+  (slugged), else `<brand>-<first 6 of instanceId>`. Aliases are unique: a
+  duplicate gets the instance prefix appended (longer if it still collides),
+  and a live browser keeps its alias when a same-name one connects. Two browsers can both have a tab 42;
   their ids no longer collide. On CDP the id is still the target id, the
   browser comes from the attach, and the profile is `—`.
 - **`tab` takes `#n`, a full id, or a bare number.** `#n` is row n of the
   last `ghax tabs` and is refused if that tab has closed since (quote it in
   bash: `ghax tab '#3'`). A bare number works only when exactly one tab has
-  that chrome tab id; none or several is refused, listing every match with
+  that chrome tab id (and the last listing did not show it in another
+  browser too); none or several is refused, listing every match with
   its full identity. `bridge control --tab-id` resolves the same way.
   `tab` / `new-window` print the tab's full identity. Refusals (a tab
   another agent owns, an unattachable tab) name the id, title, browser and
   profile.
 - **Extension:** the popup's "Label" field is now **Profile name** and shows
-  in the popup header. `hello` adds `profile` and `brandVersion`;
+  in the popup header. `hello` adds `profile`, `brandVersion` and a per-browser-session
+  `sessionNonce` (a `#n` from before a browser restart is refused; profile
+  names are stripped of control characters and capped at 40);
   `list-tabs` rows add `windowId` and `index`. An older extension still
   works: its tabs get the `<brand>-<short6>` alias. `bridge instances` rows
   add `profile`, `alias` and `brandVersion`; `bridge use` accepts an alias.
@@ -59,7 +64,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Breaking
 - **Bridge tab ids are strings.** `ghax tabs`, `find`, `tab`, `new-window`,
   `status.activeTabId` and `bridge control`'s `tabId` now carry
-  `<alias>:<chromeTabId>` (e.g. `work:42`) instead of `"42"`/`42`. The raw
+  `<alias>:<chromeTabId>` (e.g. `edge-work:42`) instead of `"42"`/`42`. The raw
   number is in `chromeTabId`. `bridge instances` and `/bridge-status`
   `controlledTabId` stay numeric. Plain `ghax tabs` output changed from one
   JSON object per line to the text layout above; use `--json` to parse.

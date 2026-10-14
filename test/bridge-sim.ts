@@ -144,6 +144,8 @@ class FakeExt {
   /** Set to send `profile`/`brandVersion` in hello, as a tab-identity-aware
    * extension does. Left null, hello carries only `label` (older builds). */
   profile: string | null = null;
+  /** Set to send `sessionNonce` in hello. */
+  sessionNonce: string | null = null;
   /** Set to a control action this fake should silently ignore — never ack,
    * never act — simulating an extension too old to have a `control` handler
    * at all. */
@@ -166,6 +168,7 @@ class FakeExt {
       label: this.label,
       ...(this.profile !== null ? { profile: this.profile, brandVersion: '150' } : {}),
       controlledTabId: 42,
+      ...(this.sessionNonce !== null ? { sessionNonce: this.sessionNonce } : {}),
       ...(this.pairToken ? { pairToken: this.pairToken } : {}),
       ...(this.gitSha && this.buildDate ? { gitSha: this.gitSha, buildDate: this.buildDate } : {}),
     });
@@ -1289,24 +1292,89 @@ async function main(): Promise<void> {
       await a.connect();
       await until(() => a.role === 'bound', 'a bound');
       const ia = bridge.instances().find((i) => i.instanceId === 'inst-a')!;
-      assert(ia.profile === 'Work Laptop' && ia.alias === 'work-laptop', `profile/alias: ${ia.profile} / ${ia.alias}`);
+      assert(ia.profile === 'Work Laptop' && ia.alias === 'edge-work-laptop', `profile/alias: ${ia.profile} / ${ia.alias}`);
       assert(ia.brandVersion === '150', `brandVersion: ${ia.brandVersion}`);
       // An extension predating `profile` still names itself through `label`.
       const b = new FakeExt(port, 'inst-b', 'chrome', 'Home');
       await b.connect();
       await until(() => b.role === 'parked', 'b parked');
       const ib = bridge.instances().find((i) => i.instanceId === 'inst-b')!;
-      assert(ib.profile === 'Home' && ib.alias === 'home' && ib.brandVersion === '', `label fallback: ${JSON.stringify(ib)}`);
+      assert(ib.profile === 'Home' && ib.alias === 'chrome-home' && ib.brandVersion === '', `label fallback: ${JSON.stringify(ib)}`);
       // No name at all: <brand>-<short6>.
       const c = new FakeExt(port, 'inst-c-123456', 'chrome');
       await c.connect();
       await until(() => c.role === 'parked', 'c parked');
       assert(bridge.aliasOf('inst-c-123456') === 'chrome-instc1', `fallback alias: ${bridge.aliasOf('inst-c-123456')}`);
       // The ack says who answered, so ids are minted with the right alias.
-      const ack = await bridge.sendControlToInstance('home', { action: 'list-tabs' });
+      const ack = await bridge.sendControlToInstance('chrome-home', { action: 'list-tabs' });
       assert(ack.instanceId === 'inst-b', `ack.instanceId: ${ack.instanceId}`);
       const own = await bridge.sendControl({ action: 'list-tabs' });
       assert(own.instanceId === 'inst-a', `bound ack.instanceId: ${own.instanceId}`);
+    });
+  });
+
+  await test('alias: unlabelled edge-abcdef vs a profile named "abcdef" never share an alias', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'abcdef-unlabelled', 'edge');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const b = new FakeExt(port, 'zzzzzz-named', 'edge');
+      b.profile = 'abcdef';
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      const x = bridge.aliasOf('abcdef-unlabelled'), y = bridge.aliasOf('zzzzzz-named');
+      assert(x !== y, `aliases must differ: ${x} / ${y}`);
+    });
+  });
+
+  await test('alias: a live peer keeps its alias when a same-name peer connects; a gone peer does not clash', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'aaaaaa-1', 'edge');
+      a.profile = 'Work';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', `first: ${bridge.aliasOf('aaaaaa-1')}`);
+      const b = new FakeExt(port, 'bbbbbb-2', 'edge');
+      b.profile = 'Work';
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', `a must not flip: ${bridge.aliasOf('aaaaaa-1')}`);
+      assert(bridge.aliasOf('bbbbbb-2') === 'edge-work-bbbbbb', `b suffixed: ${bridge.aliasOf('bbbbbb-2')}`);
+      // b leaves: a stays; b coming back alone gets the plain name only if a is gone too.
+      (b as any).ws?.close();
+      await until(() => bridge.instances().find((i) => i.instanceId === 'bbbbbb-2')!.connected === false, 'b gone');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', 'a stable after b leaves');
+    });
+  });
+
+  await test('hello profile is sanitized at intake: controls stripped, 40 chars max', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-san', 'edge');
+      a.profile = 'Evil\n#9  fake:1  "x"\u202e' + 'y'.repeat(60);
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const i = bridge.instances().find((x) => x.instanceId === 'inst-san')!;
+      assert(!/[\n\u202e]/.test(i.profile) && i.profile.length <= 40, `profile: ${JSON.stringify(i.profile)}`);
+    });
+  });
+
+  await test('peer-restart fires when the session nonce changes, not on a same-nonce respawn', async () => {
+    await withBridge(async (bridge, port) => {
+      const events: string[] = [];
+      bridge.on('peer-restart', (id: string) => events.push(id));
+      const a = new FakeExt(port, 'inst-n', 'edge');
+      a.sessionNonce = 'n1';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      assert(events.length === 0, 'first hello is not a restart');
+      assert(bridge.identityOf('inst-n')!.nonce === 'n1', 'nonce recorded');
+      a.sendHello();
+      await sleep(80);
+      assert(events.length === 0, `same nonce is a respawn, not a restart: ${events}`);
+      a.sessionNonce = 'n2';
+      a.sendHello();
+      await until(() => events.length === 1, 'restart event on nonce change');
+      assert(bridge.identityOf('inst-n')!.nonce === 'n2', 'nonce updated');
     });
   });
 

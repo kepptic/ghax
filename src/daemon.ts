@@ -1040,10 +1040,10 @@ async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null):
 }
 
 /** Display brand, profile and tab-id alias of a bridge instance. */
-function bridgeIdentity(ctx: Ctx, instanceId: string | null | undefined): { alias: string; browser: string; profile: string } {
+function bridgeIdentity(ctx: Ctx, instanceId: string | null | undefined): { alias: string; browser: string; profile: string; nonce?: string } {
   const ident = instanceId ? requireBridge(ctx).identityOf(instanceId) : null;
   if (!ident) return { alias: 'browser-unknown', browser: 'Browser', profile: NO_PROFILE };
-  return { alias: ident.alias, browser: displayBrand(ident.browser), profile: ident.profile || NO_PROFILE };
+  return { alias: ident.alias, browser: displayBrand(ident.browser), profile: ident.profile || NO_PROFILE, nonce: ident.nonce || undefined };
 }
 
 /** The bound browser's id for one of its chrome tab ids. */
@@ -1090,6 +1090,10 @@ function describeActiveTab(ctx: Ctx): string | null {
 /** Prefix an extension refusal with the tab's full identity. */
 function withTabIdentity(err: unknown, tab: TabIdentity): Error {
   const message = (err as { message?: string } | null)?.message ?? String(err);
+  // The extension's conflict message already names the tab, browser and
+  // profile ("tab 42 "x" in Edge · Work is already controlled ..."); a second
+  // copy in front of it is noise.
+  if (/^tab \d+\b.* in .+ · .+ is already controlled/.test(message)) return new Error(message);
   return new Error(`${describeTab(tab)}: ${message}`);
 }
 
@@ -4614,6 +4618,9 @@ async function main() {
     bridge.on('hello', () => {
       if (bridge.controlledTabId !== null) void enableBridgeDomains(ctx);
     });
+    // A browser restarted behind a known instance: its old tab numbers mean
+    // nothing, so a `#n` from before must ask for a fresh `ghax tabs`.
+    bridge.on('peer-restart', () => { ctx.lastTabListing = null; });
     if (bridge.controlledTabId !== null) {
       ctx.activePageId = bridgeTabId(ctx, bridge.controlledTabId);
       void enableBridgeDomains(ctx);

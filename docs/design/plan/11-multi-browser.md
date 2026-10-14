@@ -36,13 +36,14 @@ Taken as recommended (G, 2026-10-13):
 
 `ghax tabs` prints, per tab:
 
-    #3  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224
+    #3  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224
 
 - `#n`: index in the last listing (refused if that tab has since vanished).
-- `work:42`: daemon-minted id, unique across browsers. Chrome tab ids are
-  per-browser integers, so two browsers can both have tab 42. The alias is the
-  popup Profile name slugged, else `<brand>-<short6 instanceId>`; two instances
-  whose names slug alike both get `-<short6>` appended (`src/tab-identity.ts`).
+- `edge-work:42`: daemon-minted id, unique across browsers. Chrome tab ids are
+  per-browser integers, so two browsers can both have tab 42. The alias is
+  `<brand>-<profile slug>`, else `<brand>-<short6 instanceId>`. Any alias two
+  instances would share gets `-<short6>` (then a longer id prefix) until unique,
+  and a live instance keeps its alias once minted (`src/tab-identity.ts`).
 - Title, then browser brand and profile label.
 - `tab <x>` accepts `#n`, the full id, or a bare integer only when it matches exactly
   one tab across bound browsers. Every refusal prints the full identity.

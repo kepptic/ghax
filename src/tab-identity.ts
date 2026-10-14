@@ -6,8 +6,8 @@
  *
  * Chrome tab ids are per-browser integers, so two browsers can both have a
  * tab 42. On the bridge a tab id is therefore always `<alias>:<chromeTabId>`,
- * where the alias names the browser instance: the popup's "Profile name"
- * slugged, else `<brand>-<first 6 of instanceId>`. The format already carries
+ * where the alias names the browser instance: `<brand>-<profile slug>` from the
+ * popup's "Profile name" (`edge-work`), else `<brand>-<first 6 of instanceId>`. The format already carries
  * the browser, so binding several browsers at once (phase 3) needs no change
  * to it. On the CDP transport the id stays Playwright's target id.
  *
@@ -33,6 +33,13 @@ export interface TabIdentity {
   active: boolean;
   /** Bridge port of the agent driving the tab, null if free. Bridge only. */
   controlledBy?: number | null;
+  /**
+   * Per-browser-session nonce of the extension that answered (bridge only).
+   * Chrome tab ids restart with the browser, so a `#n` row from before a
+   * restart must not resolve against a different tab that reuses the number.
+   * Undefined for extensions predating it.
+   */
+  nonce?: string;
 }
 
 /** What the alias is minted from. */
@@ -61,16 +68,73 @@ function short6(instanceId: string): string {
 }
 
 /**
- * The alias for `self`. `others` are every other instance the daemon knows:
- * when two of them slug to the same profile name, both get the instance
- * suffix so the ids stay unique, and the user is told to rename one.
+ * Profile / brand text from a hello, cleaned once at intake: control, format
+ * (zero-width, bidi override) and line-separator characters are dropped so a
+ * name can never forge a line of output, then capped at 40 code points.
  */
+export function sanitizeLabel(raw: string): string {
+  return Array.from(raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim()).slice(0, 40).join('').trim();
+}
+
+function idPrefix(instanceId: string, len: number): string {
+  return instanceId.replace(/[^a-zA-Z0-9]/g, '').slice(0, len).toLowerCase() || 'unknown';
+}
+
+function baseAlias(i: InstanceIdentity): string {
+  const brand = slugAlias(i.browser) || 'browser';
+  const slug = slugAlias(i.profile);
+  return `${brand}-${slug || short6(i.instanceId)}`;
+}
+
+/**
+ * Aliases for every instance in `all`, unique across the set.
+ *
+ * `<brand>-<profile slug>` (else `<brand>-<short6>`). Any alias that more than
+ * one instance would take gets `-<short6>` appended, and if that still
+ * collides (e.g. an unlabelled `edge-abcdef` against a profile literally named
+ * "abcdef"), a longer instance-id prefix until it is unique. `pinned` aliases
+ * (already handed out to live peers) are kept as-is and reserved.
+ */
+export function mintAliases(
+  all: InstanceIdentity[],
+  pinned: ReadonlyMap<string, string> = new Map(),
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const reserved = new Set<string>();
+  for (const [id, alias] of pinned) {
+    out.set(id, alias);
+    reserved.add(alias);
+  }
+  const free = all.filter((i) => !pinned.has(i.instanceId));
+  const level = new Map(free.map((i) => [i.instanceId, 0]));
+  const aliasAt = (i: InstanceIdentity): string => {
+    const lv = level.get(i.instanceId)!;
+    return lv === 0 ? baseAlias(i) : `${baseAlias(i)}-${idPrefix(i.instanceId, 4 + 2 * lv)}`;
+  };
+  for (let round = 0; round < 40; round++) {
+    const counts = new Map<string, number>();
+    for (const a of reserved) counts.set(a, 1);
+    for (const i of free) {
+      const a = aliasAt(i);
+      counts.set(a, (counts.get(a) ?? 0) + 1);
+    }
+    let dup = false;
+    for (const i of free) {
+      if ((counts.get(aliasAt(i)) ?? 0) > 1) {
+        level.set(i.instanceId, level.get(i.instanceId)! + 1);
+        dup = true;
+      }
+    }
+    if (!dup) break;
+  }
+  for (const i of free) out.set(i.instanceId, aliasAt(i));
+  return out;
+}
+
+/** The alias for `self` given every other instance the daemon knows. */
 export function mintAlias(self: InstanceIdentity, others: InstanceIdentity[] = []): string {
-  const slug = slugAlias(self.profile);
-  const brand = slugAlias(self.browser) || 'browser';
-  if (!slug) return `${brand}-${short6(self.instanceId)}`;
-  const clash = others.some((o) => o.instanceId !== self.instanceId && slugAlias(o.profile) === slug);
-  return clash ? `${slug}-${short6(self.instanceId)}` : slug;
+  const all = [self, ...others.filter((o) => o.instanceId !== self.instanceId)];
+  return mintAliases(all).get(self.instanceId)!;
 }
 
 export function composeTabId(alias: string, chromeTabId: number): string {
@@ -103,7 +167,7 @@ export interface RawBridgeTab {
  */
 export function bridgeRowsToIdentities(
   rows: unknown[],
-  who: { alias: string; browser: string; profile: string },
+  who: { alias: string; browser: string; profile: string; nonce?: string },
 ): TabIdentity[] {
   return rows
     .filter((v): v is RawBridgeTab & { id: number } => typeof (v as RawBridgeTab)?.id === 'number')
@@ -120,6 +184,7 @@ export function bridgeRowsToIdentities(
       active: Boolean(tab.active),
       // Absent from pre-v0.3 extensions, which knew of only one agent.
       controlledBy: typeof tab.controlledBy === 'number' ? tab.controlledBy : null,
+      ...(who.nonce ? { nonce: who.nonce } : {}),
     }));
 }
 
@@ -164,6 +229,23 @@ function otherBrowserError(sel: string, what: string, alias: string): TabResolve
     + `Run 'ghax bridge use ${alias}' first, or 'ghax tabs' for this browser's tabs.`,
     'TAB_NOT_FOUND',
   );
+}
+
+/**
+ * Why the tab now answering to `row.id` is probably not the one that was
+ * listed, or null. Chrome reuses small tab ids after a restart, so the id
+ * alone proves nothing: a differing session nonce is conclusive; without a
+ * nonce on both sides (older extension) the tab must at least still look like
+ * itself, i.e. refuse only when url AND title both changed.
+ */
+function browserRestarted(row: TabIdentity, now: TabIdentity): string | null {
+  if (row.nonce && now.nonce) {
+    return row.nonce === now.nonce ? null : 'that browser has restarted since, so its tab numbers were reassigned';
+  }
+  if (row.url !== now.url && row.title !== now.title) {
+    return `tab ${now.id} is now ${JSON.stringify(now.title.slice(0, 60))}, a different page (the browser may have restarted)`;
+  }
+  return null;
 }
 
 function listing(tabs: TabIdentity[]): string {
@@ -214,6 +296,13 @@ export function resolveTabSelector(
         'TAB_VANISHED',
       );
     }
+    const restarted = browserRestarted(row, now);
+    if (restarted) {
+      throw new TabResolveError(
+        `${sel} was ${describeTab(row)}, but ${restarted}. Run 'ghax tabs' again.`,
+        'TAB_VANISHED',
+      );
+    }
     return { ...now, index: row.index };
   }
 
@@ -223,7 +312,16 @@ export function resolveTabSelector(
   if (/^\d+$/.test(sel)) {
     const n = Number(sel);
     const hits = current.filter((t) => t.chromeTabId === n);
-    if (hits.length === 1) return hits[0];
+    if (hits.length === 1) {
+      // The last listing showed this number in another browser too: `tabs
+      // --browser chrome` then `tab 42` must not quietly drive the bound one.
+      const rivals = (last ?? []).filter((t) => t.chromeTabId === n && t.id !== hits[0].id);
+      if (rivals.length === 0) return hits[0];
+      throw new TabResolveError(
+        `tab ${sel} is ambiguous: the last 'ghax tabs' listed it in another browser too. Use the full id or #n:\n${listing([hits[0], ...rivals])}`,
+        'TAB_AMBIGUOUS',
+      );
+    }
     if (hits.length > 1) {
       throw new TabResolveError(
         `tab ${sel} is ambiguous: ${hits.length} tabs have that id. Use the full id or #n:\n${listing(hits)}`,

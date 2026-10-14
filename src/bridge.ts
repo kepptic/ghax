@@ -45,7 +45,7 @@ import * as crypto from 'crypto';
 import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
 import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
 import { RefRegistry, type RefAllocator } from './ref-registry';
-import { mintAlias } from './tab-identity';
+import { mintAliases, sanitizeLabel } from './tab-identity';
 
 export interface BridgeEvent {
   method: string;
@@ -314,6 +314,10 @@ interface Peer {
   helloCount: number;
   replacedCount: number;
   controlledTabId: number | null;
+  /** hello.sessionNonce: new per browser session; '' for older extensions. */
+  sessionNonce: string;
+  /** Alias handed out while live; kept so it never flips under a bound id. */
+  pinnedAlias: string | null;
 }
 
 interface QueuedCommand {
@@ -621,9 +625,23 @@ export class Bridge extends EventEmitter {
    */
   aliasOf(instanceId: string): string {
     const self = this.peers.get(instanceId);
-    if (!self) return mintAlias({ instanceId, browser: '', profile: '' });
-    const others = [...this.peers.values()].map((p) => ({ instanceId: p.instanceId, browser: p.browser, profile: p.profile }));
-    return mintAlias({ instanceId: self.instanceId, browser: self.browser, profile: self.profile }, others);
+    if (!self) return mintAliases([{ instanceId, browser: '', profile: '' }]).get(instanceId)!;
+    if (self.pinnedAlias) return self.pinnedAlias;
+    // Only live peers can clash: a gone one is not in the tab listings, and
+    // counting it would flip a live alias when it reconnects.
+    const pinned = new Map<string, string>();
+    const all = [self];
+    for (const p of this.peers.values()) {
+      if (p === self || p.ws === null) continue;
+      if (p.pinnedAlias) pinned.set(p.instanceId, p.pinnedAlias);
+      all.push(p);
+    }
+    const alias = mintAliases(
+      all.map((p) => ({ instanceId: p.instanceId, browser: p.browser, profile: p.profile })),
+      pinned,
+    ).get(instanceId)!;
+    if (self.ws !== null) self.pinnedAlias = alias;
+    return alias;
   }
 
   /** Identity of the bound instance, or null when nothing is bound. */
@@ -632,10 +650,10 @@ export class Bridge extends EventEmitter {
   }
 
   /** browser / profile / alias of one instance, for tab listings. */
-  identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string } | null {
+  identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string; nonce: string } | null {
     const p = this.peers.get(instanceId);
     if (!p) return null;
-    return { instanceId, browser: p.browser, profile: p.profile, alias: this.aliasOf(instanceId) };
+    return { instanceId, browser: p.browser, profile: p.profile, alias: this.aliasOf(instanceId), nonce: p.sessionNonce };
   }
 
   /** True once ownership has flapped enough to indicate a pre-identity rival. */
@@ -657,6 +675,7 @@ export class Bridge extends EventEmitter {
     const peer = this.socketPeer.get(ws);
     if (!peer || peer.ws !== ws) return; // stale/superseded socket — no-op
     peer.ws = null;
+    peer.pinnedAlias = null;
     if (peer.instanceId !== this.boundId) {
       // A parked peer went away. Pure bookkeeping; the session is unaffected.
       this.emit('instances');
@@ -884,11 +903,14 @@ export class Bridge extends EventEmitter {
         'bridge: hello without instanceId — reload the ghax bridge extension in edge://extensions (every profile)',
       );
     }
-    const browser = typeof msg.browser === 'string' ? msg.browser : '';
-    const label = typeof msg.label === 'string' ? msg.label : '';
+    // Free text from the browser, shown in listings and refusals: cleaned and
+    // capped here, once, so nothing downstream has to remember to.
+    const browser = typeof msg.browser === 'string' ? sanitizeLabel(msg.browser) : '';
+    const label = typeof msg.label === 'string' ? sanitizeLabel(msg.label) : '';
     // `profile` is the tab-identity name for the same popup field; extensions
     // predating it send only `label`, which carries the same value.
-    const profile = typeof msg.profile === 'string' ? msg.profile : label;
+    const profile = typeof msg.profile === 'string' ? sanitizeLabel(msg.profile) : label;
+    const sessionNonce = typeof msg.sessionNonce === 'string' ? msg.sessionNonce.slice(0, 64) : '';
     const brandVersion = typeof msg.brandVersion === 'string' ? msg.brandVersion : '';
     const version = typeof msg.version === 'string' ? msg.version : '?';
     // Optional — absent on any extension build predating the provenance
@@ -903,9 +925,16 @@ export class Bridge extends EventEmitter {
         ws: null, role: 'parked',
         lastHelloAt: 0, lastFrameAt: Date.now(),
         helloCount: 0, replacedCount: 0, controlledTabId: null,
+        sessionNonce, pinnedAlias: null,
       };
       this.peers.set(instanceId, peer);
     }
+    // A new browser session (or an extension that cannot say) behind a known
+    // instance: tab numbers from before are void, so anything holding a
+    // listing of it must drop it.
+    const restarted = peer.helloCount > 0 && (!sessionNonce || peer.sessionNonce !== sessionNonce);
+    peer.sessionNonce = sessionNonce;
+    if (profile && profile !== peer.profile) peer.pinnedAlias = null;
     if (peer.ws && peer.ws !== ws) {
       // Same instance, new socket — its old one is stale (respawn raced the
       // close). Drop the old quietly; this is NOT a rival.
@@ -923,6 +952,7 @@ export class Bridge extends EventEmitter {
     peer.gitSha = gitSha;
     peer.buildDate = buildDate;
     peer.helloCount++;
+    if (restarted) this.emit('peer-restart', instanceId);
     peer.lastHelloAt = Date.now();
     peer.lastFrameAt = Date.now();
     peer.controlledTabId = typeof msg.controlledTabId === 'number' ? msg.controlledTabId : null;

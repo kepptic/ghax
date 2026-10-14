@@ -181,6 +181,20 @@ async function describeConflict(err) {
     + `(bridge port ${err.ownerPort}) — pick another tab or run 'ghax bridge control --stop' there`;
 }
 
+/** Created once per browser session; '' when storage.session is unavailable. */
+async function getSessionNonce() {
+  try {
+    if (!chrome.storage.session) return '';
+    const { ghaxSessionNonce } = await chrome.storage.session.get('ghaxSessionNonce');
+    if (typeof ghaxSessionNonce === 'string' && ghaxSessionNonce) return ghaxSessionNonce;
+    const fresh = crypto.randomUUID();
+    await chrome.storage.session.set({ ghaxSessionNonce: fresh });
+    return fresh;
+  } catch {
+    return '';
+  }
+}
+
 /** Take ownership of `tabId`, or throw if a different connection holds it. */
 function claimTab(conn, tabId) {
   const owner = ownerOf(tabId);
@@ -492,6 +506,7 @@ class BridgeConnection {
       // don't require pairing; required by those started with a pair code.
       const { ghaxPairToken } = await chrome.storage.local.get('ghaxPairToken');
       const buildInfo = await getBuildInfo();
+      const sessionNonce = await getSessionNonce();
       this.send({
         type: 'hello',
         agent: 'ghax-ext',
@@ -504,6 +519,10 @@ class BridgeConnection {
         // Daemons predating it read `label`; newer ones prefer `profile`.
         profile: identity.label,
         brandVersion: identity.brandVersion,
+        // New per browser session (chrome.storage.session dies with the
+        // browser, survives a service-worker respawn). Tab ids restart with
+        // the browser; the daemon uses this to refuse a stale `#n`.
+        ...(sessionNonce ? { sessionNonce } : {}),
         // The tab we WANT. Provisional in both directions: the attachment awaits
         // the disposition, and the tab itself is dropped if the ack turns out to
         // come from a different daemon — applyRole always follows with a

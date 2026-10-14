@@ -216,10 +216,10 @@ Re-run with `--browser edge` (or a label), or keep the daemon and pick with `gha
 
 ```
 #1  work:7   "Inbox"                    Edge · Work  controlledBy=:9223  active
-#2  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
+#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
 ```
 
-The id is `<profile>:<chrome tab id>`. Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches.
+The id is `<brand>-<profile>:<chrome tab id>` (e.g. `edge-work:42`). Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). Aliases are unique: a collision appends the instance prefix, and a live browser keeps its alias when another with the same name connects. `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab edge-work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches (including a same-number tab in a browser your last `ghax tabs --browser` listed). A `#n` is also refused after the browser restarts.
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 

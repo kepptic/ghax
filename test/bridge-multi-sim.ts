@@ -25,7 +25,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BRIDGE_PORT_RANGE } from '../src/bridge';
 import {
-  bridgeRowsToIdentities, displayBrand, formatTabLine, resolveTabSelector, TabResolveError, type TabIdentity,
+  bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
 } from '../src/tab-identity';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -100,6 +100,8 @@ class FakeExtension {
    * fall back to `<brand>-<short6>`.
    */
   profile: string | null = null;
+  /** `hello.sessionNonce`; null = an extension predating it. */
+  sessionNonce: string | null = null;
 
   async connect(port: number, instanceId = 'inst-browser'): Promise<FakeConnection> {
     const conn = new FakeConnection(this, port, instanceId);
@@ -220,6 +222,7 @@ class FakeConnection {
       browser: this.ext.browser,
       label: this.ext.profile ?? '',
       ...(this.ext.profile !== null ? { profile: this.ext.profile, brandVersion: '150' } : {}),
+      ...(this.ext.sessionNonce !== null ? { sessionNonce: this.ext.sessionNonce } : {}),
       controlledTabId: this.controlledTabId,
     });
     // Mirrors the legacy fallback in extension/background.js: a daemon that
@@ -1133,7 +1136,7 @@ async function main(): Promise<void> {
         const ack = await bridge.sendControlToInstance(sel, { action: 'list-tabs' });
         const who = bridge.identityOf(ack.instanceId!)!;
         return bridgeRowsToIdentities(ack.result as unknown[], {
-          alias: who.alias, browser: displayBrand(who.browser), profile: who.profile,
+          alias: who.alias, browser: displayBrand(who.browser), profile: who.profile, nonce: who.nonce || undefined,
         });
       };
       await fn(bridge, await list('aaaaaa'), await list('bbbbbb'));
@@ -1164,7 +1167,7 @@ async function main(): Promise<void> {
     await twoBrowsersWithTab42(async (_bridge, work, home) => {
       const w42 = work.find((t) => t.chromeTabId === 42)!;
       const h42 = home.find((t) => t.chromeTabId === 42)!;
-      assert(w42.id === 'work:42', `labelled profile → slug alias, got ${w42.id}`);
+      assert(w42.id === 'edge-work:42', `labelled profile → slug alias, got ${w42.id}`);
       // No profile name (old extension) → <brand>-<short6>.
       assert(h42.id === 'chrome-bbbbbb:42', `unlabelled → brand-short6, got ${h42.id}`);
       assert(w42.browser === 'Edge' && w42.profile === 'Work', `edge identity: ${w42.browser} · ${w42.profile}`);
@@ -1173,7 +1176,7 @@ async function main(): Promise<void> {
       assert(w42.index === 2, `index is the row number, got ${w42.index}`);
       const line = formatTabLine(w42);
       assert(
-        line === '#2  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none',
+        line === '#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none',
         `tabs text line: ${line}`,
       );
     });
@@ -1184,11 +1187,11 @@ async function main(): Promise<void> {
       const all = combined(work, home);
       const err = refusal(() => resolveTabSelector('42', all, all));
       assert(err.code === 'TAB_AMBIGUOUS', `code ${err.code}`);
-      for (const want of ['work:42', 'chrome-bbbbbb:42', 'Edge · Work', 'Chrome · —', 'Bank feeds', 'Recipes']) {
+      for (const want of ['edge-work:42', 'chrome-bbbbbb:42', 'Edge · Work', 'Chrome · —', 'Bank feeds', 'Recipes']) {
         assert(err.message.includes(want), `refusal should name ${want}: ${err.message}`);
       }
       // Never [0] of several, but one match is fine.
-      assert(resolveTabSelector('7', all, all).id === 'work:7', 'an unambiguous bare id resolves');
+      assert(resolveTabSelector('7', all, all).id === 'edge-work:7', 'an unambiguous bare id resolves');
       assert(resolveTabSelector('chrome-bbbbbb:42', all, all).title === 'Recipes', 'the full id resolves');
       assert(refusal(() => resolveTabSelector('99', all, all)).code === 'TAB_NOT_FOUND', 'no match refuses');
     });
@@ -1198,14 +1201,14 @@ async function main(): Promise<void> {
     await twoBrowsersWithTab42(async (_bridge, work) => {
       const last = work;
       const picked = resolveTabSelector('#2', work, last);
-      assert(picked.id === 'work:42', `#2 should be work:42, got ${picked.id}`);
+      assert(picked.id === 'edge-work:42', `#2 should be work:42, got ${picked.id}`);
       assert(refusal(() => resolveTabSelector('#2', work, null)).code === 'TAB_NO_LISTING', 'no listing yet refuses');
       assert(refusal(() => resolveTabSelector('#9', work, last)).code === 'TAB_NOT_FOUND', 'out of range refuses');
       // Tab 42 closes; the row that is now #2 must NOT be picked instead.
       const now = work.filter((t) => t.chromeTabId !== 42);
       const gone = refusal(() => resolveTabSelector('#2', now, last));
       assert(gone.code === 'TAB_VANISHED', `code ${gone.code}`);
-      assert(gone.message.includes('work:42') && gone.message.includes('Bank feeds'), `names the gone tab: ${gone.message}`);
+      assert(gone.message.includes('edge-work:42') && gone.message.includes('Bank feeds'), `names the gone tab: ${gone.message}`);
     });
   });
 
@@ -1219,15 +1222,68 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('two browsers with the same profile name get suffixed aliases; bridge use takes an alias', async () => {
+  await test('same profile name in two brands stays distinct; bridge use takes an alias', async () => {
     await twoBrowsersWithTab42(async (bridge, work, home) => {
       const a = work.find((t) => t.chromeTabId === 42)!.id;
       const b = home.find((t) => t.chromeTabId === 42)!.id;
-      assert(a === 'work-aaaaaa:42' && b === 'work-bbbbbb:42', `clash → suffixed: ${a}, ${b}`);
-      const inst = await bridge.use('work-bbbbbb');
+      assert(a === 'edge-work:42' && b === 'chrome-work:42', `brand prefix keeps them apart: ${a}, ${b}`);
+      const inst = await bridge.use('chrome-work');
       assert(inst.instanceId === 'bbbbbb-chrome-instance', `bridge use <alias> binds it, got ${inst.instanceId}`);
       assert(inst.profile === 'work' && inst.brandVersion === '150', `instances() carries profile/brandVersion: ${JSON.stringify(inst)}`);
     }, ['Work', 'work']);
+  });
+
+  await test('bare 42 refuses when the last listing showed 42 in another browser', async () => {
+    await twoBrowsersWithTab42(async (_bridge, work, home) => {
+      // `tabs --browser chrome` listed chrome's 42; Edge is bound and has a 42.
+      const err = refusal(() => resolveTabSelector('42', work, home));
+      assert(err.code === 'TAB_AMBIGUOUS', `code ${err.code}`);
+      assert(err.message.includes('edge-work:42') && err.message.includes('chrome-bbbbbb:42'), err.message);
+      // A listing of the bound browser itself is no rival.
+      assert(resolveTabSelector('42', work, work).id === 'edge-work:42', 'own listing resolves');
+      assert(resolveTabSelector('42', work, null).id === 'edge-work:42', 'no listing resolves');
+    });
+  });
+
+  await test('#n is refused after the browser restarts (nonce), and heuristically without a nonce', async () => {
+    const row = (nonce: string | undefined, title = 'Bank', url = 'https://a'): TabIdentity => ({
+      index: 1, id: 'edge-work:42', chromeTabId: 42, browser: 'Edge', profile: 'Work', windowId: 1,
+      title, url, active: false, controlledBy: null, ...(nonce ? { nonce } : {}),
+    });
+    assert(resolveTabSelector('#1', [row('n1')], [row('n1')]).id === 'edge-work:42', 'same session resolves');
+    const e1 = refusal(() => resolveTabSelector('#1', [row('n2', 'Other', 'https://b')], [row('n1')]));
+    assert(e1.code === 'TAB_VANISHED' && e1.message.includes('restarted'), e1.message);
+    // Same page under a new nonce is still refused: the number was reassigned.
+    assert(refusal(() => resolveTabSelector('#1', [row('n2')], [row('n1')])).code === 'TAB_VANISHED', 'nonce change refuses');
+    // Old extension: refuse only when url AND title both differ.
+    assert(refusal(() => resolveTabSelector('#1', [row(undefined, 'Other', 'https://b')], [row(undefined)])).code === 'TAB_VANISHED', 'both differ refuses');
+    assert(resolveTabSelector('#1', [row(undefined, 'Bank (2)', 'https://a')], [row(undefined)]).id === 'edge-work:42', 'title-only change resolves');
+    assert(resolveTabSelector('#1', [row(undefined, 'Bank', 'https://a/x')], [row(undefined)]).id === 'edge-work:42', 'url-only change resolves');
+  });
+
+  await test('mintAliases: the unlabelled-vs-named collision stays unique', async () => {
+    // Unlabelled Edge `abcdef…` falls back to edge-abcdef; a profile named
+    // "abcdef" slugs to the same thing.
+    const unlabelled = { instanceId: 'abcdef-1111', browser: 'edge', profile: '' };
+    const named = { instanceId: 'zzzzzz-2222', browser: 'edge', profile: 'abcdef' };
+    const m = mintAliases([unlabelled, named]);
+    const a = m.get('abcdef-1111')!, b = m.get('zzzzzz-2222')!;
+    assert(a !== b, `must differ: ${a} / ${b}`);
+    assert(new Set(m.values()).size === 2, 'unique');
+    // Pathological: same short6 prefix AND same names → longer prefixes.
+    const x = { instanceId: 'abcdef-1', browser: 'edge', profile: 'w' };
+    const y = { instanceId: 'abcdef-2', browser: 'edge', profile: 'w' };
+    const mm = mintAliases([x, y]);
+    assert(new Set(mm.values()).size === 2, `longer prefix until unique: ${[...mm.values()]}`);
+    // Pinned aliases are kept; the newcomer moves.
+    const mp = mintAliases([x, y], new Map([['abcdef-1', 'edge-w']]));
+    assert(mp.get('abcdef-1') === 'edge-w' && mp.get('abcdef-2') !== 'edge-w', `pinned wins: ${[...mp.values()]}`);
+  });
+
+  await test('sanitizeLabel strips controls and newlines, caps at 40', async () => {
+    const s = sanitizeLabel('Wo\nrk\x00\u202e\u200b ' + 'x'.repeat(80));
+    assert(!/[\n\x00\u202e\u200b]/.test(s) && s.length <= 40 && s.startsWith('Work x'), JSON.stringify(s));
+    assert(sanitizeLabel('Zoë') === 'Zoë', 'letters survive');
   });
 
   console.log();

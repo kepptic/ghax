@@ -43,8 +43,8 @@ Tab:
   tabs [--browser <id|edge|chrome|label>]
                                   # one line per tab:
                                   #   #n  id  "title"  Browser · Profile  controlledBy=…
-                                  # bridge ids are <profile>:<chrome tab id>,
-                                  #   e.g. work:42 (profile = popup "Profile name")
+                                  # bridge ids are <brand>-<profile>:<chrome tab id>,
+                                  #   e.g. edge-work:42 (profile = popup "Profile name")
                                   # bridge: --browser lists another connected
                                   #   browser's tabs without taking it over
   tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
