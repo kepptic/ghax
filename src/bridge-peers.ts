@@ -11,6 +11,12 @@ import { mintAliases, sanitizeLabel } from './tab-identity';
 export type PeerRole = 'bound' | 'parked';
 
 /**
+ * Bind filter that binds EVERY connected instance (plan 12, multi-bind) instead
+ * of narrowing to one. `--browser all` / `GHAX_BRIDGE_BROWSER=all`.
+ */
+export const BIND_ALL = 'all';
+
+/**
  * Outcome of the first-bind selection (plan 11, phase 1).
  *   idle         — no hello yet
  *   settling     — first hello landed, waiting GHAX_BRIDGE_SETTLE_MS for others
@@ -124,6 +130,7 @@ export class PeerRegistry {
 
   matchesFilter(p: Peer, filter: string | null): boolean {
     return !filter
+      || filter === BIND_ALL
       || p.browser.toLowerCase() === filter
       || p.label.toLowerCase() === filter;
   }
@@ -132,7 +139,8 @@ export class PeerRegistry {
    * Close the selection: pick exactly one matching connected instance, or
    * record why not. Never takes [0] of several (target-verification rule):
    * more than one candidate refuses and lists them. Pure — no timers, no
-   * logging; `winners` holds the single winner, or is empty.
+   * logging; `winners` holds the single winner, or is empty. Under the
+   * BIND_ALL filter every connected instance wins.
    */
   decide(filter: string | null, port: number): { selection: BridgeSelection; winners: Peer[] } {
     const seen = this.all();
@@ -146,7 +154,9 @@ export class PeerRegistry {
     }));
     const candidates = seen.filter((p) => p.ws?.readyState === WebSocket.OPEN && this.matchesFilter(p, filter));
     const list = instances.map((i) => `${i.browser || '?'} · ${i.label || '-'} · ${i.instanceId} · :${i.port}`).join('; ');
-    if (candidates.length === 1) {
+    // `all` asked for every candidate by name, so several is the answer, not
+    // an ambiguity. Zero still refuses below.
+    if (candidates.length === 1 || (filter === BIND_ALL && candidates.length > 1)) {
       return { selection: { state: 'bound', filter, instances }, winners: candidates };
     }
     if (candidates.length === 0) {

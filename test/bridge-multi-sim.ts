@@ -1311,6 +1311,169 @@ async function main(): Promise<void> {
     assert(reg.match('nope').length === 0, 'no match is empty');
   });
 
+  // ─── Multi-bind (docs/design/plan/12-multi-bind-plan.md, brief A) ───
+
+  /** Generous liveness: these fakes never ping, and a terminated socket would
+   * make a per-session check pass or fail for the wrong reason. */
+  const MULTI_LIVENESS_MS = 10_000;
+
+  async function withBindAll(
+    fn: (bridge: Bridge, browsers: FakeExtension[], logs: string[]) => Promise<void>,
+    opts: { settleMs?: number; browsers?: string[] } = {},
+  ): Promise<void> {
+    const logs: string[] = [];
+    const bridge = await Bridge.create(reserveBase(), (m) => logs.push(m), {
+      graceMs: GRACE_MS, livenessMs: MULTI_LIVENESS_MS, settleMs: opts.settleMs ?? SETTLE_MS,
+    });
+    bridge.setBindFilter('all');
+    const browsers = (opts.browsers ?? ['edge', 'chrome']).map((b) => {
+      const ext = new FakeExtension();
+      ext.browser = b;
+      return ext;
+    });
+    try {
+      await fn(bridge, browsers, logs);
+    } finally {
+      for (const b of browsers) b.closeAll();
+      bridge.close();
+      await sleep(20);
+    }
+  }
+
+  await test('all: three browsers bind at settle close, a late one joins, no livelock warning', async () => {
+    await withBindAll(async (bridge, [edge, chrome, brave, arc]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      const c = await brave.connect(bridge.port, 'inst-c');
+      await until(() => a.role === 'parked' && b.role === 'parked' && c.role === 'parked', 'all three to park while settling');
+      await until(() => a.role === 'bound' && b.role === 'bound' && c.role === 'bound', 'all three to bind at settle close');
+      assert(bridge.boundIds.length === 3, `bound: ${bridge.boundIds}`);
+      assert(bridge.boundInstanceId === bridge.boundIds[0], 'the active peer is listed first');
+      assert(!bridge.livelockSuspected, 'settle-close binds must not count as ownership flapping');
+      const d = await arc.connect(bridge.port, 'inst-d');
+      await until(() => d.role !== null, 'the late browser to get a disposition');
+      assert(d.role === 'bound', `a late hello under all binds instead of parking, got ${d.role}`);
+      const total: number = bridge.boundIds.length;
+      assert(total === 4 && !bridge.livelockSuspected, `bound: ${bridge.boundIds}`);
+    }, { settleMs: 120, browsers: ['edge', 'chrome', 'brave', 'arc'] });
+  });
+
+  await test('all: an echo to B while A\'s socket is closed resolves within 100 ms', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind alongside A');
+      const dropped: string[] = [];
+      bridge.on('disconnect', (id: string) => dropped.push(id));
+      a.close();
+      await until(() => dropped.includes('inst-a'), 'A to degrade');
+      assert(bridge.state === 'DEGRADED', `the active (A) session degrades: ${bridge.state}`);
+      const t0 = Date.now();
+      const r = await bridge.send('Runtime.evaluate', {}, 2000, { peer: 'inst-b' }) as { echoed: string };
+      const ms = Date.now() - t0;
+      assert(r.echoed === 'Runtime.evaluate', `B echoed ${JSON.stringify(r)}`);
+      assert(ms < 100, `B must not wait on A's grace window: ${ms}ms`);
+      assert(dropped.length === 1, `only A dropped: ${dropped}`);
+    });
+  });
+
+  await test('all: A\'s grace expiry rejects only A\'s queue; B\'s queue flushes on its resume', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      const expired: string[] = [];
+      bridge.on('expired', (id: string) => expired.push(id));
+      const dropped: string[] = [];
+      bridge.on('disconnect', (id: string) => dropped.push(id));
+
+      a.close();
+      await until(() => dropped.includes('inst-a'), 'A to degrade');
+      const qa = bridge.send('Page.reload', {}, 5000, { peer: 'inst-a' }).then(
+        () => 'resolved', (e: any) => String(e.code ?? e.message));
+      b.close();
+      await until(() => dropped.includes('inst-b'), 'B to degrade');
+      const qb = bridge.send('Page.getNavigationHistory', {}, 5000, { peer: 'inst-b' });
+      await b.reopen();
+      const rb = await qb as { echoed: string };
+      assert(rb.echoed === 'Page.getNavigationHistory', `B's queued command flushes on resume: ${JSON.stringify(rb)}`);
+
+      assert(await qa === 'BRIDGE_DEGRADED_TIMEOUT', `A's queue rejects at expiry, got ${await qa}`);
+      assert(expired.length === 1 && expired[0] === 'inst-a', `only A expired: ${expired}`);
+      const after = await bridge.send('Runtime.evaluate', {}, 1000, { peer: 'inst-b' }) as { echoed: string };
+      assert(after.echoed === 'Runtime.evaluate', 'B still drives after A expired');
+    });
+  });
+
+  await test('all: use switches the active peer without a parked frame; events carry instanceId + tabId', async () => {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      assert(bridge.boundInstanceId === 'inst-a', `first bound is active: ${bridge.boundInstanceId}`);
+      const frames: any[] = [];
+      for (const c of [a, b]) c.ws!.on('message', (raw) => frames.push({ to: c.instanceId, ...JSON.parse(String(raw)) }));
+      const controlled: Array<[number | null, string]> = [];
+      bridge.on('controlled', (tabId: number | null, id: string) => controlled.push([tabId, id]));
+
+      const inst = await bridge.use('inst-b');
+      const active: string | null = bridge.boundInstanceId;
+      assert(inst.instanceId === 'inst-b' && active === 'inst-b', `active: ${active}`);
+      await sleep(30);
+      const roleFrames = frames.filter((f) => f.type === 'role');
+      assert(roleFrames.length === 0, `use under all sends no role frame: ${JSON.stringify(roleFrames)}`);
+      assert(a.role === 'bound' && b.role === 'bound', `nobody demoted: a=${a.role} b=${b.role}`);
+      assert(controlled.some(([, id]) => id === 'inst-b'), 'the switch emits controlled for B (ref clear)');
+
+      // The default peer is now B.
+      await bridge.send('DOM.getDocument');
+      assert(b.received.includes('DOM.getDocument') && !a.received.includes('DOM.getDocument'), 'default send goes to the active peer');
+
+      const ack = await bridge.sendControl({ action: 'control-tab', tabId: 2 }, 1000, { peer: 'inst-a' });
+      assert(ack.ok && ack.tabId === 2 && ack.instanceId === 'inst-a', `control A by name: ${JSON.stringify(ack)}`);
+      const events: any[] = [];
+      const off = bridge.onEvent((ev) => events.push(ev));
+      a.send({ type: 'event', method: 'Page.loadEventFired', params: {} });
+      await until(() => events.length === 1, 'the event to arrive');
+      off();
+      assert(events[0].instanceId === 'inst-a' && events[0].tabId === 2, `event tags: ${JSON.stringify(events[0])}`);
+    });
+  });
+
+  await test('sendControlToInstance refuses an ambiguous selector instead of taking the first match', async () => {
+    const bridge = await Bridge.create(reserveBase(), () => undefined, { graceMs: GRACE_MS, livenessMs: MULTI_LIVENESS_MS, settleMs: SETTLE_MS });
+    const one = new FakeExtension();
+    const two = new FakeExtension();
+    one.browser = 'edge';
+    two.browser = 'edge';
+    try {
+      const a = await one.connect(bridge.port, 'aaaaaa-edge-1');
+      await until(() => a.role === 'bound', 'the first edge to bind');
+      const b = await two.connect(bridge.port, 'bbbbbb-edge-2');
+      await until(() => b.role === 'parked', 'the second edge to park');
+      let caught: any;
+      try {
+        await bridge.sendControlToInstance('edge', { action: 'list-tabs' });
+      } catch (err) {
+        caught = err;
+      }
+      assert(caught, 'two edges must refuse, never route to [0]');
+      const msg = String(caught.message);
+      assert(msg.includes('matches 2 instances') && msg.includes('aaaaaa-edge-1') && msg.includes('bbbbbb-edge-2'), msg);
+      assert(a.lastControlId === null && b.lastControlId === null, 'nothing was sent to either browser');
+      const ack = await bridge.sendControlToInstance('bbbbbb', { action: 'list-tabs' });
+      assert(ack.instanceId === 'bbbbbb-edge-2', `a unique prefix still routes: ${ack.instanceId}`);
+    } finally {
+      one.closeAll();
+      two.closeAll();
+      bridge.close();
+      await sleep(20);
+    }
+  });
+
   console.log();
   if (failures > 0) {
     console.error(`✗ ${failures}/${checks} checks failed`);

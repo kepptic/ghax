@@ -15,6 +15,20 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `detach` lists them but only stops the one it resolves to. Fixes the
   "no daemon state" error when an agent attached from a different directory.
 
+- **One bridge daemon can bind several browsers (groundwork).** The bridge
+  keeps one session per bound browser (state, queue, grace window, in-flight
+  commands), so one browser dropping never stalls or fails another's work.
+  `GHAX_BRIDGE_BROWSER=all` binds every connected browser at the end of the
+  settle window and binds a late hello instead of parking it; `bridge use`
+  then only moves which bound browser is active. Relayed events carry the
+  `instanceId` and `tabId` they came from. The CLI surface for this lands
+  separately.
+
+### Fixed
+- **`tabs --browser <x>` no longer picks the first of several matches.** A
+  selector naming two browsers (two Edge profiles without labels, say) is
+  refused with both listed, the same as `bridge use`.
+
 ### Changed
 - **`attach --extension` no longer binds the first browser that says hello.**
   It waits `GHAX_BRIDGE_SETTLE_MS` (default 1500 ms) after the first hello,
