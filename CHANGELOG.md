@@ -5,8 +5,57 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
 ### Added
+- **Daemon discovery.** Every daemon registers in `~/.ghax/daemons/<pid>.json`
+  and removes the entry when it exits; readers prune entries whose pid is dead.
+  When the cwd's state file has no live daemon and `GHAX_STATE_FILE` is unset,
+  ghax uses the one registered daemon and prints one stderr line naming its cwd
+  and browser. With more than one running it refuses and lists each with the
+  `GHAX_STATE_FILE=` to set. `attach` never reuses another directory's daemon;
+  `detach` lists them but only stops the one it resolves to. Fixes the
+  "no daemon state" error when an agent attached from a different directory.
+
+- **One bridge daemon can bind several browsers (groundwork).** The bridge
+  keeps one session per bound browser (state, queue, grace window, in-flight
+  commands), so one browser dropping never stalls or fails another's work.
+  `GHAX_BRIDGE_BROWSER=all` binds every connected browser at the end of the
+  settle window and binds a late hello instead of parking it; `bridge use`
+  then only moves which bound browser is active. Relayed events carry the
+  `instanceId` and `tabId` they came from. The CLI surface for this lands
+  separately.
+  A read interrupted on one browser is never replayed on another (it fails
+  with `BRIDGE_PEER_CHANGED` naming the browser instead). Only the active
+  browser's events, tab changes and hellos touch refs and the active tab.
+  Each bound browser keeps its own main frame, execution contexts, load time
+  and in-flight requests, so one browser navigating never disturbs another's
+  reads. Console and network entries from every bound browser are kept, each
+  tagged with its `tabId`.
+  `bridge reload` waits for the browser it reloaded, not any hello. Naming an
+  unbound browser for control is refused. Under `all`, an expired browser
+  leaves the bound set, and an extension without an instance id is refused
+  with a reload hint. Under `all`, browsers joining or returning after expiry
+  no longer trip the "ownership is flapping" warning.
+
+- **Multi-browser surface for `--browser all`.** `ghax tabs` lists every bound
+  browser's tabs numbered `#1..N` across all of them; a browser that errors or
+  does not answer within 10 s becomes a `note:` row instead of hanging the
+  listing. `ghax tab <x>` in another bound browser controls the tab there and
+  only then makes that browser active (refs cleared); a refusal leaves the
+  daemon on the browser it was driving, and a tab in an unbound browser is
+  refused with a `bridge use` hint. Each command's CDP and control calls stay
+  on the browser it started on, even if another shell switches browsers
+  mid-command. In bridge mode `console` and `network` show the active tab by
+  default, `--tab <#n|id>` picks another, `--all` lifts the filter (CDP mode
+  is unchanged); `--last N` counts the selected tab's entries, no active tab
+  is an error rather than `[]`, and `--follow` is not tab-filtered yet. Every
+  bound browser enables console/network capture on its own tab, active or
+  not, and switching browsers keeps the destination's in-flight requests.
+  `tabs` no longer marks a non-active browser's tab `active`.
+  `bridge instances` reports `active` and marks the active browser,
+  `/bridge-status.connected` is true when any bound browser is connected, and the daemon log no longer says "only 'all' may
+  bind". `GHAX_BRIDGE_CONTROL=active` under `all` applies to the first bound
+  browser only (now logged).
+
 - **`eval --timeout <ms>` and `eval --no-wait`.** The bridge capped every
   `Runtime.evaluate` at 30 s with no way to raise it. `--timeout` now sets
   the deadline on both transports (the CLI's own RPC budget already grows
@@ -50,10 +99,67 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (exit 2), passes `partitionKey` for CHIPS cookies, and re-reads the profile
   to confirm the removal (exit 4 if the cookie is still there).
 
+### Fixed
+- **`tabs --browser <x>` no longer picks the first of several matches.** A
+  selector naming two browsers (two Edge profiles without labels, say) is
+  refused with both listed, the same as `bridge use`.
+
 ### Changed
 - `click`, `fill`, `select`, `upload`, `box`, `is` with a missing or empty
   target now say `click: target is empty — pass an @ref or selector (unset
   shell variable?)` and exit 2, instead of printing the usage line.
+- **`attach --extension` no longer binds the first browser that says hello.**
+  It waits `GHAX_BRIDGE_SETTLE_MS` (default 1500 ms) after the first hello,
+  then binds only if exactly one connected browser matches `--browser`. More
+  than one exits 2 with `BRIDGE_AMBIGUOUS`. If none matches, attach keeps
+  waiting for one to connect and exits 2 with `BRIDGE_NO_CANDIDATE` only
+  when the attach timeout ends. Both list `browser · label · instanceId · port` for
+  every browser seen. `ghax bridge use` still picks one by hand (it refuses
+  a selector that matches more than one instance and lists them, instead of
+  taking the first), and a hello
+  after a bind still parks. Breaking: two browsers without `--browser` no
+  longer bind silently. `/bridge-status` gains a `selection` field.
+  Daemon registry entries are written via temp file + rename; an unreadable
+  entry whose pid is alive blocks adoption instead of being ignored.
+  `GHAX_GLOBAL=1` disables daemon discovery like `GHAX_STATE_FILE`, and
+  `diff-state` / plain `version` never run discovery.
+  Design: `docs/design/plan/11-multi-browser.md` (phase 1).
+- **Every tab says which browser and profile it's in.** `ghax tabs` prints
+  one line per tab:
+  `#3  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224`.
+  `--json` rows add `index`, `chromeTabId`, `browser`, `profile` and
+  `windowId`. On the bridge the id is `<alias>:<chromeTabId>`, where the
+  alias is `<brand>-<profile>` from the extension popup's new **Profile name**
+  (slugged), else `<brand>-<first 6 of instanceId>`. Aliases are unique: a
+  duplicate gets the instance prefix appended (longer if it still collides),
+  and a live browser keeps its alias when a same-name one connects. Two browsers can both have a tab 42;
+  their ids no longer collide. On CDP the id is still the target id, the
+  browser comes from the attach, and the profile is `—`.
+- **`tab` takes `#n`, a full id, or a bare number.** `#n` is row n of the
+  last `ghax tabs` and is refused if that tab has closed since (quote it in
+  bash: `ghax tab '#3'`). A bare number works only when exactly one tab has
+  that chrome tab id (and the last listing did not show it in another
+  browser too); none or several is refused, listing every match with
+  its full identity. `bridge control --tab-id` resolves the same way.
+  `tab` / `new-window` print the tab's full identity. Refusals (a tab
+  another agent owns, an unattachable tab) name the id, title, browser and
+  profile.
+- **Extension:** the popup's "Label" field is now **Profile name** and shows
+  in the popup header. `hello` adds `profile`, `brandVersion` and a per-browser-session
+  `sessionNonce` (a `#n` from before a browser restart is refused; profile
+  names are stripped of control characters and capped at 40);
+  `list-tabs` rows add `windowId` and `index`. An older extension still
+  works: its tabs get the `<brand>-<short6>` alias. `bridge instances` rows
+  add `profile`, `alias` and `brandVersion`; `bridge use` accepts an alias.
+  Design: `docs/design/plan/11-multi-browser.md` (phase 2).
+
+### Breaking
+- **Bridge tab ids are strings.** `ghax tabs`, `find`, `tab`, `new-window`,
+  `status.activeTabId` and `bridge control`'s `tabId` now carry
+  `<alias>:<chromeTabId>` (e.g. `edge-work:42`) instead of `"42"`/`42`. The raw
+  number is in `chromeTabId`. `bridge instances` and `/bridge-status`
+  `controlledTabId` stay numeric. Plain `ghax tabs` output changed from one
+  JSON object per line to the text layout above; use `--json` to parse.
 
 ## [0.9.0] - 2026-09-27
 ### Added

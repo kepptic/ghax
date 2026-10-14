@@ -327,6 +327,36 @@ c('tabs returns a non-empty list', async () => {
   assert(Array.isArray(tabs) && tabs.length > 0, 'expected at least one tab');
 });
 
+c('tabs rows carry index, browser and profile (CDP)', async () => {
+  const r = await run(['tabs', '--json']);
+  const tabs = parseJson<Array<{ index: number; id: string; chromeTabId: unknown; browser: string; profile: string; windowId: unknown }>>(r.stdout);
+  tabs.forEach((t, i) => {
+    assert(t.index === i + 1, `row ${i} should have index ${i + 1}, got ${t.index}`);
+    assert(typeof t.browser === 'string' && t.browser.length > 0, `browser missing: ${JSON.stringify(t)}`);
+    // CDP has no profile name and no chrome tab id; the id is the target id.
+    assert(t.profile === '—', `CDP profile should be '—', got ${t.profile}`);
+    assert(t.chromeTabId === null && t.windowId === null, `CDP rows: ${JSON.stringify(t)}`);
+  });
+  const text = (await run(['tabs'])).stdout.split('\n')[0];
+  assert(/^#1  \S+  ".*"  \S+ · —/.test(text), `tabs text line should be '#1  <id>  "<title>"  <Browser> · —', got: ${text}`);
+});
+
+c('tab #1 switches to row 1 of the last tabs listing; a bad #n refuses', async () => {
+  const tabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const before = tabs.find((t) => t.active)?.id;
+  try {
+    const r = await run(['tab', '#1', '--quiet', '--json']);
+    const t = parseJson<{ id: string; index: number }>(r.stdout);
+    assert(t.id === tabs[0].id && t.index === 1, `tab #1 should be ${tabs[0].id}, got ${JSON.stringify(t)}`);
+    const bad = await run(['tab', `#${tabs.length + 50}`], { allowFailure: true });
+    assert(bad.exitCode !== 0 && /no #\d+/.test(bad.stderr + bad.stdout), `out-of-range #n should refuse: ${bad.stderr || bad.stdout}`);
+    const bare = await run(['tab', '987654'], { allowFailure: true });
+    assert(bare.exitCode !== 0 && /No tab with id 987654/.test(bare.stderr + bare.stdout), `unknown id should refuse: ${bare.stderr || bare.stdout}`);
+  } finally {
+    if (before) await run(['tab', before, '--quiet'], { allowFailure: true });
+  }
+});
+
 c('wait --stable reports a settled page as stable', async () => {
   await run(['goto', 'https://example.com']);
   const r = await run(['wait', '--stable', '--json']);
@@ -966,6 +996,24 @@ c('network --last returns entries', async () => {
   if (entries.length > 0) {
     assert(typeof entries[0].url === 'string' && typeof entries[0].method === 'string', 'network entry shape');
   }
+});
+
+c('console/network output is unfiltered in CDP mode (tab scoping is bridge-only)', async () => {
+  // Multi-bind scopes bridge-mode logs to the active tab. CDP mode has one
+  // buffer for one browser: default, --all and a stray --tab must all agree.
+  const tag = `ghax-smoke-scope-${Date.now().toString(36)}`;
+  await run(['eval', `console.log(${JSON.stringify(tag)})`]);
+  await run(['wait', '200']);
+  const texts = async (extra: string[]) => {
+    const r = await run(['console', '--last', '500', '--json', ...extra]);
+    return parseJson<Array<{ text: string }>>(r.stdout).map((e) => e.text);
+  };
+  const plain = await texts([]);
+  assert(plain.includes(tag), 'default console output should include the marker');
+  assert(JSON.stringify(await texts(['--all'])) === JSON.stringify(plain), '--all must not change CDP console output');
+  assert(JSON.stringify(await texts(['--tab', '#1'])) === JSON.stringify(plain), '--tab must not filter CDP console output');
+  const net = async (extra: string[]) => parseJson<unknown[]>((await run(['network', '--last', '500', '--json', ...extra])).stdout).length;
+  assert((await net(['--all'])) === (await net([])), '--all must not change CDP network output');
 });
 
 c('cookies --json returns an array', async () => {

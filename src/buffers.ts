@@ -103,6 +103,8 @@ export interface ConsoleEntry {
   url?: string;
   source?: 'tab' | 'service_worker' | 'sidepanel' | 'popup' | 'options';
   targetId?: string;
+  /** Bridge transport: composite tab id (`<alias>:<n>`) the entry came from. */
+  tabId?: string;
   stack?: StackFrame[];  // parsed stack trace, present on pageerror entries
 }
 
@@ -152,6 +154,8 @@ export interface NetworkEntry {
   duration?: number;
   size?: number;
   resourceType?: string;
+  /** Bridge transport: composite tab id (`<alias>:<n>`) the request came from. */
+  tabId?: string;
   requestHeaders?: Record<string, string>;
   responseHeaders?: Record<string, string>;
   responseAt?: number;  // timestamp response arrived (for duration calc)

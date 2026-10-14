@@ -177,7 +177,7 @@ Since Edge 150 / Chrome 136, `--remote-debugging-port` is ignored on the default
 #   edge://extensions → Developer mode → Load unpacked → ./extension
 ghax attach --extension --control-active   # drive the active tab, no popup click
 ghax snapshot -i                            # full verb surface over your real session
-ghax bridge control --tab-id <n>            # or point it at a specific tab (see `tabs`)
+ghax bridge control --tab-id '#2'           # or point it at a specific tab (see `tabs`)
 ghax bridge control --stop                  # release the tab (debugging banner clears)
 ```
 
@@ -201,6 +201,34 @@ ghax bridge use chrome                   # rebind (by id, browser, or label)
 ghax tabs --browser chrome               # peek at a parked browser's tabs
 ghax attach --extension --browser edge   # only Edge may bind; others park
 ```
+
+`attach --extension` doesn't bind the first browser that says hello. It waits 1.5 s after the first one (`GHAX_BRIDGE_SETTLE_MS`), then binds only if exactly one connected browser matches `--browser`. Two browsers and no `--browser` exits 2 with `BRIDGE_AMBIGUOUS`; a `--browser` nothing matches keeps waiting for it to connect, then exits 2 with `BRIDGE_NO_CANDIDATE` when the attach timeout ends. Both list every browser seen as `browser · label · instanceId · port`:
+
+```
+ghax: BRIDGE_AMBIGUOUS: 2 browsers connected and no --browser picks one:
+  edge · Work · 3f2a1b9c-... · :9223
+  chrome · - · 9c8d7e10-... · :9223
+```
+
+Re-run with `--browser edge` (or a label), or keep the daemon and pick with `ghax bridge use <id|browser|label>`. Two profiles of the same brand need distinct labels in the extension popup.
+
+**Driving several browsers at once.** `ghax attach --extension --browser all` (or `GHAX_BRIDGE_BROWSER=all`) binds every connected browser instead of parking all but one. One bound browser is **active**: it is the one `snapshot`, `click`, `eval` and the rest act on, and `ghax bridge instances` marks it (`*` active, `+` bound, blank parked). Then:
+
+- `ghax tabs` lists every bound browser's tabs, numbered `#1..N` across all of them. A browser that fails or takes over 10 s to answer shows as a `note:` line instead of hanging the listing.
+- `ghax tab '#5'` (or a full id such as `chrome-home:42`) in another bound browser controls the tab there first, then makes that browser active. Refs are cleared, as on any tab switch. If that browser refuses the tab (another agent owns it, it can't attach), the daemon stays on the browser it was driving. A tab in a browser that isn't bound is refused with a `ghax bridge use` hint.
+- A command runs start to finish on the browser that was active when it started. A `tab` switch from another shell mid-command never sends the rest of it to the other browser.
+- `ghax console` and `ghax network` show the active tab only. `--tab '#n'|<id>` picks another tab, `--all` shows every tab of every bound browser. `--last N` counts the selected tab's entries. With no active tab they error instead of printing nothing. Caveat: `console --follow` and `network --follow` are not tab-filtered yet; they stream every bound browser's entries.
+- Every bound browser records console and network from the tab it controls, active or not.
+- `GHAX_BRIDGE_CONTROL=active` (`--control-active`) applies to the first browser that binds only.
+
+**Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:
+
+```
+#1  work:7   "Inbox"                    Edge · Work  controlledBy=:9223  active
+#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
+```
+
+The id is `<brand>-<profile>:<chrome tab id>` (e.g. `edge-work:42`). Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). Aliases are unique: a collision appends the instance prefix, and a live browser keeps its alias when another with the same name connects. `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab edge-work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches (including a same-number tab in a browser your last `ghax tabs --browser` listed). A `#n` is also refused after the browser restarts.
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 
@@ -323,6 +351,8 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
 ```
 
 Same browser process, separate windows and separate daemon state. Neither agent sees the other's active-tab pointer.
+
+**Finding a daemon from another directory.** The state file follows the git root of your cwd, so a daemon attached from `~/work/a` used to be invisible from `~/work/b`. Every daemon now registers in `~/.ghax/daemons/<pid>.json` (removed when it exits; entries for dead pids are pruned on read). When your directory has no live daemon and `GHAX_STATE_FILE` is unset, ghax uses the one registered daemon and prints one stderr line naming its cwd and browser. With several running it refuses and lists each with the `GHAX_STATE_FILE=` to set. `ghax attach` never reuses another directory's daemon, and `ghax detach` only stops the one it resolves to.
 
 The same recipe works over the bridge — swap `ghax attach` for `ghax attach --extension`. The daemons auto-pick adjacent bridge ports and the extension multiplexes between them; a tab may only be driven by one agent at a time. See [Real session via the ghax bridge](#real-session-via-the-ghax-bridge-experimental-v05).
 

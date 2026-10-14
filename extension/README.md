@@ -103,7 +103,7 @@ ghax CLI (Rust)  --HTTP RPC-->  ghax daemon (Node)  --WebSocket-->  this extensi
   `chrome.storage.local` (the popup's base-port field) to move the whole
   window.
 - The extension's background service worker connects to it and sends
-  `{"type":"hello", instanceId, browser, label, ...}`. The daemon answers
+  `{"type":"hello", instanceId, browser, label, profile, brandVersion, ...}` (`profile` = the popup's Profile name, same value as `label`). The daemon answers
   with `{"type":"hello-ack", role}` — see **Multiple browsers** below — and
   only once it's granted the `bound` role does the extension attach
   `chrome.debugger`. It then relays every `{id, method, params}` message as

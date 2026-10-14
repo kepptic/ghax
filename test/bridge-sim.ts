@@ -20,6 +20,10 @@
  */
 
 import { WebSocket } from 'ws';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { registerDaemon } from '../src/config';
 import {
   Bridge,
   BridgeInterrupted,
@@ -35,9 +39,6 @@ import {
 import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
 import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
 import { recordableStep } from '../src/record-filter';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
@@ -145,6 +146,11 @@ class FakeExt {
    * extension omits both when extension/build-info.json isn't built yet. */
   gitSha: string | null = null;
   buildDate: string | null = null;
+  /** Set to send `profile`/`brandVersion` in hello, as a tab-identity-aware
+   * extension does. Left null, hello carries only `label` (older builds). */
+  profile: string | null = null;
+  /** Set to send `sessionNonce` in hello. */
+  sessionNonce: string | null = null;
   /** Set to a control action this fake should silently ignore — never ack,
    * never act — simulating an extension too old to have a `control` handler
    * at all. */
@@ -165,7 +171,9 @@ class FakeExt {
       instanceId: this.instanceId,
       browser: this.browser,
       label: this.label,
+      ...(this.profile !== null ? { profile: this.profile, brandVersion: '150' } : {}),
       controlledTabId: 42,
+      ...(this.sessionNonce !== null ? { sessionNonce: this.sessionNonce } : {}),
       ...(this.pairToken ? { pairToken: this.pairToken } : {}),
       ...(this.gitSha && this.buildDate ? { gitSha: this.gitSha, buildDate: this.buildDate } : {}),
     });
@@ -267,13 +275,16 @@ class FakeExt {
 let nextPort = 19400;
 async function withBridge(
   fn: (b: Bridge, port: number, logs: string[]) => Promise<void>,
-  extraOpts: { pairCode?: string } = {},
+  extraOpts: { pairCode?: string; settleMs?: number } = {},
 ): Promise<void> {
   const port = nextPort++;
   const logs: string[] = [];
   const bridge = new Bridge(port, (m) => logs.push(m), {
     graceMs: GRACE_MS,
     livenessMs: LIVENESS_MS,
+    // 0 = first hello binds, which most checks here assume. The settle-window
+    // checks pass their own.
+    settleMs: 0,
     ...extraOpts,
   });
   try {
@@ -768,7 +779,7 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       let caught: unknown = null;
-      await bridgeResolveHandle(bridge, { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
+      await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 77, role: 'button', name: 'Save' }, '@e3')
         .catch((e) => { caught = e; });
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
@@ -783,10 +794,10 @@ async function main(): Promise<void> {
         ok: false, reason: 'covered', coveredBy: 'div#overlay "Accept cookies"', x: 10, y: 10, width: 5, height: 5,
       });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Buy' }, '@e7');
       let caught: unknown = null;
-      await bridgeGuard(bridge, h, '@e7', 'click', false).catch((e) => { caught = e; });
-      bridgeReleaseHandle(bridge, h);
+      await bridgeGuard(bridge.pinned(), h, '@e7', 'click', false).catch((e) => { caught = e; });
+      bridgeReleaseHandle(bridge.pinned(), h);
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
       assert(e.code === 'BRIDGE_TARGET_NOT_ACTIONABLE', `code ${e.code}`);
@@ -808,13 +819,13 @@ async function main(): Promise<void> {
     await withBridge(async (bridge, port) => {
       const ext = await guardedExt(port, { ok: false, reason: 'disabled' });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Go' }, '@e2');
       let caught: any = null;
-      await bridgeGuard(bridge, h, '@e2', 'click', false).catch((e) => { caught = e; });
+      await bridgeGuard(bridge.pinned(), h, '@e2', 'click', false).catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_TARGET_NOT_ACTIONABLE' && /disabled/.test(caught.hint), `disabled: ${caught?.hint}`);
       ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
       caught = null;
-      await bridgeGuard(bridge, h, '@e2', 'fill', false).catch((e) => { caught = e; });
+      await bridgeGuard(bridge.pinned(), h, '@e2', 'fill', false).catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
     });
   });
@@ -823,8 +834,8 @@ async function main(): Promise<void> {
     await withBridge(async (bridge, port) => {
       const ext = await guardedExt(port, { ok: true, x: 40, y: 20, width: 80, height: 40 });
       await until(() => bridge.connected, 'bind');
-      const h = await bridgeResolveHandle(bridge, { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
-      const { guard } = await bridgeGuard(bridge, h, '@e1', 'click', true);
+      const h = await bridgeResolveHandle(bridge.pinned(), { backendNodeId: 5, role: 'button', name: 'Go' }, '@e1');
+      const { guard } = await bridgeGuard(bridge.pinned(), h, '@e1', 'click', true);
       assert(guard.x === 40 && guard.y === 20, `click point from the guard: ${JSON.stringify(guard)}`);
       const call = ext.sent.find((c) => c.method === 'Runtime.callFunctionOn');
       assert(call, 'no callFunctionOn sent');
@@ -877,7 +888,7 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       bridge.resetStats();
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       await sleep(10);
       const buttons = [...snap.refs.keys()].filter((k) => k.startsWith('e'));
       assert(buttons.length === 40, `expected 40 @e refs, got ${buttons.length}`);
@@ -894,13 +905,13 @@ async function main(): Promise<void> {
       const { ext, liveCursor } = snapshotExt(port, 2, 2);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       const c2 = snap.refs.get('c2')!;
-      const h = await bridgeResolveHandle(bridge, c2, '@c2');
+      const h = await bridgeResolveHandle(bridge.pinned(), c2, '@c2');
       assert(h.objectId === 'cursor-2', `resolved to ${h.objectId}`);
       liveCursor.delete(2);
       let caught: any = null;
-      await bridgeResolveHandle(bridge, c2, '@c2').catch((e) => { caught = e; });
+      await bridgeResolveHandle(bridge.pinned(), c2, '@c2').catch((e) => { caught = e; });
       assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
   });
@@ -911,7 +922,7 @@ async function main(): Promise<void> {
       const { ext } = snapshotExt(port, 300, 0);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      const snap = await bridgeSnapshot(bridge, { interactive: true });
+      const snap = await bridgeSnapshot(bridge.pinned(), { interactive: true });
       assert(snap.refs.size === 300, `ref map keeps every ref, got ${snap.refs.size}`);
       const b = applySnapshotBudget(snap.text.split('\n'), budgetFromOpts({}));
       assert(b.shownRefs === DEFAULT_MAX_REFS && b.totalRefs === 300, `shown ${b.shownRefs} / total ${b.totalRefs}`);
@@ -957,7 +968,7 @@ async function main(): Promise<void> {
       await until(() => bridge.connected, 'bind');
       const started = Date.now();
       let err: any;
-      try { await bridgeEvaluate(bridge, 'new Promise(() => {})', { timeoutMs: 400 }); } catch (e) { err = e; }
+      try { await bridgeEvaluate(bridge.pinned(), 'new Promise(() => {})', { timeoutMs: 400 }); } catch (e) { err = e; }
       assert(err && /Runtime\.evaluate timed out after 400ms/.test(String(err.message)), `message: ${err?.message}`);
       assert(Date.now() - started < 3000, 'gave up near 400 ms');
     });
@@ -1015,11 +1026,11 @@ async function main(): Promise<void> {
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
       const identity = registry.forDoc('doc-a');
-      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const first = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       const cancel = refByName(first, 'Cancel');
       buttons.unshift({ id: 9, name: 'Inserted' });
-      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const second = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       assert(refByName(second, 'Save') === save, `Save moved: ${save} -> ${refByName(second, 'Save')}`);
       assert(refByName(second, 'Cancel') === cancel, 'Cancel moved');
       const inserted = refByName(second, 'Inserted');
@@ -1036,19 +1047,19 @@ async function main(): Promise<void> {
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
       const identity = registry.forDoc('doc-a');
-      const first = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const first = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       const save = refByName(first, 'Save');
       buttons[0].name = 'Saved';
-      const second = await bridgeSnapshot(bridge, { interactive: true, refs: identity });
+      const second = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: identity });
       assert(refByName(second, 'Saved') !== save, 'a renamed node must not keep its old ref');
       buttons[1].role = 'link';
-      const third = await bridgeSnapshot(bridge, { refs: identity });
+      const third = await bridgeSnapshot(bridge.pinned(), { refs: identity });
       assert(third.refs.get(refByName(first, 'Go')!) === undefined, 'a node whose role changed gets a new ref');
       buttons.splice(0, 1);
       const held = registry.size;
-      await bridgeSnapshot(bridge, { refs: identity, selector: '#main' });
+      await bridgeSnapshot(bridge.pinned(), { refs: identity, selector: '#main' });
       assert(registry.size === held, '--selector snapshots never prune');
-      await bridgeSnapshot(bridge, { refs: identity });
+      await bridgeSnapshot(bridge.pinned(), { refs: identity });
       assert(registry.size === held - 1, `an unscoped snapshot prunes nodes that left the page (${held} -> ${registry.size})`);
     });
   });
@@ -1060,14 +1071,14 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const registry = new RefRegistry();
-      const pageA = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-a') });
+      const pageA = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: registry.forDoc('doc-a') });
       const aRefs = [...pageA.refs.keys()];
       // Navigation: the daemon clears identities (clearSnapshotRefs) but the
       // new document reuses the SAME backend node ids and even the same names.
       registry.clear();
       buttons[0].name = 'Delete account';
       buttons[1].name = 'Buy';
-      const pageB = await bridgeSnapshot(bridge, { interactive: true, refs: registry.forDoc('doc-b') });
+      const pageB = await bridgeSnapshot(bridge.pinned(), { interactive: true, refs: registry.forDoc('doc-b') });
       const num = (r: string) => Number(r.slice(1));
       const maxA = Math.max(...aRefs.map(num));
       for (const r of pageB.refs.keys()) assert(num(r) > maxA, `page B reused ${r} (page A went up to e${maxA})`);
@@ -1084,10 +1095,10 @@ async function main(): Promise<void> {
       const ext = mutablePage(port, [{ id: 10, name: 'Save' }]);
       await ext.connect();
       await until(() => bridge.connected, 'bind');
-      assert((await bridgeSnapshot(bridge, {})).scoped === false, 'a body-rooted snapshot is not scoped');
-      assert((await bridgeSnapshot(bridge, { selector: '#form' })).scoped === true, '--selector is scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), {})).scoped === false, 'a body-rooted snapshot is not scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), { selector: '#form' })).scoped === true, '--selector is scoped');
       ext.replies.set('DOM.describeNode', () => ({ node: { backendNodeId: 1, nodeName: 'DIALOG' } }));
-      assert((await bridgeSnapshot(bridge, {})).scoped === true, 'a modal-rooted snapshot is scoped');
+      assert((await bridgeSnapshot(bridge.pinned(), {})).scoped === true, 'a modal-rooted snapshot is scoped');
     });
   });
 
@@ -1101,12 +1112,12 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const ref = { backendNodeId: 42, role: 'button', name: 'Save' };
-      assert(await bridgeRefStillMatches(bridge, ref), 'same role and name should match');
+      assert(await bridgeRefStillMatches(bridge.pinned(), ref), 'same role and name should match');
       ax = { role: 'button', name: 'Delete' };
-      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a rename must not match');
+      assert(!(await bridgeRefStillMatches(bridge.pinned(), ref)), 'a rename must not match');
       ax = { role: 'checkbox', name: 'Save' };
-      assert(!(await bridgeRefStillMatches(bridge, ref)), 'a role change must not match');
-      assert(await bridgeRefStillMatches(bridge, { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
+      assert(!(await bridgeRefStillMatches(bridge.pinned(), ref)), 'a role change must not match');
+      assert(await bridgeRefStillMatches(bridge.pinned(), { backendNodeId: null, cursorId: 3, role: 'cursor-interactive', name: 'x' }), 'cursor refs are not rechecked');
     });
   });
 
@@ -1117,18 +1128,18 @@ async function main(): Promise<void> {
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const ref = { backendNodeId: 5, role: 'button', name: 'Go' };
-      await bridgeResolveHandle(bridge, ref, '@e1');
-      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(ext.worldsCreated === 1, `one world per document, got ${ext.worldsCreated}`);
       const ctxIds = ext.sent.filter((c) => c.method === 'DOM.resolveNode').map((c) => c.params.executionContextId);
       assert(ctxIds.every((id) => id === 701), `both resolves in world 701: ${ctxIds}`);
       // Main-frame navigation drops the world; the next use makes a new one.
       ext.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'main-frame' } } });
       await sleep(20);
-      await bridgeResolveHandle(bridge, ref, '@e1');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(Number(ext.worldsCreated) === 2, 'navigation must re-create the world');
       // A main-world handle (fill) does not use the isolated world at all.
-      await bridgeResolveHandle(bridge, ref, '@e1', 'main');
+      await bridgeResolveHandle(bridge.pinned(), ref, '@e1', 'main');
       const last = ext.sent.filter((c) => c.method === 'DOM.resolveNode').at(-1);
       assert(last?.params.executionContextId === undefined, 'main-world resolve carries no context id');
       // A stale context is re-created once, transparently.
@@ -1137,7 +1148,7 @@ async function main(): Promise<void> {
         if (fail && p.executionContextId) { fail = false; throw new Error('Cannot find context with specified id'); }
         return { object: { objectId: 'o2' } };
       });
-      const h = await bridgeResolveHandle(bridge, ref, '@e1');
+      const h = await bridgeResolveHandle(bridge.pinned(), ref, '@e1');
       assert(h.objectId === 'o2' && Number(ext.worldsCreated) === 3, `stale world should be rebuilt: ${ext.worldsCreated}`);
     });
   });
@@ -1455,6 +1466,101 @@ async function main(): Promise<void> {
     });
   });
 
+  // ─── First-bind selection (plan 11, phase 1) ────────────────────
+  // Two browsers dialling one daemon used to race: first hello won. Now the
+  // first hello opens a settle window and the daemon binds only when exactly
+  // one connected instance matches.
+  const SETTLE = 150;
+
+  await test('settle: two browsers, no --browser → BRIDGE_AMBIGUOUS, nothing binds', async () => {
+    await withBridge(async (bridge, port) => {
+      const edge = new FakeExt(port, 'inst-edge', 'edge', 'Work');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome');
+      await edge.connect();
+      await chrome.connect();
+      await until(() => edge.role === 'parked' && chrome.role === 'parked', 'both park while settling');
+      assert(bridge.selection.state === 'settling', `selection ${bridge.selection.state}`);
+      await until(() => bridge.selection.state !== 'settling', 'settle window to close');
+      const sel = bridge.selection;
+      assert(sel.state === 'ambiguous' && sel.code === 'BRIDGE_AMBIGUOUS', `got ${JSON.stringify(sel)}`);
+      assert(sel.instances?.length === 2, 'both instances listed');
+      assert(/edge · Work · inst-edge · :\d+/.test(sel.message ?? ''), `message lists edge: ${sel.message}`);
+      assert(/chrome · - · inst-chrome/.test(sel.message ?? ''), `message lists chrome: ${sel.message}`);
+      assert(!bridge.connected && bridge.state === 'UNBOUND', `must not bind, state ${bridge.state}`);
+      assert(edge.role === 'parked' && chrome.role === 'parked', 'neither may be promoted');
+      // A late hello while ambiguous parks too: [0] is never taken by arrival.
+      const late = new FakeExt(port, 'inst-late', 'edge');
+      await late.connect();
+      await until(() => late.role !== null, 'late disposition');
+      assert(late.role === 'parked' && bridge.state === 'UNBOUND', 'late hello must park while ambiguous');
+      // The error a verb sees names the ambiguity, not "load the extension".
+      let caught: any = null;
+      try { await bridge.send('Runtime.evaluate', {}); } catch (e) { caught = e; }
+      assert(/BRIDGE_AMBIGUOUS/.test(String(caught?.message)), `send error: ${caught?.message}`);
+      // `bridge use` still resolves it.
+      await bridge.use('chrome');
+      await until(() => chrome.role === 'bound', 'use promotes chrome');
+      assert((bridge.selection.state as string) === 'bound', `selection after use: ${bridge.selection.state}`);
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: --browser edge binds Edge, Chrome stays parked', async () => {
+    await withBridge(async (bridge, port) => {
+      bridge.setBindFilter('edge');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome');
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      // Chrome first: under first-hello-wins with no filter it would have won.
+      await chrome.connect();
+      await edge.connect();
+      await until(() => edge.role === 'bound', 'edge promoted after settle');
+      assert(chrome.role === 'parked', `chrome should stay parked, got ${chrome.role}`);
+      assert(edge.roleHistory.join(',') === 'parked,bound', `edge history ${edge.roleHistory}`);
+      assert(bridge.selection.state === 'bound', `selection ${bridge.selection.state}`);
+      await bridge.send('Runtime.evaluate', { expression: '1' });
+      assert(edge.received.length === 1 && chrome.received.length === 0, 'CDP goes to edge only');
+      // Late hellos after a bind keep the old park behaviour.
+      const late = new FakeExt(port, 'inst-edge-2', 'edge');
+      await late.connect();
+      await until(() => late.role !== null, 'late disposition');
+      assert(late.role === 'parked' && edge.role === 'bound', 'a late match parks; the bound one keeps the session');
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: nothing matches --browser → BRIDGE_NO_CANDIDATE naming what was seen', async () => {
+    await withBridge(async (bridge, port) => {
+      bridge.setBindFilter('firefox');
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome', 'Personal');
+      await edge.connect();
+      await chrome.connect();
+      await until(() => bridge.selection.state === 'no-candidate', 'window to close with no candidate');
+      const sel = bridge.selection;
+      assert(sel.code === 'BRIDGE_NO_CANDIDATE', `code ${sel.code}`);
+      assert(sel.filter === 'firefox', `filter ${sel.filter}`);
+      assert(sel.instances?.length === 2 && sel.instances.every((i) => !i.matches), 'both seen, neither matches');
+      assert(/inst-edge/.test(sel.message ?? '') && /chrome · Personal · inst-chrome/.test(sel.message ?? ''), `message: ${sel.message}`);
+      assert(bridge.state === 'UNBOUND', 'nothing binds');
+      // A matching browser arriving later reopens the window and binds.
+      const ff = new FakeExt(port, 'inst-ff', 'firefox');
+      await ff.connect();
+      await until(() => ff.role === 'bound', 'late match binds after its own settle');
+      assert(edge.role === 'parked' && chrome.role === 'parked', 'non-matching stay parked');
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: a single browser binds once the window closes', async () => {
+    await withBridge(async (bridge, port) => {
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      const t0 = Date.now();
+      await edge.connect();
+      await until(() => edge.role === 'parked', 'parks first');
+      await until(() => bridge.connected, 'binds after settle');
+      assert(Date.now() - t0 >= SETTLE - 20, `bound too early (${Date.now() - t0}ms)`);
+      // The bridge flips to connected before the fake has read the role frame.
+      await until(() => edge.role === 'bound', 'edge to receive its bound role');
+    }, { settleMs: SETTLE });
+  });
+
   await test('bridge.use rebinds over live sockets (no disconnect) and clears refs', async () => {
     await withBridge(async (bridge, port) => {
       const a = new FakeExt(port, 'inst-a', 'edge');
@@ -1477,6 +1583,42 @@ async function main(): Promise<void> {
       assert(controlledEmitted, 'rebind must emit controlled so refs clear');
       assert(a.closes === 0 && b.closes === 0, 'rebind must not disconnect either peer');
     });
+  });
+
+  await test('use(): ambiguous selector refuses and lists every match; a unique id prefix binds', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'aaa111-edge', 'edge', 'Work');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const b = new FakeExt(port, 'bbb222-edge', 'edge', 'Home');
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      let caught: any = null;
+      try { await bridge.use('edge'); } catch (e) { caught = e; }
+      const msg = String(caught?.message);
+      assert(caught && /matches 2 instances/.test(msg), `use('edge') must refuse: ${msg}`);
+      assert(/edge · Work · aaa111-edge · :/.test(msg) && /edge · Home · bbb222-edge · :/.test(msg), `must list both: ${msg}`);
+      assert(a.role === 'bound' && (b.role as string) === 'parked', 'a refusal must not rebind');
+      await bridge.use('bbb');
+      await until(() => b.role === 'bound', 'unique id prefix binds');
+      assert((a.role as string) === 'parked', `a demoted, got ${a.role}`);
+    });
+  });
+
+  await test('registerDaemon writes via temp+rename: the visible file is never written in place', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-reg-'));
+    const target = path.join(dir, '4242.json');
+    const written: string[] = [];
+    registerDaemon(
+      { pid: 4242, port: 1, stateFile: '/x', cwd: '/x', browserKind: 'edge', bridgePort: null, startedAt: 'now' },
+      dir,
+      (f, data, opts) => { written.push(f); fs.writeFileSync(f, data, opts); },
+    );
+    assert(!written.includes(target), `entry written directly to ${target}`);
+    assert(written.length === 1 && !written[0].endsWith('.json'), `temp name ${written}`);
+    assert(JSON.parse(fs.readFileSync(target, 'utf8')).pid === 4242, 'final file parses');
+    assert(fs.readdirSync(dir).join() === '4242.json', `leftovers: ${fs.readdirSync(dir)}`);
+    fs.rmSync(dir, { recursive: true });
   });
 
   await test('same instance reconnecting is a resume, not a rival', async () => {
@@ -1513,6 +1655,99 @@ async function main(): Promise<void> {
       // Crucially, querying must not change who is driving.
       assert(a.role === 'bound' && b.role === 'parked', 'roles must be unchanged after a query');
       assert(bridge.controlledTabId === 42, 'bound peer still owns the session');
+    });
+  });
+
+  await test('identity: hello.profile names the alias; label-only and unlabelled extensions fall back', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-a', 'edge');
+      a.profile = 'Work Laptop';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const ia = bridge.instances().find((i) => i.instanceId === 'inst-a')!;
+      assert(ia.profile === 'Work Laptop' && ia.alias === 'edge-work-laptop', `profile/alias: ${ia.profile} / ${ia.alias}`);
+      assert(ia.brandVersion === '150', `brandVersion: ${ia.brandVersion}`);
+      // An extension predating `profile` still names itself through `label`.
+      const b = new FakeExt(port, 'inst-b', 'chrome', 'Home');
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      const ib = bridge.instances().find((i) => i.instanceId === 'inst-b')!;
+      assert(ib.profile === 'Home' && ib.alias === 'chrome-home' && ib.brandVersion === '', `label fallback: ${JSON.stringify(ib)}`);
+      // No name at all: <brand>-<short6>.
+      const c = new FakeExt(port, 'inst-c-123456', 'chrome');
+      await c.connect();
+      await until(() => c.role === 'parked', 'c parked');
+      assert(bridge.aliasOf('inst-c-123456') === 'chrome-instc1', `fallback alias: ${bridge.aliasOf('inst-c-123456')}`);
+      // The ack says who answered, so ids are minted with the right alias.
+      const ack = await bridge.sendControlToInstance('chrome-home', { action: 'list-tabs' });
+      assert(ack.instanceId === 'inst-b', `ack.instanceId: ${ack.instanceId}`);
+      const own = await bridge.sendControl({ action: 'list-tabs' });
+      assert(own.instanceId === 'inst-a', `bound ack.instanceId: ${own.instanceId}`);
+    });
+  });
+
+  await test('alias: unlabelled edge-abcdef vs a profile named "abcdef" never share an alias', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'abcdef-unlabelled', 'edge');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const b = new FakeExt(port, 'zzzzzz-named', 'edge');
+      b.profile = 'abcdef';
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      const x = bridge.aliasOf('abcdef-unlabelled'), y = bridge.aliasOf('zzzzzz-named');
+      assert(x !== y, `aliases must differ: ${x} / ${y}`);
+    });
+  });
+
+  await test('alias: a live peer keeps its alias when a same-name peer connects; a gone peer does not clash', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'aaaaaa-1', 'edge');
+      a.profile = 'Work';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', `first: ${bridge.aliasOf('aaaaaa-1')}`);
+      const b = new FakeExt(port, 'bbbbbb-2', 'edge');
+      b.profile = 'Work';
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', `a must not flip: ${bridge.aliasOf('aaaaaa-1')}`);
+      assert(bridge.aliasOf('bbbbbb-2') === 'edge-work-bbbbbb', `b suffixed: ${bridge.aliasOf('bbbbbb-2')}`);
+      // b leaves: a stays; b coming back alone gets the plain name only if a is gone too.
+      (b as any).ws?.close();
+      await until(() => bridge.instances().find((i) => i.instanceId === 'bbbbbb-2')!.connected === false, 'b gone');
+      assert(bridge.aliasOf('aaaaaa-1') === 'edge-work', 'a stable after b leaves');
+    });
+  });
+
+  await test('hello profile is sanitized at intake: controls stripped, 40 chars max', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'inst-san', 'edge');
+      a.profile = 'Evil\n#9  fake:1  "x"\u202e' + 'y'.repeat(60);
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const i = bridge.instances().find((x) => x.instanceId === 'inst-san')!;
+      assert(!/[\n\u202e]/.test(i.profile) && i.profile.length <= 40, `profile: ${JSON.stringify(i.profile)}`);
+    });
+  });
+
+  await test('peer-restart fires when the session nonce changes, not on a same-nonce respawn', async () => {
+    await withBridge(async (bridge, port) => {
+      const events: string[] = [];
+      bridge.on('peer-restart', (id: string) => events.push(id));
+      const a = new FakeExt(port, 'inst-n', 'edge');
+      a.sessionNonce = 'n1';
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      assert(events.length === 0, 'first hello is not a restart');
+      assert(bridge.identityOf('inst-n')!.nonce === 'n1', 'nonce recorded');
+      a.sendHello();
+      await sleep(80);
+      assert(events.length === 0, `same nonce is a respawn, not a restart: ${events}`);
+      a.sessionNonce = 'n2';
+      a.sendHello();
+      await until(() => events.length === 1, 'restart event on nonce change');
+      assert(bridge.identityOf('inst-n')!.nonce === 'n2', 'nonce updated');
     });
   });
 

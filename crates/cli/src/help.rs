@@ -8,6 +8,13 @@ Connection:
   attach --extension [--control-active] [--browser <bind-filter>] [--pair[=code]]
                                   # drive your REAL session via the bridge ext;
                                   #   --pair requires a code typed into the popup
+                                  #   Waits GHAX_BRIDGE_SETTLE_MS (1500) after the
+                                  #   first browser connects, then binds only if
+                                  #   exactly one matches --browser. More than one
+                                  #   exits 2 with BRIDGE_AMBIGUOUS. None matching keeps
+                                  #   waiting for one to connect, then exits 2 with
+                                  #   BRIDGE_NO_CANDIDATE at the attach timeout.
+                                  #   Both list each browser seen.
          [--headless] [--load-extension <path>] [--data-dir <path>]
          [--capture-bodies[=<url-glob>]] [--verbose]
          # Without --port, scans :9222-9230. Multiple running → picker.
@@ -23,7 +30,8 @@ Connection:
   restart
 
 Bridge (after attach --extension):
-  bridge control [--active | --tab-id <n> | --stop]  # point the bridge at a tab
+  bridge control [--active | --tab-id <#n|id> | --stop]
+                                      # point the bridge at a tab (same ids as 'tab')
   bridge instances                    # connected browsers, bound + parked
   bridge use <instance-id|browser|label>
                                       # bind a different browser
@@ -33,9 +41,18 @@ Bridge (after attach --extension):
 
 Tab:
   tabs [--browser <id|edge|chrome|label>]
+                                  # one line per tab:
+                                  #   #n  id  "title"  Browser · Profile  controlledBy=…
+                                  # bridge ids are <brand>-<profile>:<chrome tab id>,
+                                  #   e.g. edge-work:42 (profile = popup "Profile name")
                                   # bridge: --browser lists another connected
                                   #   browser's tabs without taking it over
-  tab <id> [--quiet]              # --quiet = don't bringToFront
+                                  # --browser all daemon: every bound browser,
+                                  #   numbered #1..N; a silent one is a `note:` row
+  tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
+                                  #   n alone only if exactly one tab has that
+                                  #   chrome tab id. --quiet = don't bringToFront
+                                  #   a tab in another bound browser makes it active
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
   goto <url> [--stable]           # --stable also waits for the DOM to settle
@@ -92,11 +109,17 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
+  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps] [--tab <#n|id>] [--all]
+         # bridge mode: the active tab only; --tab <#n|id> picks another tab,
+         #   --all lifts the filter (every tab of every bound browser);
+         #   no active tab is an error, not an empty list. --last N counts
+         #   the selected tab's entries. --follow is NOT tab-filtered yet:
+         #   it streams every bound browser's entries
          # --since filters to entries newer than the epoch-ms timestamp
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
-  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
+  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>] [--tab <#n|id>] [--all]
+         # bridge mode: same tab scoping as console (and --follow caveat)
   cookies [--domain <d>] [--url <u>] [--all] [--values] [--has <name>]
          # Default: cookies applicable to the active tab's URL only
          #   (Playwright's own domain/path/secure applicability match).
@@ -179,6 +202,10 @@ Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
   0 = none); verbs with their own --timeout get that plus 30 s; batch gets
   120 s per step.
 Put -- before a value that starts with a dash (ghax eval -- '--i').
+No daemon for this directory? If exactly one ghax daemon is running anywhere
+  (registered in ~/.ghax/daemons/), commands use it and say so on stderr. More
+  than one: the error lists each with the GHAX_STATE_FILE to set. attach never
+  reuses another directory's daemon.
 Add --trace to any command for a one-line CDP call summary on stderr
   (count, time, heaviest methods). stdout is unchanged.
 "#;
