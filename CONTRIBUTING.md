@@ -226,6 +226,8 @@ The smoke test requires a running Chromium-family browser on
 commands** (navigation, snapshots, interaction, extensions, orchestrated
 verbs, `try`, `perf`, console dedup, network status/HAR, new-window
 workflow, `shell` mode tokenising), and detaches. Takes ~30s end-to-end.
+Set `GHAX_SMOKE_PORT=<port>` to pin every attach to that CDP port instead of
+auto-scanning 9222-9230 (use it when another agent's browser is on a lower port).
 
 `test:cross-browser` launches each installed browser headless in a
 disposable scratch profile and runs the full smoke against each.
