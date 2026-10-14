@@ -237,7 +237,7 @@ const BRIDGE_RETRY_SAFE = new Set([
  * verb that itself switches peers re-pins in switchActivePeer. Each `batch`
  * step is a verb of its own and captures afresh.
  */
-const verbPeer = new AsyncLocalStorage<{ peer: string | null }>();
+const verbPeer = new AsyncLocalStorage<{ peer: string | null; inherit?: boolean }>();
 
 function register(name: string, fn: Handler) {
   handlers.set(name, async (ctx, args, opts) => {
@@ -245,7 +245,11 @@ function register(name: string, fn: Handler) {
       throw new Error(`${name}: not supported over the extension bridge yet`);
     }
     if (!ctx.bridgeMode) return fn(ctx, args, opts);
-    return verbPeer.run({ peer: ctx.bridge?.boundInstanceId ?? null }, () => runBridgeVerb(ctx, name, fn, args, opts));
+    // A batch step pins once (freshness check, auto-snapshot and the handler
+    // all share it): `inherit` hands that pin to the handler.
+    const outer = verbPeer.getStore();
+    const peer = outer?.inherit ? outer.peer : ctx.bridge?.boundInstanceId ?? null;
+    return verbPeer.run({ peer }, () => runBridgeVerb(ctx, name, fn, args, opts));
   });
 }
 
@@ -762,7 +766,24 @@ function requireBridge(ctx: Ctx): Bridge {
 function verbBridge(ctx: Ctx): BridgeConn {
   const bridge = requireBridge(ctx);
   const store = verbPeer.getStore();
-  return bridge.pinned(store?.peer ?? bridge.boundInstanceId);
+  if (!store) return bridge.pinned(bridge.boundInstanceId);
+  if (store.peer !== null) return bridge.pinned(store.peer);
+  // Nothing was bound when the verb started: pin lazily. The first send
+  // resolves the then-active peer and stores it in the verb's slot; every
+  // later send (and later verbBridge call) uses it. Still none bound at that
+  // first send: it fails exactly as an unpinned send does.
+  const resolve = (): BridgeConn => {
+    if (store.peer === null) store.peer = bridge.boundInstanceId;
+    return bridge.pinned(store.peer);
+  };
+  return {
+    bridge,
+    // Reading the peer (page-state lookups) pins too, so state and sends agree.
+    get instanceId() { return resolve().instanceId; },
+    send: (method, params, timeoutMs) => resolve().send(method, params, timeoutMs),
+    sendControl: (target, timeoutMs) => resolve().sendControl(target, timeoutMs),
+    setDesiredControl: (target) => resolve().setDesiredControl(target),
+  };
 }
 
 /** The pinned peer's page state; a throwaway empty one when nothing is bound. */
@@ -877,8 +898,14 @@ async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null):
   if (!Array.isArray(ack.result)) throw new Error('tabs: extension returned an invalid tab list');
   // Mint ids with the alias of the instance that ANSWERED — with --browser
   // that is a parked browser, whose tab 42 is not the bound browser's.
-  const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.instanceId);
-  return bridgeRowsToIdentities(ack.result as unknown[], who);
+  const answered = ack.instanceId ?? bridge.instanceId;
+  const who = bridgeIdentity(ctx, answered);
+  return onlyActiveBrowserActive(bridgeRowsToIdentities(ack.result as unknown[], who), answered, bridge.bridge.boundInstanceId);
+}
+
+/** `active` is the daemon's active tab, so only the daemon-active browser's rows may carry it. */
+function onlyActiveBrowserActive(rows: TabIdentity[], rowsOf: string | null, activeId: string | null): TabIdentity[] {
+  return rowsOf !== null && rowsOf === activeId ? rows : rows.map((t) => ({ ...t, active: false }));
 }
 
 /** Per-peer wait for `list-tabs` under multi-bind: a hung browser costs this, no more. */
@@ -898,9 +925,7 @@ async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Pr
   const settled = await Promise.allSettled(ids.map(async (id) => {
     const ack = await bridge.sendControl({ action: 'list-tabs' }, timeoutMs, { peer: id });
     if (!Array.isArray(ack.result)) throw new Error('extension returned an invalid tab list');
-    const rows = bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id));
-    // `active` is the daemon's active tab, so only the active browser has one.
-    return id === activeId ? rows : rows.map((t) => ({ ...t, active: false }));
+    return onlyActiveBrowserActive(bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id)), id, activeId);
   }));
   const rows: TabIdentity[] = [];
   const notes: string[] = [];
@@ -1091,58 +1116,63 @@ register('batch', async (ctx, args, opts) => {
     // freshness marker is unchanged since the last snapshot: nothing that
     // could move a ref has happened, and the re-snapshot was the costliest
     // part of a ref step, especially over the bridge.
-    let autoSnap: 'skipped' | 'taken' | undefined;
-    const stepRefs = refsOf({ args: stepArgs, opts: stepOpts });
-    const current = stepRefs.length > 0 ? await readFreshnessMarker(ctx) : null;
-    // A ref minted on a document that is no longer loaded must fail, never
-    // be re-resolved: after `click @e3` navigates, the plan's `@e5` meant
-    // page A's element, and an auto-snapshot of page B must not answer it.
-    const docNow = docIdOfMarker(current);
-    const foreign = docNow
-      ? stepRefs.find((r) => {
-        const d = ctx.refRegistry.docOf(r.slice(1));
-        return d !== undefined && !d.startsWith('unknown:') && d !== docNow;
-      })
-      : undefined;
-    if (foreign) {
-      results.push({
-        cmd,
-        ok: false,
-        code: 'BRIDGE_REF_STALE',
-        error: `${foreign} was taken on a page that is no longer loaded (the tab navigated since). `
-          + `Run 'ghax snapshot -i' and use a fresh ref.`,
-      });
-      if (stopOnError) break;
-      continue;
-    }
-    if (autoSnapshot && snapshotHandler && stepRefs.length > 0) {
-      let fresh = current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker;
-      if (fresh) {
-        for (const r of stepRefs) {
-          if (!(await refStillMatches(ctx, r))) { fresh = false; break; }
+    // One pin for the whole step: the freshness check, the auto-snapshot and
+    // the handler all talk to the browser that was active when it began.
+    const stop = await verbPeer.run({ peer: ctx.bridge?.boundInstanceId ?? null, inherit: true }, async (): Promise<boolean> => {
+      let autoSnap: 'skipped' | 'taken' | undefined;
+      const stepRefs = refsOf({ args: stepArgs, opts: stepOpts });
+      const current = stepRefs.length > 0 ? await readFreshnessMarker(ctx) : null;
+      // A ref minted on a document that is no longer loaded must fail, never
+      // be re-resolved: after `click @e3` navigates, the plan's `@e5` meant
+      // page A's element, and an auto-snapshot of page B must not answer it.
+      const docNow = docIdOfMarker(current);
+      const foreign = docNow
+        ? stepRefs.find((r) => {
+          const d = ctx.refRegistry.docOf(r.slice(1));
+          return d !== undefined && !d.startsWith('unknown:') && d !== docNow;
+        })
+        : undefined;
+      if (foreign) {
+        results.push({
+          cmd,
+          ok: false,
+          code: 'BRIDGE_REF_STALE',
+          error: `${foreign} was taken on a page that is no longer loaded (the tab navigated since). `
+            + `Run 'ghax snapshot -i' and use a fresh ref.`,
+        });
+        return stopOnError;
+      }
+      if (autoSnapshot && snapshotHandler && stepRefs.length > 0) {
+        let fresh = current !== null && ctx.lastSnapshotMarker !== null && current === ctx.lastSnapshotMarker;
+        if (fresh) {
+          for (const r of stepRefs) {
+            if (!(await refStillMatches(ctx, r))) { fresh = false; break; }
+          }
+        }
+        if (fresh) {
+          autoSnap = 'skipped';
+        } else {
+          autoSnap = 'taken';
+          try {
+            // Uncapped: the ref map is what matters here, and nobody reads the text.
+            await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
+          } catch {
+            // A snapshot failure is informational — the step itself will
+            // surface the concrete "ref not found" error if it's still bad.
+          }
         }
       }
-      if (fresh) {
-        autoSnap = 'skipped';
-      } else {
-        autoSnap = 'taken';
-        try {
-          // Uncapped: the ref map is what matters here, and nobody reads the text.
-          await snapshotHandler(ctx, [], { interactive: true, maxRefs: 0 });
-        } catch {
-          // A snapshot failure is informational — the step itself will
-          // surface the concrete "ref not found" error if it's still bad.
-        }
+      const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
+      try {
+        const data = await handler(ctx, stepArgs, stepOpts);
+        results.push({ cmd, ok: true, data, ...snapField });
+        return false;
+      } catch (err) {
+        results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ...snapField });
+        return stopOnError;
       }
-    }
-    const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
-    try {
-      const data = await handler(ctx, stepArgs, stepOpts);
-      results.push({ cmd, ok: true, data, ...snapField });
-    } catch (err) {
-      results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ...snapField });
-      if (stopOnError) break;
-    }
+    });
+    if (stop) break;
   }
   return results;
 });

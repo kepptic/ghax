@@ -1806,7 +1806,8 @@ async function main(): Promise<void> {
     alias(instanceId: string): Promise<string>;
   }
 
-  async function withDaemon(fn: (h: DaemonHarness) => Promise<void>): Promise<void> {
+  /** `bind: false` starts the daemon with no browser connected; the test connects them via edgeExt/chromeExt. */
+  async function withDaemon(fn: (h: DaemonHarness) => Promise<void>, { bind = true } = {}): Promise<void> {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'ghax-multi-'));
     const bridgePort = reserveBase();
     const child: ChildProcess = spawn(process.execPath, [path.join(root, 'dist/ghax-daemon.mjs')], {
@@ -1840,9 +1841,9 @@ async function main(): Promise<void> {
         });
         return (await res.json()) as any;
       };
-      const edge = await edgeExt.connect(bridgePort, 'inst-edge');
-      const chrome = await chromeExt.connect(bridgePort, 'inst-chrome');
-      await until(() => edge.role === 'bound' && chrome.role === 'bound', 'both browsers bound', 15000);
+      const edge = bind ? await edgeExt.connect(bridgePort, 'inst-edge') : (null as unknown as FakeConnection);
+      const chrome = bind ? await chromeExt.connect(bridgePort, 'inst-chrome') : (null as unknown as FakeConnection);
+      if (bind) await until(() => edge.role === 'bound' && chrome.role === 'bound', 'both browsers bound', 15000);
       const alias = async (id: string) => (await rpc('bridge.instances')).data.instances.find((i: any) => i.instanceId === id).alias;
       await fn({ rpc, bridgePort, edge, chrome, edgeExt, chromeExt, alias });
     } finally {
@@ -2034,6 +2035,70 @@ async function main(): Promise<void> {
       const tabs = await rpc('tabs');
       const act = tabs.data.filter((t: any) => t.active);
       assert(act.length === 1 && act[0].id === `${await alias('inst-edge')}:1`, `active rows: ${JSON.stringify(act)}`);
+    });
+  });
+
+  await test('daemon, all: a verb started with nothing bound pins to the first browser it sends to', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, edgeExt, chromeExt, bridgePort } = h;
+      // eval waits briefly for a page context before its first send: that is
+      // when both browsers bind, with nothing bound at verb start.
+      const pending = rpc('eval', ['1']);
+      const edge = await edgeExt.connect(bridgePort, 'inst-edge');
+      const chrome = await chromeExt.connect(bridgePort, 'inst-chrome');
+      const held: { conn: FakeConnection | null; release: (() => void) | null } = { conn: null, release: null };
+      for (const c of [edge, chrome]) {
+        c.onCdp = (method, _p, reply) => {
+          if (method === 'Runtime.evaluate' && held.release === null) {
+            held.conn = c;
+            held.release = () => reply({ exceptionDetails: { text: 'Cannot find context with specified id' } });
+            return true;
+          }
+          return false;
+        };
+      }
+      await until(() => held.release !== null, 'the first send to be held');
+      const first = held.conn!;
+      const second = first === edge ? chrome : edge;
+      assert((await rpc('bridge.use', [second.instanceId])).ok, 'switch active mid-verb');
+      assert(await activeInstance({ ...h, edge, chrome }) === second.instanceId, 'the other browser is now active');
+      held.release!();
+      const r = await pending;
+      assert(r.ok, `eval: ${JSON.stringify(r)}`);
+      assert(first.received.includes('Runtime.disable'), `the retry stays on the first browser: ${first.received}`);
+      assert(!second.received.includes('Runtime.disable') && !second.received.includes('Runtime.evaluate'),
+        `a later send of the verb reached the second browser: ${second.received}`);
+    }, { bind: false });
+  });
+
+  await test('daemon, all: batch freshness check and auto-snapshot go to the browser the step runs on', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, edge, chrome } = h;
+      const { chromeTab } = await driveEdgeTab1(h);
+      assert(await activeInstance(h) === 'inst-edge', 'edge active at batch start');
+      const edgeFrom = edge.received.length;
+      chrome.received.length = 0;
+      await rpc('batch', [[
+        { cmd: 'tab', args: [chromeTab.id] },
+        { cmd: 'click', args: ['@e1'] },
+      ]], { stopOnError: false });
+      assert(await activeInstance(h) === 'inst-chrome', 'the batch moved the active browser');
+      const edgeGot = edge.received.slice(edgeFrom);
+      assert(!edgeGot.includes('Runtime.evaluate'), `the step's freshness check hit the batch-start browser: ${edgeGot}`);
+      assert(chrome.received.includes('Runtime.evaluate'), `the freshness check went to the step's browser: ${chrome.received}`);
+    });
+  });
+
+  await test('daemon, all: tabs --browser on a non-active browser marks nothing active', async () => {
+    await withDaemon(async (h) => {
+      const { rpc, chrome } = h;
+      await driveEdgeTab1(h);
+      chrome.controlledTabId = 2;
+      const r = await rpc('tabs', [], { browser: 'inst-chrome' });
+      assert(r.ok && r.data.length > 0, `tabs --browser: ${JSON.stringify(r)}`);
+      assert(r.data.every((t: any) => !t.active), `a parked browser's own active flag leaked: ${JSON.stringify(r.data.filter((t: any) => t.active))}`);
+      const own = await rpc('tabs', [], { browser: 'inst-edge' });
+      assert(own.ok && own.data.filter((t: any) => t.active).length === 1, `the active browser keeps its flag: ${JSON.stringify(own)}`);
     });
   });
 
