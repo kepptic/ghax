@@ -9,7 +9,7 @@ use crate::args::{self, Parsed};
 use crate::dispatch::{EXIT_ASSERT, EXIT_CDP_ERROR, EXIT_NOT_ATTACHED, EXIT_OK, EXIT_USAGE};
 use crate::output;
 use crate::rpc;
-use crate::state;
+use crate::state::{self, Config};
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 use std::time::Instant;
@@ -183,7 +183,7 @@ impl Report {
 /// `ghax expect --url <re> | --title <re> | --text <s> [--selector <css>] |
 /// --visible <t> | --hidden <t> | --count <css> --n N | --value <t> --expected <s> |
 /// --eval <js>  [--timeout ms] [--report path]`. Exit 1 when the check fails.
-pub fn cmd_expect(rest: &[String]) -> Result<i32> {
+pub fn cmd_expect(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let mut report = match Report::from_flags(&parsed) {
         Ok(r) => r,
@@ -202,8 +202,7 @@ pub fn cmd_expect(rest: &[String]) -> Result<i32> {
         return Ok(EXIT_USAGE);
     }
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
