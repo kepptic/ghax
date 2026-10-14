@@ -40,16 +40,26 @@ Tab:
   new-window [url]                # new background window, same profile
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
-  eval <js>                       # auto-retries once past a nav-in-flight
+  eval <js> [--timeout <ms>] [--no-wait]
+                                  # auto-retries once past a nav-in-flight
                                   #   awaits Promises/async IIFEs automatically
+                                  #   --timeout: per-call deadline (bridge default 30 s)
+                                  #   --no-wait: run on a 0 ms timer, return at once
+                                  #     ({ok,dispatched}); errors go to `ghax console`
   try [<js>] [--css <rules>] [--selector <sel>] [--measure <expr>] [--shot <path>]
   text
   html [<selector>]
-  screenshot [<@ref|selector>] [--path <p>] [--full-page]
+  screenshot [<@ref|selector>] [--path <p>] [--full-page] [--path-only]
+                                  # --path-only prints just the file path
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
            [--max-refs <n>] [--max-chars <n>] [--no-cap]
+           [--grep <regex> [--context <N>]]
+                                  # print only matching lines, their ancestors, and
+                                  #   N lines after each; applied before the cap.
+                                  #   Refs still all resolve. Use --grep=<re> for
+                                  #   a pattern that starts with a dash.
                                   # prints at most 250 refs / 32 KB by default and
                                   #   ends with "… N more refs omitted"; every ref
                                   #   stays clickable. --max-refs 0 = --no-cap.
@@ -113,7 +123,8 @@ Extensions (MV3):
 Real user gestures:
   gesture click <x,y>
   gesture dblclick <x,y>
-  gesture scroll <up|down|left|right> [amount]
+  gesture scroll <up|down|left|right> [amount] [--on <@ref|selector>]
+                                  # --on aims the wheel at that element (scrolled into view)
   gesture key <key>
 
 Batch / recording:

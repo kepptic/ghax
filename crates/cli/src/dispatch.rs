@@ -12,6 +12,44 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
+/// A verb that needs an element got an empty target; same code the daemon
+/// uses for the same mistake.
+pub const EXIT_BAD_TARGET: i32 = 2;
+
+/// `Some(exit code)` after printing the empty-target message when the first
+/// positional is missing or blank. The usual cause is an unset shell
+/// variable (`ghax click "$REF"`), so the message says so.
+fn empty_target(verb: &str, parsed: &Parsed) -> Option<i32> {
+    match parsed.positional.first() {
+        Some(t) if !t.trim().is_empty() => None,
+        _ => {
+            eprintln!("ghax: {verb}: target is empty — pass an @ref or selector (unset shell variable?)");
+            Some(EXIT_BAD_TARGET)
+        }
+    }
+}
+
+/// `--no-wait` and `--path-only` are switches, but `args::parse` hands them
+/// the next bare token as a value (`eval --no-wait 'js'`). Give that token
+/// back to the positionals and make the flag a plain true.
+fn take_switch(parsed: &mut Parsed, name: &str) -> bool {
+    match parsed.flags.get(name).cloned() {
+        // `--no-wait=true` / `--no-wait=false` is the flag's own value, not a
+        // token to hand back.
+        Some(Value::String(v)) if v == "true" || v == "false" => {
+            let on = v == "true";
+            parsed.flags.insert(name.to_string(), Value::Bool(on));
+            on
+        }
+        Some(Value::String(swallowed)) => {
+            parsed.positional.insert(0, swallowed);
+            parsed.flags.insert(name.to_string(), Value::Bool(true));
+            true
+        }
+        Some(Value::Bool(true)) => true,
+        _ => false,
+    }
+}
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
     let cfg = state::resolve_config();
@@ -81,15 +119,32 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         }
 
         "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
-        | "type" | "html" | "screenshot" | "wait" | "viewport" | "responsive" | "diff"
+        | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
         | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }
 
         "eval" => {
-            let parsed = args::parse(rest);
+            let mut parsed = args::parse(rest);
+            take_switch(&mut parsed, "no-wait");
             simple(cfg, "eval", parsed)
+        }
+
+        "screenshot" => {
+            let mut parsed = args::parse(rest);
+            let path_only = take_switch(&mut parsed, "path-only");
+            parsed.flags.remove("path-only");
+            if !path_only || parsed.json() {
+                return simple(cfg, "screenshot", parsed);
+            }
+            let port = state::require_daemon(cfg)?;
+            let data = rpc::call(port, "screenshot", parsed.positional_value(), parsed.opts_without_json())?;
+            match data.get("path").and_then(|v| v.as_str()) {
+                Some(p) => println!("{p}"),
+                None => output::print(&data, false),
+            }
+            Ok(EXIT_OK)
         }
 
         "snapshot" => {
@@ -104,6 +159,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "fill" => {
             let parsed = args::parse(rest);
+            if let Some(code) = empty_target("fill", &parsed) {
+                return Ok(code);
+            }
             if parsed.positional.len() < 2 {
                 eprintln!("Usage: ghax fill <@ref|selector> <value>");
                 return Ok(EXIT_USAGE);
@@ -113,6 +171,9 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "upload" => {
             let parsed = args::parse(rest);
+            if let Some(code) = empty_target("upload", &parsed) {
+                return Ok(code);
+            }
             if parsed.positional.len() < 2 {
                 eprintln!("Usage: ghax upload <@ref|selector> <path>[,<path>…]");
                 return Ok(EXIT_USAGE);
@@ -122,11 +183,8 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
         "select" => {
             let parsed = args::parse(rest);
-            if parsed.positional.is_empty() {
-                eprintln!(
-                    "Usage: ghax select <@ref|selector> <value>\n   or: ghax select <@ref|selector> --index <n>\n   or: ghax select <@ref|selector> --by-value <val>"
-                );
-                return Ok(EXIT_USAGE);
+            if let Some(code) = empty_target("select", &parsed) {
+                return Ok(code);
             }
             simple(cfg, "select", parsed)
         }
@@ -328,5 +386,45 @@ fn dispatch_record(cfg: &Config, rest: &[String]) -> Result<i32> {
             eprintln!("Unknown record subcommand: {other}");
             Ok(EXIT_USAGE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(xs: &[&str]) -> Parsed {
+        args::parse(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn switch_gives_a_swallowed_token_back() {
+        let mut a = p(&["--no-wait", "window.x = 1"]);
+        assert!(take_switch(&mut a, "no-wait"));
+        assert_eq!(a.positional, vec!["window.x = 1".to_string()]);
+        assert_eq!(a.flags.get("no-wait"), Some(&Value::Bool(true)));
+        let mut b = p(&["window.x = 1", "--no-wait"]);
+        assert!(take_switch(&mut b, "no-wait"));
+        assert_eq!(b.positional.len(), 1);
+        let mut c = p(&["window.x = 1"]);
+        assert!(!take_switch(&mut c, "no-wait"));
+    }
+
+    #[test]
+    fn switch_reads_literal_true_false_as_the_value() {
+        let mut a = p(&["window.x=1", "--no-wait=true"]);
+        assert!(take_switch(&mut a, "no-wait"));
+        assert_eq!(a.positional, vec!["window.x=1".to_string()]);
+        let mut b = p(&["window.x=1", "--no-wait=false"]);
+        assert!(!take_switch(&mut b, "no-wait"));
+        assert_eq!(b.positional, vec!["window.x=1".to_string()]);
+        assert_eq!(b.flags.get("no-wait"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn empty_target_catches_missing_and_blank() {
+        assert_eq!(empty_target("click", &p(&[])), Some(EXIT_BAD_TARGET));
+        assert_eq!(empty_target("click", &p(&[""])), Some(EXIT_BAD_TARGET));
+        assert_eq!(empty_target("click", &p(&["@e3"])), None);
     }
 }

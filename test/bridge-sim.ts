@@ -24,6 +24,7 @@ import {
   Bridge,
   BridgeInterrupted,
   BridgeTypedError,
+  bridgeEvaluate,
   bridgeGuard,
   bridgeReleaseHandle,
   bridgeResolveHandle,
@@ -32,7 +33,7 @@ import {
   isStaleContextError,
 } from '../src/bridge';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
-import { applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS } from '../src/snapshot-budget';
+import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
@@ -584,6 +585,48 @@ async function main(): Promise<void> {
       const last = b.text.split('\n').at(-1) ?? '';
       assert(last === '… 50 more refs omitted (use --depth/--selector/--max-refs, or --no-cap)', `marker: ${last}`);
       assert(b.omittedRefs === 50 && b.omittedLines === 50, `omitted ${JSON.stringify(b)}`);
+    });
+  });
+
+  await test('grep: matches keep their ancestors and --context lines, and run before the cap', async () => {
+    const tree = [
+      '@e1 [navigation] "Main"',
+      '  @e2 [link] "Alpha"',
+      '  @e3 [link] "Beta"',
+      '@e4 [dialog] "Settings"',
+      '  @e5 [group] "Billing"',
+      '    @e6 [button] "Save"',
+      '    @e7 [button] "Cancel"',
+    ];
+    const hit = grepSnapshotLines(tree, /Save/);
+    assert(hit.join('|') === '@e4 [dialog] "Settings"|  @e5 [group] "Billing"|    @e6 [button] "Save"', `ancestors only: ${hit.join('|')}`);
+    const ctx = grepSnapshotLines(tree, /Alpha/, 1);
+    assert(ctx.join('|') === '@e1 [navigation] "Main"|  @e2 [link] "Alpha"|  @e3 [link] "Beta"', `context after: ${ctx.join('|')}`);
+    const two = grepSnapshotLines(tree, /Alpha|Cancel/);
+    assert(two.length === 5 && two[0].startsWith('@e1') && !two.some((l) => l.includes('Beta')), `two hits, no dupes: ${two.join('|')}`);
+    // The cap sees only the filtered lines, so 3 matches fit under --max-refs 3.
+    const many = Array.from({ length: 50 }, (_, i) => `@e${i + 1} [button] "b${i}"`);
+    const capped = applySnapshotBudget(applyGrep(many, { grep: 'b4[0-2]"' }), budgetFromOpts({ 'max-refs': '3' }));
+    assert(capped.shownRefs === 3 && capped.omittedRefs === 0, `filter before cap: ${JSON.stringify(capped)}`);
+    assert(applyGrep(many, { grep: 'nope' })[0].includes('no snapshot line matches'), 'a miss says so');
+    for (const bad of [{ grep: '(' }, { grep: true }, { grep: 'a', context: '-1' }]) {
+      let err: any;
+      try { applyGrep(many, bad); } catch (e) { err = e; }
+      assert(err && err.exitCode === 2, `bad input ${JSON.stringify(bad)} should throw with exitCode 2`);
+    }
+  });
+
+  await test('eval timeout: bridgeEvaluate honours timeoutMs instead of the 30 s default', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-a');
+      ext.swallow.add('Runtime.evaluate');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const started = Date.now();
+      let err: any;
+      try { await bridgeEvaluate(bridge, 'new Promise(() => {})', { timeoutMs: 400 }); } catch (e) { err = e; }
+      assert(err && /Runtime\.evaluate timed out after 400ms/.test(String(err.message)), `message: ${err?.message}`);
+      assert(Date.now() - started < 3000, 'gave up near 400 ms');
     });
   });
 

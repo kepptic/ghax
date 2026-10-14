@@ -115,10 +115,10 @@ ghax bridge control [--active | --tab-id N | --stop]   # (re)point mid-session
 ```
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
-snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box,
+snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box, gestures,
 tabs/tab/new-window, wait, console/network, batch. **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
-yet": cookies, storage, viewport/responsive, qa/perf/profile, gestures,
+yet": cookies, storage, viewport/responsive, qa/perf/profile,
 and the `ext` family (SW/panel/hot-reload).
 
 Bridge caveats:
@@ -216,6 +216,10 @@ ghax snapshot -i                         # interactive-only a11y tree with @e re
 ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
 ghax snapshot -i -s '#main'              # narrow when the output ends "… N more refs omitted"
 ghax snapshot -i --no-cap                # or lift the 250-ref / 32 KB default budget
+ghax snapshot -i --grep 'Save|Cancel' --context 2   # only matching lines + ancestors + 2 after (before the cap; refs still resolve)
+ghax screenshot --path-only              # prints just the file path
+ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
+ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console
 ghax click @e3                           # click by ref (refuses covered/disabled targets)
 ghax click @e3 --force                   # skip the actionability checks
 ghax fill @e5 "hello"                    # React-safe input fill
@@ -236,6 +240,7 @@ ghax ext hot-reload <ext-id> --verbose   # per-tab injection report
 ghax gesture click 100,200               # real Input.dispatchMouseEvent
 ghax gesture dblclick 100,200
 ghax gesture scroll down 400             # mouseWheel event at viewport center
+ghax gesture scroll down 400 --on @e7    # aim the wheel at an element (inner panel); works over the bridge too
 ghax gesture key Enter
 
 # Orchestrated QA pass
