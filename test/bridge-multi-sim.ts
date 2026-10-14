@@ -24,6 +24,7 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BRIDGE_PORT_RANGE } from '../src/bridge';
+import { PeerRegistry } from '../src/bridge-peers';
 import {
   bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
 } from '../src/tab-identity';
@@ -1284,6 +1285,30 @@ async function main(): Promise<void> {
     const s = sanitizeLabel('Wo\nrk\x00\u202e\u200b ' + 'x'.repeat(80));
     assert(!/[\n\x00\u202e\u200b]/.test(s) && s.length <= 40 && s.startsWith('Work x'), JSON.stringify(s));
     assert(sanitizeLabel('Zoë') === 'Zoë', 'letters survive');
+  });
+
+  await test('PeerRegistry.decide refuses two candidates (pure)', async () => {
+    const reg = new PeerRegistry(() => {});
+    const fakeWs = () => ({ readyState: WebSocket.OPEN, close() {} }) as unknown as WebSocket;
+    reg.upsertFromHello({ instanceId: 'aaaaaa-1', browser: 'edge', label: 'Work' }, fakeWs());
+    const one = reg.decide(null, 9223);
+    assert(one.selection.state === 'bound' && one.winners.length === 1, 'one candidate binds');
+    reg.upsertFromHello({ instanceId: 'bbbbbb-2', browser: 'chrome', label: 'Home' }, fakeWs());
+    const two = reg.decide(null, 9223);
+    assert(two.selection.state === 'ambiguous' && two.selection.code === 'BRIDGE_AMBIGUOUS', two.selection.state);
+    assert(two.winners.length === 0, 'two candidates: no winner, never [0]');
+    assert(reg.decide('edge', 9223).winners.length === 1, 'filter narrows to one');
+    assert(reg.decide('firefox', 9223).selection.code === 'BRIDGE_NO_CANDIDATE', 'no match refuses');
+  });
+
+  await test('PeerRegistry.match returns both on an ambiguous label (pure)', async () => {
+    const reg = new PeerRegistry(() => {});
+    const fakeWs = () => ({ readyState: WebSocket.OPEN, close() {} }) as unknown as WebSocket;
+    reg.upsertFromHello({ instanceId: 'aaaaaa-1', browser: 'edge', label: 'Work' }, fakeWs());
+    reg.upsertFromHello({ instanceId: 'bbbbbb-2', browser: 'chrome', label: 'Work' }, fakeWs());
+    assert(reg.match('work').length === 2, 'ambiguous label matches both');
+    assert(reg.match('bbbbbb').length === 1 && reg.match('bbbbbb')[0].instanceId === 'bbbbbb-2', 'id prefix is unique');
+    assert(reg.match('nope').length === 0, 'no match is empty');
   });
 
   console.log();

@@ -45,7 +45,8 @@ import * as crypto from 'crypto';
 import { CdpStats, type CdpStatsSnapshot } from './cdp-stats';
 import { actionability, type ActionabilityKind, type ActionabilityResult } from './actionability';
 import { RefRegistry, type RefAllocator } from './ref-registry';
-import { mintAliases, sanitizeLabel } from './tab-identity';
+import { PeerRegistry, type Peer, type PeerRole, type BridgeSelection, type BridgeInstance } from './bridge-peers';
+export type { Peer, PeerRole, BridgeSelectionState, BridgeCandidate, BridgeSelection, BridgeInstance } from './bridge-peers';
 
 export interface BridgeEvent {
   method: string;
@@ -190,67 +191,12 @@ const QUEUE_CAP = 32;
 const LIVELOCK_WINDOW_MS = 5 * 60_000;
 const LIVELOCK_THRESHOLD = 3;
 
-export type PeerRole = 'bound' | 'parked';
 /**
  * Lifecycle of the BOUND peer only. Parked-socket churn is registry
  * bookkeeping and never moves this. Identity answers *who may drive*; this
  * answers *what happens when the driver blinks*.
  */
 export type BridgeSessionState = 'UNBOUND' | 'BOUND' | 'DEGRADED' | 'EXPIRED';
-
-/**
- * Outcome of the first-bind selection (plan 11, phase 1).
- *   idle         — no hello yet
- *   settling     — first hello landed, waiting GHAX_BRIDGE_SETTLE_MS for others
- *   bound        — exactly one candidate matched and was bound (or `bridge use`)
- *   no-candidate — the window closed and no connected instance matched --browser
- *   ambiguous    — more than one matched; nothing binds until `bridge use`
- */
-export type BridgeSelectionState = 'idle' | 'settling' | 'bound' | 'no-candidate' | 'ambiguous';
-
-/** One instance as the selection saw it when the settle window closed. */
-export interface BridgeCandidate {
-  instanceId: string;
-  browser: string;
-  label: string;
-  /** The bridge port the instance reached — this daemon's. */
-  port: number;
-  connected: boolean;
-  /** Passed the --browser filter (always true when there is no filter). */
-  matches: boolean;
-}
-
-export interface BridgeSelection {
-  state: BridgeSelectionState;
-  code?: 'BRIDGE_NO_CANDIDATE' | 'BRIDGE_AMBIGUOUS';
-  message?: string;
-  /** The --browser filter in force when the window closed, or null. */
-  filter?: string | null;
-  /** Every instance seen when the window closed, matching or not. */
-  instances?: BridgeCandidate[];
-}
-
-/** A connected extension instance, as reported by `ghax bridge instances`. */
-export interface BridgeInstance {
-  instanceId: string;
-  browser: string;
-  label: string;
-  /** Popup "Profile name" (hello.profile, else hello.label). */
-  profile: string;
-  /** Tab-id prefix for this instance: `<alias>:<chromeTabId>`. */
-  alias: string;
-  /** Browser major version from the extension, '' if it did not say. */
-  brandVersion: string;
-  version: string;
-  gitSha: string;
-  buildDate: string;
-  role: PeerRole;
-  connected: boolean;
-  controlledTabId: number | null;
-  lastHelloAt: number;
-  helloCount: number;
-  replacedCount: number;
-}
 
 /**
  * Thrown to a caller whose command was in flight when the bound socket
@@ -296,28 +242,6 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   const bb = Buffer.from(b);
   if (ab.length !== bb.length) return false;
   return crypto.timingSafeEqual(ab, bb);
-}
-
-interface Peer {
-  instanceId: string;
-  browser: string;
-  label: string;
-  profile: string;
-  brandVersion: string;
-  version: string;
-  gitSha: string;
-  buildDate: string;
-  ws: WebSocket | null;
-  role: PeerRole;
-  lastHelloAt: number;
-  lastFrameAt: number;
-  helloCount: number;
-  replacedCount: number;
-  controlledTabId: number | null;
-  /** hello.sessionNonce: new per browser session; '' for older extensions. */
-  sessionNonce: string;
-  /** Alias handed out while live; kept so it never flips under a bound id. */
-  pinnedAlias: string | null;
 }
 
 interface QueuedCommand {
@@ -367,19 +291,11 @@ export class Bridge extends EventEmitter {
     number,
     { ws: WebSocket; resolve: (v: ControlAck) => void; reject: (e: Error) => void }
   >();
-  // ─── Instance registry (plan §2.4) ───────────────────────────
-  // Exactly one peer is `bound`; every other healthy peer is `parked` —
-  // socket held OPEN, pinging, discoverable, but holding no chrome.debugger
-  // attachment and receiving no CDP. Holding the socket IS the livelock cure:
-  // the rival's reconnect loop is satisfied instead of retriggered. If we ever
-  // closed a parked socket, background.js's reconnect loop would resume and
-  // the ping-pong would simply move.
-  private peers = new Map<string, Peer>();
-  private socketPeer = new WeakMap<WebSocket, Peer>();
+  // ─── Instance registry (plan §2.4) — see bridge-peers.ts ─────
+  private readonly registry = new PeerRegistry((m) => this.log(m));
   private boundId: string | null = null;
   private _state: BridgeSessionState = 'UNBOUND';
   private sessionToken: string | null = null;
-  private legacySeq = 0;
   /** Non-null → only instances matching (browser or label) may bind. */
   private bindFilter: string | null = null;
   private readonly settleMs: number;
@@ -524,7 +440,7 @@ export class Bridge extends EventEmitter {
   }
 
   private get boundPeer(): Peer | null {
-    return this.boundId ? this.peers.get(this.boundId) ?? null : null;
+    return this.boundId ? this.registry.get(this.boundId) ?? null : null;
   }
 
   /** Restrict binding to a browser brand or label. Applied on the next hello. */
@@ -537,52 +453,20 @@ export class Bridge extends EventEmitter {
     return this._selection;
   }
 
-  private matchesFilter(p: Peer): boolean {
-    return !this.bindFilter
-      || p.browser.toLowerCase() === this.bindFilter
-      || p.label.toLowerCase() === this.bindFilter;
-  }
-
   /**
    * Close the selection: bind exactly one matching connected instance, or
-   * record why not. Never takes [0] of several (target-verification rule):
-   * more than one candidate refuses and lists them. Returns the winner.
+   * record why not. Never takes [0] of several (target-verification rule).
+   * Returns the winner.
    */
   private decideSelection(): Peer | null {
     if (this.settleTimer) {
       clearTimeout(this.settleTimer);
       this.settleTimer = null;
     }
-    const seen = [...this.peers.values()];
-    const instances: BridgeCandidate[] = seen.map((p) => ({
-      instanceId: p.instanceId,
-      browser: p.browser,
-      label: p.label,
-      port: this.port,
-      connected: p.ws?.readyState === WebSocket.OPEN,
-      matches: this.matchesFilter(p),
-    }));
-    const candidates = seen.filter((p) => p.ws?.readyState === WebSocket.OPEN && this.matchesFilter(p));
-    const list = instances.map((i) => `${i.browser || '?'} · ${i.label || '-'} · ${i.instanceId} · :${i.port}`).join('; ');
-    if (candidates.length === 1) {
-      this._selection = { state: 'bound', filter: this.bindFilter, instances };
-      return candidates[0];
-    }
-    if (candidates.length === 0) {
-      const message = this.bindFilter
-        ? `BRIDGE_NO_CANDIDATE: no connected browser matches --browser ${this.bindFilter} (seen: ${list || 'none'})`
-        : `BRIDGE_NO_CANDIDATE: no connected browser (seen: ${list || 'none'})`;
-      this._selection = { state: 'no-candidate', code: 'BRIDGE_NO_CANDIDATE', message, filter: this.bindFilter, instances };
-      this.log(`bridge: ${message}`);
-      return null;
-    }
-    const why = this.bindFilter
-      ? `${candidates.length} browsers match --browser ${this.bindFilter}; give each a distinct label in the extension popup`
-      : `${candidates.length} browsers connected and no --browser to pick one`;
-    const message = `BRIDGE_AMBIGUOUS: ${why} (${list}). Nothing is bound until \`ghax bridge use <id|browser|label>\``;
-    this._selection = { state: 'ambiguous', code: 'BRIDGE_AMBIGUOUS', message, filter: this.bindFilter, instances };
-    this.log(`bridge: ${message}`);
-    return null;
+    const { selection, winners } = this.registry.decide(this.bindFilter, this.port);
+    this._selection = selection;
+    if (selection.message) this.log(`bridge: ${selection.message}`);
+    return winners.length === 1 ? winners[0] : null;
   }
 
   /** Settle window expired: bind the single candidate, if there is one. */
@@ -599,49 +483,12 @@ export class Bridge extends EventEmitter {
 
   /** Snapshot of every known instance — backs `ghax bridge instances`. */
   instances(): BridgeInstance[] {
-    return [...this.peers.values()].map((p) => ({
-      instanceId: p.instanceId,
-      browser: p.browser,
-      label: p.label,
-      profile: p.profile,
-      alias: this.aliasOf(p.instanceId),
-      brandVersion: p.brandVersion,
-      version: p.version,
-      gitSha: p.gitSha,
-      buildDate: p.buildDate,
-      role: p.role,
-      connected: p.ws?.readyState === WebSocket.OPEN,
-      controlledTabId: p.controlledTabId,
-      lastHelloAt: p.lastHelloAt,
-      helloCount: p.helloCount,
-      replacedCount: p.replacedCount,
-    }));
+    return this.registry.instances();
   }
 
-  /**
-   * Tab-id alias for an instance (see src/tab-identity.ts). Recomputed on
-   * every call against all known peers, so a second browser with the same
-   * profile name pushes both onto the `<name>-<short6>` form.
-   */
+  /** Tab-id alias for an instance (see PeerRegistry.aliasOf). */
   aliasOf(instanceId: string): string {
-    const self = this.peers.get(instanceId);
-    if (!self) return mintAliases([{ instanceId, browser: '', profile: '' }]).get(instanceId)!;
-    if (self.pinnedAlias) return self.pinnedAlias;
-    // Only live peers can clash: a gone one is not in the tab listings, and
-    // counting it would flip a live alias when it reconnects.
-    const pinned = new Map<string, string>();
-    const all = [self];
-    for (const p of this.peers.values()) {
-      if (p === self || p.ws === null) continue;
-      if (p.pinnedAlias) pinned.set(p.instanceId, p.pinnedAlias);
-      all.push(p);
-    }
-    const alias = mintAliases(
-      all.map((p) => ({ instanceId: p.instanceId, browser: p.browser, profile: p.profile })),
-      pinned,
-    ).get(instanceId)!;
-    if (self.ws !== null) self.pinnedAlias = alias;
-    return alias;
+    return this.registry.aliasOf(instanceId);
   }
 
   /** Identity of the bound instance, or null when nothing is bound. */
@@ -651,9 +498,7 @@ export class Bridge extends EventEmitter {
 
   /** browser / profile / alias of one instance, for tab listings. */
   identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string; nonce: string } | null {
-    const p = this.peers.get(instanceId);
-    if (!p) return null;
-    return { instanceId, browser: p.browser, profile: p.profile, alias: this.aliasOf(instanceId), nonce: p.sessionNonce };
+    return this.registry.identityOf(instanceId);
   }
 
   /** True once ownership has flapped enough to indicate a pre-identity rival. */
@@ -672,7 +517,7 @@ export class Bridge extends EventEmitter {
   }
 
   private handleClose(ws: WebSocket): void {
-    const peer = this.socketPeer.get(ws);
+    const peer = this.registry.forSocket(ws);
     if (!peer || peer.ws !== ws) return; // stale/superseded socket — no-op
     peer.ws = null;
     peer.pinnedAlias = null;
@@ -691,7 +536,7 @@ export class Bridge extends EventEmitter {
     this._state = 'DEGRADED';
     const expectedFromReload = Date.now() - this.lastReloadRequestedAt < 5_000;
     const logged = expectedFromReload ? 'reload requested' : reason;
-    this.log(`bridge: bound instance ${this.shortId(this.boundId)} lost (${logged}) — ${this.graceMs}ms grace`);
+    this.log(`bridge: bound instance ${this.registry.shortId(this.boundId)} lost (${logged}) — ${this.graceMs}ms grace`);
     // In-flight commands can't be silently retried here: only the operation
     // layer knows whether the verb was a read or a click. Hand them a typed
     // interruption and let runBridgeOperation decide.
@@ -708,7 +553,7 @@ export class Bridge extends EventEmitter {
     if (this._state !== 'DEGRADED') return;
     this._state = 'EXPIRED';
     this.graceTimer = null;
-    const who = this.describePeer(this.boundPeer);
+    const who = this.registry.describePeer(this.boundPeer);
     const err = new Error(
       `bridge: extension ${who} did not reconnect within ${this.graceMs}ms. Is the browser running? Check edge://extensions.`,
     );
@@ -725,22 +570,12 @@ export class Bridge extends EventEmitter {
     if (Date.now() - peer.lastFrameAt <= this.livenessMs) return;
     // Nothing — not even a ping — for LIVENESS_MS. The socket is half-open;
     // terminate so `close` fires deterministically instead of hanging.
-    this.log(`bridge: no frames from ${this.describePeer(peer)} for ${this.livenessMs}ms — terminating socket`);
+    this.log(`bridge: no frames from ${this.registry.describePeer(peer)} for ${this.livenessMs}ms — terminating socket`);
     try {
       peer.ws.terminate();
     } catch {
       // ignore
     }
-  }
-
-  private shortId(id: string | null): string {
-    return id ? id.slice(0, 6) : '?';
-  }
-
-  private describePeer(p: Peer | null): string {
-    if (!p) return 'unknown';
-    const label = p.label ? ` "${p.label}"` : '';
-    return `${p.browser || 'browser'}·${this.shortId(p.instanceId)}${label}`;
   }
 
   private rawSend(ws: WebSocket | null, obj: unknown): boolean {
@@ -758,7 +593,7 @@ export class Bridge extends EventEmitter {
     } catch {
       return;
     }
-    const peer = this.socketPeer.get(ws);
+    const peer = this.registry.forSocket(ws);
     if (peer) peer.lastFrameAt = Date.now();
 
     if (msg && msg.type === 'hello') {
@@ -892,73 +727,10 @@ export class Bridge extends EventEmitter {
       // throttled behind an attacker's noise.
       this.pairFailures = [];
     }
-    let instanceId = typeof msg.instanceId === 'string' && msg.instanceId ? msg.instanceId : '';
-    const legacy = !instanceId;
-    if (legacy) {
-      // Pre-v2 extension: no minted identity. Give it a synthetic one so the
-      // registry still works, and tell the operator to reload — until every
-      // profile is reloaded, legacy clients can still fight each other.
-      instanceId = `legacy-${++this.legacySeq}`;
-      this.log(
-        'bridge: hello without instanceId — reload the ghax bridge extension in edge://extensions (every profile)',
-      );
-    }
-    // Free text from the browser, shown in listings and refusals: cleaned and
-    // capped here, once, so nothing downstream has to remember to.
-    const browser = typeof msg.browser === 'string' ? sanitizeLabel(msg.browser) : '';
-    const label = typeof msg.label === 'string' ? sanitizeLabel(msg.label) : '';
-    // `profile` is the tab-identity name for the same popup field; extensions
-    // predating it send only `label`, which carries the same value.
-    const profile = typeof msg.profile === 'string' ? sanitizeLabel(msg.profile) : label;
-    const sessionNonce = typeof msg.sessionNonce === 'string' ? msg.sessionNonce.slice(0, 64) : '';
-    const brandVersion = typeof msg.brandVersion === 'string' ? msg.brandVersion : '';
-    const version = typeof msg.version === 'string' ? msg.version : '?';
-    // Optional — absent on any extension build predating the provenance
-    // change. 'unknown' is the same sentinel build-info.ts/build.rs use.
-    const gitSha = typeof msg.gitSha === 'string' && msg.gitSha ? msg.gitSha : 'unknown';
-    const buildDate = typeof msg.buildDate === 'string' && msg.buildDate ? msg.buildDate : 'unknown';
+    const { peer, restarted } = this.registry.upsertFromHello(msg, ws);
+    if (restarted) this.emit('peer-restart', peer.instanceId);
 
-    let peer = this.peers.get(instanceId);
-    if (!peer) {
-      peer = {
-        instanceId, browser, label, profile, brandVersion, version, gitSha, buildDate,
-        ws: null, role: 'parked',
-        lastHelloAt: 0, lastFrameAt: Date.now(),
-        helloCount: 0, replacedCount: 0, controlledTabId: null,
-        sessionNonce, pinnedAlias: null,
-      };
-      this.peers.set(instanceId, peer);
-    }
-    // A new browser session (or an extension that cannot say) behind a known
-    // instance: tab numbers from before are void, so anything holding a
-    // listing of it must drop it.
-    const restarted = peer.helloCount > 0 && (!sessionNonce || peer.sessionNonce !== sessionNonce);
-    peer.sessionNonce = sessionNonce;
-    if (profile && profile !== peer.profile) peer.pinnedAlias = null;
-    if (peer.ws && peer.ws !== ws) {
-      // Same instance, new socket — its old one is stale (respawn raced the
-      // close). Drop the old quietly; this is NOT a rival.
-      peer.replacedCount++;
-      const old = peer.ws;
-      this.socketPeer.delete(old);
-      try { old.close(); } catch { /* ignore */ }
-    }
-    peer.ws = ws;
-    peer.browser = browser || peer.browser;
-    peer.label = label || peer.label;
-    peer.profile = profile || peer.profile;
-    peer.brandVersion = brandVersion || peer.brandVersion;
-    peer.version = version;
-    peer.gitSha = gitSha;
-    peer.buildDate = buildDate;
-    peer.helloCount++;
-    if (restarted) this.emit('peer-restart', instanceId);
-    peer.lastHelloAt = Date.now();
-    peer.lastFrameAt = Date.now();
-    peer.controlledTabId = typeof msg.controlledTabId === 'number' ? msg.controlledTabId : null;
-    this.socketPeer.set(ws, peer);
-
-    const isResume = this.boundId === instanceId;
+    const isResume = this.boundId === peer.instanceId;
     const noBoundPeer = this.boundId === null;
     // A rival may take the session only once the incumbent is genuinely gone,
     // and the GRACE TIMER is what decides that: EXPIRED, or nothing bound yet.
@@ -968,7 +740,7 @@ export class Bridge extends EventEmitter {
     // reconnecting first took the session and demoted the returning incumbent
     // to parked, mid-drive. Takeover inside the window stays explicit: `use()`.
     const boundGone = !noBoundPeer && !isResume && this._state === 'EXPIRED';
-    const matches = this.matchesFilter(peer);
+    const matches = this.registry.matchesFilter(peer, this.bindFilter);
 
     let role: PeerRole;
     let reason: string;
@@ -981,7 +753,7 @@ export class Bridge extends EventEmitter {
       role = 'bound';
       // A takeover reads exactly like a first bind in the log otherwise, which
       // is how "the session moved" hid behind "an extension connected".
-      reason = `takeover — ${this.describePeer(this.boundPeer)} never came back`;
+      reason = `takeover — ${this.registry.describePeer(this.boundPeer)} never came back`;
     } else if (noBoundPeer && this._selection.state === 'ambiguous') {
       role = 'parked';
       reason = 'selection is ambiguous, waiting for `ghax bridge use`';
@@ -1003,11 +775,11 @@ export class Bridge extends EventEmitter {
     } else {
       role = 'parked';
       reason = matches
-        ? `${this.describePeer(this.boundPeer)} is bound`
+        ? `${this.registry.describePeer(this.boundPeer)} is bound`
         : `does not match --browser ${this.bindFilter}`;
     }
     this.log(
-      `bridge: hello ${this.describePeer(peer)} v${version} → ${role} (${reason})`,
+      `bridge: hello ${this.registry.describePeer(peer)} v${peer.version} → ${role} (${reason})`,
     );
 
     if (role === 'parked') {
@@ -1029,7 +801,7 @@ export class Bridge extends EventEmitter {
    */
   private bindPeer(peer: Peer, via: 'hello-ack' | 'role', reason: string): void {
     const instanceId = peer.instanceId;
-    if (via === 'role') this.log(`bridge: bound → ${this.describePeer(peer)} (${reason})`);
+    if (via === 'role') this.log(`bridge: bound → ${this.registry.describePeer(peer)} (${reason})`);
     const previousBound = this.boundId;
     const ownershipChanged = previousBound !== instanceId;
     peer.role = 'bound';
@@ -1226,14 +998,7 @@ export class Bridge extends EventEmitter {
    * disconnect, so neither side re-enters a reconnect loop.
    */
   async use(selector: string): Promise<BridgeInstance> {
-    const want = selector.trim().toLowerCase();
-    const matches = [...this.peers.values()].filter(
-      (p) => p.instanceId.toLowerCase().startsWith(want)
-        || p.browser.toLowerCase() === want
-        || p.label.toLowerCase() === want
-        // The tab-id prefix, so a refusal's `ghax bridge use <alias>` works.
-        || this.aliasOf(p.instanceId) === want,
-    );
+    const matches = this.registry.match(selector);
     if (matches.length === 0) {
       const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
       throw new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`);
@@ -1250,7 +1015,7 @@ export class Bridge extends EventEmitter {
     }
     const target = matches[0];
     if (target.ws?.readyState !== WebSocket.OPEN) {
-      throw new Error(`bridge: instance ${this.describePeer(target)} is not connected`);
+      throw new Error(`bridge: instance ${this.registry.describePeer(target)} is not connected`);
     }
     if (target.instanceId === this.boundId) return this.instances().find((i) => i.instanceId === target.instanceId)!;
 
@@ -1287,7 +1052,7 @@ export class Bridge extends EventEmitter {
     this.rawSend(target.ws, {
       type: 'role', role: 'bound', daemonId: this.daemonId, sessionToken: this.sessionToken,
     });
-    this.log(`bridge: bound → ${this.describePeer(target)}`);
+    this.log(`bridge: bound → ${this.registry.describePeer(target)}`);
     this.emit('controlled', target.controlledTabId);
     this.emit('instances');
     return this.instances().find((i) => i.instanceId === target.instanceId)!;
@@ -1348,19 +1113,13 @@ export class Bridge extends EventEmitter {
       return Promise.reject(new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`));
     }
     if (peer.ws?.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error(`bridge: instance ${this.describePeer(peer)} is not connected`));
+      return Promise.reject(new Error(`bridge: instance ${this.registry.describePeer(peer)} is not connected`));
     }
     return this.dispatchControl(peer.ws, target, timeoutMs);
   }
 
   private findPeer(selector: string): Peer | null {
-    const want = selector.trim().toLowerCase();
-    return [...this.peers.values()].find(
-      (p) => p.instanceId.toLowerCase().startsWith(want)
-        || p.browser.toLowerCase() === want
-        || p.label.toLowerCase() === want
-        || this.aliasOf(p.instanceId) === want,
-    ) ?? null;
+    return this.registry.match(selector)[0] ?? null;
   }
 
   private dispatchControl(ws: WebSocket, target: ControlTarget, timeoutMs: number): Promise<ControlAck> {
@@ -1408,7 +1167,7 @@ export class Bridge extends EventEmitter {
     if (this.graceTimer) clearTimeout(this.graceTimer);
     if (this.settleTimer) clearTimeout(this.settleTimer);
     if (this.livenessTimer) clearInterval(this.livenessTimer);
-    for (const peer of this.peers.values()) {
+    for (const peer of this.registry.all()) {
       try {
         peer.ws?.close();
       } catch {
