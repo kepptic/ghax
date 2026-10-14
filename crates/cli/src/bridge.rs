@@ -67,7 +67,19 @@ fn cmd_bridge_instances(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     }
     for inst in instances {
         let role = inst.get("role").and_then(|v| v.as_str()).unwrap_or("?");
-        let marker = if role == "bound" { "*" } else { " " };
+        // `active` (daemon >= multi-bind) marks the one browser verbs act on;
+        // older daemons only report role, where bound means active.
+        let is_active = inst
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(role == "bound");
+        let marker = if is_active {
+            "*"
+        } else if role == "bound" {
+            "+"
+        } else {
+            " "
+        };
         let browser = inst.get("browser").and_then(|v| v.as_str()).unwrap_or("browser");
         let id = inst.get("instanceId").and_then(|v| v.as_str()).unwrap_or("");
         let short: String = id.chars().take(6).collect();

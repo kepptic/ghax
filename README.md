@@ -212,6 +212,13 @@ ghax: BRIDGE_AMBIGUOUS: 2 browsers connected and no --browser picks one:
 
 Re-run with `--browser edge` (or a label), or keep the daemon and pick with `ghax bridge use <id|browser|label>`. Two profiles of the same brand need distinct labels in the extension popup.
 
+**Driving several browsers at once.** `ghax attach --extension --browser all` (or `GHAX_BRIDGE_BROWSER=all`) binds every connected browser instead of parking all but one. One bound browser is **active**: it is the one `snapshot`, `click`, `eval` and the rest act on, and `ghax bridge instances` marks it (`*` active, `+` bound, blank parked). Then:
+
+- `ghax tabs` lists every bound browser's tabs, numbered `#1..N` across all of them. A browser that fails or takes over 10 s to answer shows as a `note:` line instead of hanging the listing.
+- `ghax tab '#5'` (or a full id such as `chrome-home:42`) in another bound browser makes that browser active, then controls the tab. Refs are cleared, as on any tab switch. A tab in a browser that isn't bound is refused with a `ghax bridge use` hint.
+- `ghax console` and `ghax network` show the active tab only. `--tab '#n'|<id>` picks another tab, `--all` shows every tab of every bound browser.
+- `GHAX_BRIDGE_CONTROL=active` (`--control-active`) applies to the first browser that binds only.
+
 **Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:
 
 ```

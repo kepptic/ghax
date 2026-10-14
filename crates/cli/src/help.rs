@@ -47,9 +47,12 @@ Tab:
                                   #   e.g. edge-work:42 (profile = popup "Profile name")
                                   # bridge: --browser lists another connected
                                   #   browser's tabs without taking it over
+                                  # --browser all daemon: every bound browser,
+                                  #   numbered #1..N; a silent one is a `note:` row
   tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
                                   #   n alone only if exactly one tab has that
                                   #   chrome tab id. --quiet = don't bringToFront
+                                  #   a tab in another bound browser makes it active
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
   goto <url> [--stable]           # --stable also waits for the DOM to settle
@@ -96,11 +99,14 @@ Snapshot & interact:
   storage [local|session] [get|set|remove|clear|keys] [key] [value]
 
 Logs:
-  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps]
+  console [--errors] [--last N] [--since <epoch-ms>] [--dedup] [--source-maps] [--tab <#n|id>] [--all]
+         # bridge mode: the active tab only; --tab <#n|id> picks another tab,
+         #   --all lifts the filter (every tab of every bound browser)
          # --since filters to entries newer than the epoch-ms timestamp
          # --dedup groups repeats with count
          # --source-maps resolves bundled stack frames to original sources
-  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>]
+  network [--pattern <re>] [--status 4xx|500|400-499] [--last N] [--since <epoch-ms>] [--har <path>] [--tab <#n|id>] [--all]
+         # bridge mode: same tab scoping as console
   cookies [--domain <d>] [--url <u>] [--all] [--values] [--has <name>]
          # Default: cookies applicable to the active tab's URL only
          #   (Playwright's own domain/path/secure applicability match).

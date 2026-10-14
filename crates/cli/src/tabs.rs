@@ -42,7 +42,16 @@ pub fn cmd_tabs(cfg: &Config, parsed: &Parsed) -> Result<i32> {
 /// rows (e.g. `--fields id,url`).
 fn render(data: &Value) -> Option<Vec<String>> {
     let rows = data.as_array()?;
-    rows.iter().map(format_tab_line).collect()
+    rows.iter().map(format_row).collect()
+}
+
+/// A multi-bind listing appends `{"note": "..."}` rows for browsers that did
+/// not answer; everything else is a tab row.
+fn format_row(t: &Value) -> Option<String> {
+    if let Some(note) = t.get("note").and_then(Value::as_str) {
+        return Some(format!("note: {note}"));
+    }
+    format_tab_line(t)
 }
 
 fn format_tab_line(t: &Value) -> Option<String> {
@@ -105,6 +114,16 @@ mod tests {
             format_tab_line(&cdp).unwrap(),
             "#2  ABCD  \"t\"  Chrome · —"
         );
+    }
+
+    #[test]
+    fn note_rows_render_inline() {
+        let rows = json!([
+            {"index": 1, "id": "a:1", "title": "t", "browser": "Edge", "profile": "—"},
+            {"note": "chrome-x: tabs unavailable"}
+        ]);
+        let lines = render(&rows).unwrap();
+        assert_eq!(lines[1], "note: chrome-x: tabs unavailable");
     }
 
     #[test]

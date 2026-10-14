@@ -71,6 +71,7 @@ import {
   bridgeRefStillMatches,
   isStaleContextError,
   type BridgeEvent,
+  type ControlAck,
   type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
@@ -78,12 +79,13 @@ import {
 } from './bridge';
 import * as fs from 'fs';
 import * as http from 'http';
+import type { BridgeInstance } from './bridge-peers';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import {
-  bridgeRowsToIdentities, composeTabId, describeTab, displayBrand, resolveTabSelector, NO_PROFILE,
+  aliasOfId, bridgeRowsToIdentities, composeTabId, describeTab, displayBrand, resolveTabSelector, NO_PROFILE,
   type TabIdentity,
 } from './tab-identity';
 
@@ -842,6 +844,82 @@ async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null):
   return bridgeRowsToIdentities(ack.result as unknown[], who);
 }
 
+/** Per-peer wait for `list-tabs` under multi-bind: a hung browser costs this, no more. */
+const LIST_TABS_TIMEOUT_MS = 10_000;
+
+/**
+ * Every bound browser's tabs, numbered #1..N across all of them. One bound
+ * peer is the plain single-browser listing (its failure throws, as before).
+ * Several: `list-tabs` goes to each in parallel and a peer that fails or
+ * hangs becomes a note, never a hang or a silent gap.
+ */
+async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Promise<{ rows: TabIdentity[]; notes: string[] }> {
+  const bridge = requireBridge(ctx);
+  const ids = bridge.boundIds;
+  if (ids.length <= 1) return { rows: await listBridgeTabs(ctx), notes: [] };
+  const settled = await Promise.allSettled(ids.map(async (id) => {
+    const ack = await bridge.sendControl({ action: 'list-tabs' }, timeoutMs, { peer: id });
+    if (!Array.isArray(ack.result)) throw new Error('extension returned an invalid tab list');
+    return bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id));
+  }));
+  const rows: TabIdentity[] = [];
+  const notes: string[] = [];
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') rows.push(...r.value);
+    else {
+      const who = bridgeIdentity(ctx, ids[i]);
+      notes.push(`${who.alias} (${who.browser} · ${who.profile}): tabs unavailable — ${(r.reason as { message?: string } | null)?.message ?? String(r.reason)}`);
+    }
+  });
+  return { rows: rows.map((t, i) => ({ ...t, index: i + 1 })), notes };
+}
+
+/** Make `selector` the active bound browser: refs die, in-flight requests reset. */
+async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInstance> {
+  const bridge = requireBridge(ctx);
+  const instance = await bridge.use(selector);
+  clearSnapshotRefs(ctx);
+  activePeerState(ctx, bridge).networkRequests.clear();
+  // A different browser means a different alias, so the active id changes
+  // even when the chrome tab number happens to match.
+  const controlled = bridge.controlledTabId;
+  ctx.activePageId = controlled === null ? null : bridgeTabId(ctx, controlled);
+  return instance;
+}
+
+/**
+ * Drive a resolved tab. A tab in a bound but non-active browser makes that
+ * browser the active one first; one in a browser that is not bound at all is
+ * refused (resolveTabSelector already did, since only bound tabs are listed).
+ */
+async function controlResolvedTab(ctx: Ctx, tab: TabIdentity, extra: { quiet?: boolean } = {}): Promise<ControlAck> {
+  const bridge = requireBridge(ctx);
+  const alias = aliasOfId(tab.id);
+  if (alias !== null) {
+    const owners = bridge.boundIds.filter((id) => bridge.identityOf(id)?.alias === alias);
+    if (owners.length !== 1) {
+      throw new Error(`${describeTab(tab)}: browser ${alias} is not bound to this daemon. Run 'ghax bridge use ${alias}' first.`);
+    }
+    if (owners[0] !== bridge.boundInstanceId) await switchActivePeer(ctx, owners[0]);
+  }
+  try {
+    return await bridge.sendControl({ action: 'control-tab', tabId: tab.chromeTabId!, ...extra });
+  } catch (err) {
+    throw withTabIdentity(err, tab);
+  }
+}
+
+/** resolveTabSelector over every bound browser; notes explain a missing one. */
+async function resolveBridgeTab(ctx: Ctx, selector: string): Promise<TabIdentity> {
+  const { rows, notes } = await listBridgeTabsAll(ctx);
+  try {
+    return resolveTabSelector(selector, rows, ctx.lastTabListing);
+  } catch (err) {
+    if (notes.length && err instanceof Error) err.message += `\n${notes.map((n) => `note: ${n}`).join('\n')}`;
+    throw err;
+  }
+}
+
 /** Display brand, profile and tab-id alias of a bridge instance. */
 function bridgeIdentity(ctx: Ctx, instanceId: string | null | undefined): { alias: string; browser: string; profile: string; nonce?: string } {
   const ident = instanceId ? requireBridge(ctx).identityOf(instanceId) : null;
@@ -1096,17 +1174,24 @@ register('tabs', async (ctx, _args, opts) => {
   // profile, windowId). `controlledBy` (bridge only) says which agent owns
   // a tab: `active` only ever means "mine". `index` is the row number in the
   // UNFILTERED list, and that list is what a later `tab #n` resolves against.
-  const all: TabIdentity[] = ctx.bridgeMode ? await listBridgeTabs(ctx, browserSel) : await listCdpTabs(ctx);
+  let notes: string[] = [];
+  let all: TabIdentity[];
+  if (ctx.bridgeMode && browserSel === null) {
+    ({ rows: all, notes } = await listBridgeTabsAll(ctx));
+  } else {
+    all = ctx.bridgeMode ? await listBridgeTabs(ctx, browserSel) : await listCdpTabs(ctx);
+  }
   ctx.lastTabListing = all;
+  const noteRows = notes.map((note) => ({ note }));
   const matched = filterRe
     ? all.filter((t) => filterRe!.test(t.url) || filterRe!.test(t.title))
     : all;
-  if (!fields) return matched;
-  return matched.map((t) => {
+  if (!fields) return [...matched, ...noteRows];
+  return [...matched.map((t) => {
     const out: Record<string, unknown> = {};
     for (const k of fields) if (k in t) out[k] = (t as any)[k];
     return out;
-  });
+  }), ...noteRows];
 });
 
 register('tab', async (ctx, args, opts) => {
@@ -1115,13 +1200,8 @@ register('tab', async (ctx, args, opts) => {
   if (ctx.bridgeMode) {
     // `#n`, the full `<alias>:<n>` id, or a bare chrome tab id that matches
     // exactly one tab. Anything else is refused with every candidate listed.
-    const tab = resolveTabSelector(id, await listBridgeTabs(ctx), ctx.lastTabListing);
-    const bridge = requireBridge(ctx);
-    try {
-      await bridge.sendControl({ action: 'control-tab', tabId: tab.chromeTabId!, quiet: Boolean(opts.quiet) });
-    } catch (err) {
-      throw withTabIdentity(err, tab);
-    }
+    const tab = await resolveBridgeTab(ctx, id);
+    await controlResolvedTab(ctx, tab, { quiet: Boolean(opts.quiet) });
     // The `controlled` push already cleared refs; this covers an extension
     // that acked without one.
     setActiveTab(ctx, tab.id);
@@ -1175,7 +1255,7 @@ register('find', async (ctx, args) => {
   const pattern = String(args[0] ?? '');
   if (!pattern) throw new Error('Usage: find <url-substring>');
   if (ctx.bridgeMode) {
-    return (await listBridgeTabs(ctx))
+    return (await listBridgeTabsAll(ctx)).rows
       .filter((tab) => tab.url.includes(pattern))
       .map((tab) => ({ id: tab.id, url: tab.url, title: tab.title }));
   }
@@ -1591,13 +1671,8 @@ register('bridge.control', async (ctx, _args, opts) => {
       throw new Error('bridge.control tab mode requires --tab-id <#n | id | chrome-tab-id>');
     }
     // Same resolution as `ghax tab`: #n, full id, or an unambiguous number.
-    const tab = resolveTabSelector(String(raw), await listBridgeTabs(ctx), ctx.lastTabListing);
-    let ack;
-    try {
-      ack = await ctx.bridge.sendControl({ action: 'control-tab', tabId: tab.chromeTabId! });
-    } catch (err) {
-      throw withTabIdentity(err, tab);
-    }
+    const tab = await resolveBridgeTab(ctx, String(raw));
+    const ack = await controlResolvedTab(ctx, tab);
     setActiveTab(ctx, tab.id);
     return { ok: ack.ok, tabId: tab.id, chromeTabId: tab.chromeTabId, browser: tab.browser, profile: tab.profile, title: tab.title };
   } else {
@@ -1691,7 +1766,8 @@ register('bridge.instances', async (ctx) => {
     state: ctx.bridge.state,
     boundInstanceId: ctx.bridge.boundInstanceId,
     livelockSuspected: ctx.bridge.livelockSuspected,
-    instances: ctx.bridge.instances(),
+    // Exactly one instance is the one verbs act on; under `all` several are bound.
+    instances: ctx.bridge.instances().map((i) => ({ ...i, active: i.instanceId === ctx.bridge!.boundInstanceId })),
   };
 });
 
@@ -1719,13 +1795,7 @@ register('bridge.use', async (ctx, args, opts) => {
   }
   const selector = String(args[0] ?? opts.instance ?? opts.browser ?? '');
   if (!selector) throw new Error('Usage: ghax bridge use <instance-id|browser|label>');
-  const instance = await ctx.bridge.use(selector);
-  clearSnapshotRefs(ctx);
-  activePeerState(ctx, ctx.bridge).networkRequests.clear();
-  // A different browser means a different alias, so the active id changes
-  // even when the chrome tab number happens to match.
-  const controlled = ctx.bridge.controlledTabId;
-  ctx.activePageId = controlled === null ? null : bridgeTabId(ctx, controlled);
+  const instance = await switchActivePeer(ctx, selector);
   return instance;
 });
 
@@ -2717,13 +2787,29 @@ async function pressBridgeKey(bridge: Bridge, spec: string): Promise<void> {
   await bridge.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
 }
 
+/**
+ * Bridge-mode console/network scope: the active tab by default (buffers hold
+ * every bound browser's entries), `--tab <#n|id>` another one, `--all` all of
+ * them. Returns the composite tab id to keep, or null for no filter. CDP mode
+ * has one buffer for one browser and is never filtered.
+ */
+async function bridgeLogTabFilter(ctx: Ctx, opts: Record<string, unknown>): Promise<string | null | undefined> {
+  if (!ctx.bridgeMode || opts.all) return undefined;
+  const raw = opts.tab;
+  if (raw !== undefined && raw !== true && String(raw).trim() !== '') return (await resolveBridgeTab(ctx, String(raw))).id;
+  if (raw === true) throw new Error('console/network --tab requires a value: <#n | id | chrome-tab-id>');
+  return ctx.activePageId;
+}
+
 register('console', async (ctx, _args, opts) => {
   const errorsOnly = Boolean(opts.errors);
   const dedup = Boolean(opts.dedup);
   const sourceMaps = Boolean(opts['source-maps']);
   const n = opts.last ? Number(opts.last) : 200;
   const since = parseSinceOpt(opts.since);
+  const tabFilter = await bridgeLogTabFilter(ctx, opts);
   let entries = ctx.consoleBuf.last(n);
+  if (tabFilter !== undefined) entries = entries.filter((e) => e.tabId === tabFilter);
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (errorsOnly) entries = entries.filter((e) => e.level === 'error');
 
@@ -2807,7 +2893,9 @@ register('network', async (ctx, _args, opts) => {
   }
 
   const since = parseSinceOpt(opts.since);
+  const tabFilter = await bridgeLogTabFilter(ctx, opts);
   let entries = ctx.networkBuf.last(n);
+  if (tabFilter !== undefined) entries = entries.filter((e) => e.tabId === tabFilter);
   if (since > 0) entries = entries.filter((e) => e.timestamp >= since);
   if (pattern) entries = entries.filter((e) => pattern.test(e.url));
   if (statusTest) entries = entries.filter((e) => statusTest!(e.status));
@@ -4330,17 +4418,23 @@ async function main() {
     // drives the browser's active tab immediately on connect — no popup
     // click. Stored (not sent) here; the Bridge's `hello` handler sends it
     // once the extension is live, and re-asserts it on every reconnect.
+    const bindFilter = process.env.GHAX_BRIDGE_BROWSER;
+    const bindsAll = Boolean(bindFilter && bindFilter.trim().toLowerCase() === 'all');
     if (process.env.GHAX_BRIDGE_CONTROL === 'active') {
       started.setDesiredControl({ action: 'control-active' });
-      log('bridge: will control the active tab on connect (--control-active)');
+      log(bindsAll
+        ? 'bridge: will control the active tab on connect (--control-active) — first bound browser only'
+        : 'bridge: will control the active tab on connect (--control-active)');
     }
     // `ghax attach --extension --browser edge|chrome|<label>` restricts which
     // instance may bind, so a second browser (or a forgotten install in
-    // another profile) parks instead of racing for the session.
-    const bindFilter = process.env.GHAX_BRIDGE_BROWSER;
+    // another profile) parks instead of racing for the session. `all` binds
+    // every browser instead.
     if (bindFilter && bindFilter.trim()) {
       started.setBindFilter(bindFilter);
-      log(`bridge: only '${bindFilter}' may bind — other instances will park`);
+      log(bindsAll
+        ? 'bridge: binding every browser that connects (--browser all)'
+        : `bridge: only '${bindFilter}' may bind — other instances will park`);
     }
   } else {
     // noDefaults: attach to the user's browser without Playwright's default
@@ -4491,7 +4585,7 @@ async function main() {
         // The port actually bound, which may not be the one requested when
         // another agent's daemon already holds it.
         bridgePort: ctx.bridge?.port ?? null,
-        connected: ctx.bridge?.connected ?? false,
+        connected: ctx.bridge?.anyConnected ?? false,
         // Raw chrome tab id (number); `activeTabId` is the `<alias>:<n>` form.
         controlledTabId: ctx.bridge?.controlledTabId ?? null,
         activeTabId: ctx.activePageId,

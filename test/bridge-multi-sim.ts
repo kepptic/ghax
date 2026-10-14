@@ -20,7 +20,9 @@
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
-import { readFileSync } from 'fs';
+import { readFileSync, mkdtempSync, rmSync } from 'fs';
+import { spawn, type ChildProcess } from 'child_process';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BridgeInterrupted, BRIDGE_PORT_RANGE } from '../src/bridge';
@@ -1783,6 +1785,130 @@ async function main(): Promise<void> {
       await until(() => b.role === 'bound', 'B to rejoin');
       assert(!bridge.livelockSuspected, 'three expiry-returns under all tripped the livelock warning');
       assert(!logs.some((l) => /flapping/.test(l)), `flapping logged: ${logs.filter((l) => /flapping/.test(l))}`);
+    });
+  });
+
+  // ─── Multi-bind surface (plan 12, brief C): a REAL daemon, two fake browsers ───
+
+  interface DaemonHarness {
+    rpc(cmd: string, args?: unknown[], opts?: Record<string, unknown>): Promise<{ ok: boolean; data?: any; error?: string }>;
+    bridgePort: number;
+    edge: FakeConnection;
+    chrome: FakeConnection;
+    edgeExt: FakeExtension;
+    chromeExt: FakeExtension;
+    alias(instanceId: string): Promise<string>;
+  }
+
+  async function withDaemon(fn: (h: DaemonHarness) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ghax-multi-'));
+    const bridgePort = reserveBase();
+    const child: ChildProcess = spawn(process.execPath, [path.join(root, 'dist/ghax-daemon.mjs')], {
+      env: {
+        ...process.env,
+        HOME: dir,
+        GHAX_STATE_FILE: path.join(dir, 'ghax.json'),
+        GHAX_BRIDGE: '1',
+        GHAX_BRIDGE_PORT: String(bridgePort),
+        GHAX_BRIDGE_PORT_EXPLICIT: '1',
+        GHAX_BRIDGE_BROWSER: 'all',
+        GHAX_BRIDGE_SETTLE_MS: '50',
+        GHAX_BROWSER_KIND: 'chrome',
+      },
+      stdio: 'ignore',
+    });
+    const edgeExt = new FakeExtension();
+    const chromeExt = new FakeExtension();
+    chromeExt.browser = 'chrome';
+    edgeExt.profile = 'Work';
+    chromeExt.profile = 'Home';
+    try {
+      let httpPort = 0;
+      await until(() => {
+        try { httpPort = JSON.parse(readFileSync(path.join(dir, 'ghax.json'), 'utf8')).port; } catch { /* not yet */ }
+        return httpPort > 0;
+      }, 'daemon state file', 15000);
+      const rpc: DaemonHarness['rpc'] = async (cmd, args = [], opts = {}) => {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/rpc`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cmd, args, opts }),
+        });
+        return (await res.json()) as any;
+      };
+      const edge = await edgeExt.connect(bridgePort, 'inst-edge');
+      const chrome = await chromeExt.connect(bridgePort, 'inst-chrome');
+      await until(() => edge.role === 'bound' && chrome.role === 'bound', 'both browsers bound', 15000);
+      const alias = async (id: string) => (await rpc('bridge.instances')).data.instances.find((i: any) => i.instanceId === id).alias;
+      await fn({ rpc, bridgePort, edge, chrome, edgeExt, chromeExt, alias });
+    } finally {
+      edgeExt.closeAll();
+      chromeExt.closeAll();
+      child.kill('SIGTERM');
+      await sleep(100);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  await test('daemon, all: tabs numbers 1..N across both browsers; tab on the other browser switches active; instances marks one', async () => {
+    await withDaemon(async ({ rpc, alias }) => {
+      const ea = await alias('inst-edge');
+      const ca = await alias('inst-chrome');
+      const tabs = await rpc('tabs');
+      assert(tabs.ok && tabs.data.length === 6, `tabs: ${JSON.stringify(tabs)}`);
+      assert(tabs.data.map((t: any) => t.index).join() === '1,2,3,4,5,6', `indexes: ${tabs.data.map((t: any) => t.index)}`);
+      assert(tabs.data.filter((t: any) => t.id.startsWith(`${ea}:`)).length === 3 && tabs.data.filter((t: any) => t.id.startsWith(`${ca}:`)).length === 3, 'three tabs from each browser');
+      const before = (await rpc('bridge.instances')).data.instances;
+      assert(before.filter((i: any) => i.active).length === 1, `one active before: ${JSON.stringify(before.map((i: any) => i.active))}`);
+      const activeBefore = before.find((i: any) => i.active).instanceId;
+      const other = tabs.data.find((t: any) => !before.find((i: any) => i.active && i.alias === t.id.split(':')[0]));
+      const sw = await rpc('tab', [`#${other.index}`]);
+      assert(sw.ok && sw.data.id === other.id, `tab: ${JSON.stringify(sw)}`);
+      const after = (await rpc('bridge.instances')).data.instances;
+      const act = after.filter((i: any) => i.active);
+      assert(act.length === 1 && act[0].instanceId !== activeBefore && act[0].alias === other.id.split(':')[0], `active after: ${JSON.stringify(act)}`);
+      // A full id in a browser that is not bound is refused with the hint.
+      const bad = await rpc('tab', ['ghost-browser:7']);
+      assert(!bad.ok, 'unbound browser refused');
+    });
+  });
+
+  await test('daemon, all: a hung browser shows a note within the timeout, the other browser\'s tabs still list', async () => {
+    await withDaemon(async ({ rpc, chrome, alias }) => {
+      const ca = await alias('inst-chrome');
+      chrome.swallowControl = true;
+      const t0 = Date.now();
+      const tabs = await rpc('tabs');
+      const took = Date.now() - t0;
+      assert(tabs.ok, JSON.stringify(tabs));
+      const rows = tabs.data.filter((t: any) => t.id);
+      const notes = tabs.data.filter((t: any) => t.note);
+      assert(rows.length === 3 && rows.map((t: any) => t.index).join() === '1,2,3', `rows: ${JSON.stringify(rows)}`);
+      assert(notes.length === 1 && notes[0].note.includes(ca), `notes: ${JSON.stringify(notes)}`);
+      assert(took < 14000, `listing took ${took}ms`);
+    });
+  });
+
+  await test('daemon, all: console defaults to the active tab, --tab picks one, --all lifts the filter', async () => {
+    await withDaemon(async ({ rpc, edge, chrome }) => {
+      const tabs = (await rpc('tabs')).data;
+      const first = tabs[0];
+      const chromeTab = tabs.find((t: any) => t.index === 4);
+      assert((await rpc('tab', [`#${first.index}`])).ok, 'control first');
+      assert((await rpc('tab', [`#${chromeTab.index}`])).ok, 'control chrome tab');
+      assert((await rpc('tab', [`#${first.index}`])).ok, 'back to first');
+      edge.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ value: 'from-edge' }] } });
+      chrome.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ value: 'from-chrome' }] } });
+      await sleep(200);
+      const text = (r: any) => r.data.map((e: any) => e.text).sort().join();
+      const def = await rpc('console');
+      assert(def.ok && text(def) === 'from-edge', `default: ${JSON.stringify(def)}`);
+      const one = await rpc('console', [], { tab: chromeTab.id });
+      assert(one.ok && text(one) === 'from-chrome', `--tab id: ${JSON.stringify(one)}`);
+      const byIndex = await rpc('console', [], { tab: `#${chromeTab.index}` });
+      assert(byIndex.ok && text(byIndex) === 'from-chrome', `--tab #n: ${JSON.stringify(byIndex)}`);
+      const all = await rpc('console', [], { all: true });
+      assert(all.ok && text(all) === 'from-chrome,from-edge', `--all: ${JSON.stringify(all)}`);
+      const net = await rpc('network');
+      assert(net.ok && Array.isArray(net.data), `network: ${JSON.stringify(net)}`);
     });
   });
 

@@ -464,6 +464,14 @@ export class Bridge extends EventEmitter {
     return s?.state === 'BOUND' && this.peerOf(s)?.ws?.readyState === WebSocket.OPEN;
   }
 
+  /** True when ANY bound extension is connected and handshaken (multi-bind: not just the active one). */
+  get anyConnected(): boolean {
+    for (const s of this.bound.values()) {
+      if (s.state === 'BOUND' && this.peerOf(s)?.ws?.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
+  }
+
   get state(): BridgeSessionState {
     return this.activeSession?.state ?? 'UNBOUND';
   }

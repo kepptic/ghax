@@ -998,6 +998,24 @@ c('network --last returns entries', async () => {
   }
 });
 
+c('console/network output is unfiltered in CDP mode (tab scoping is bridge-only)', async () => {
+  // Multi-bind scopes bridge-mode logs to the active tab. CDP mode has one
+  // buffer for one browser: default, --all and a stray --tab must all agree.
+  const tag = `ghax-smoke-scope-${Date.now().toString(36)}`;
+  await run(['eval', `console.log(${JSON.stringify(tag)})`]);
+  await run(['wait', '200']);
+  const texts = async (extra: string[]) => {
+    const r = await run(['console', '--last', '500', '--json', ...extra]);
+    return parseJson<Array<{ text: string }>>(r.stdout).map((e) => e.text);
+  };
+  const plain = await texts([]);
+  assert(plain.includes(tag), 'default console output should include the marker');
+  assert(JSON.stringify(await texts(['--all'])) === JSON.stringify(plain), '--all must not change CDP console output');
+  assert(JSON.stringify(await texts(['--tab', '#1'])) === JSON.stringify(plain), '--tab must not filter CDP console output');
+  const net = async (extra: string[]) => parseJson<unknown[]>((await run(['network', '--last', '500', '--json', ...extra])).stdout).length;
+  assert((await net(['--all'])) === (await net([])), '--all must not change CDP network output');
+});
+
 c('cookies --json returns an array', async () => {
   const r = await run(['cookies', '--json']);
   const cookies = parseJson<unknown[]>(r.stdout);

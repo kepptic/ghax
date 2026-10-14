@@ -36,6 +36,19 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with a reload hint. Under `all`, browsers joining or returning after expiry
   no longer trip the "ownership is flapping" warning.
 
+- **Multi-browser surface for `--browser all`.** `ghax tabs` lists every bound
+  browser's tabs numbered `#1..N` across all of them; a browser that errors or
+  does not answer within 10 s becomes a `note:` row instead of hanging the
+  listing. `ghax tab <x>` in another bound browser makes it the active browser
+  (refs cleared) before controlling the tab; a tab in an unbound browser is
+  refused with a `bridge use` hint. In bridge mode `console` and `network`
+  show the active tab by default, `--tab <#n|id>` picks another, `--all` lifts
+  the filter (CDP mode is unchanged). `bridge instances` reports `active` and
+  marks the active browser, `/bridge-status.connected` is true when any bound
+  browser is connected, and the daemon log no longer says "only 'all' may
+  bind". `GHAX_BRIDGE_CONTROL=active` under `all` applies to the first bound
+  browser only (now logged).
+
 ### Fixed
 - **`tabs --browser <x>` no longer picks the first of several matches.** A
   selector naming two browsers (two Edge profiles without labels, say) is
