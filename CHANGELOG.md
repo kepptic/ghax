@@ -6,7 +6,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+- **`install-release.sh` works when piped.** Under `curl ... | bash`, `$0` is
+  `bash`, so the script looked for `bootstrap-daemon-runtime.sh` in the caller's
+  cwd and aborted. It now downloads the helper from the release tag when it is
+  not next to the script, and fails with a clear message if that download fails.
+- **`install-release.sh` no longer leaves a stale `ghax` active.** The install
+  dir was fixed at `~/.cargo/bin`, so a real `ghax` earlier on PATH (for example
+  `~/.local/bin/ghax`) kept running the old version. It now installs over a
+  regular-file `ghax` in a writable PATH dir, accepts `GHAX_BIN_DIR`, and after
+  installing exits 1 with the shadowing path and a fix if `ghax` on PATH is
+  still a different file (including the dev-build symlink case).
 
 ## [0.10.0] - 2026-10-14
 ### Added
