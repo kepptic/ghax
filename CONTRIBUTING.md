@@ -186,7 +186,10 @@ Both scripts share the same install path. Idempotent — safe to re-run.
    by default). If it's meta / read-only, add the name to `NEVER_RECORD`
    in `daemon.ts`.
 5. If it has a custom exit code, throw `new DaemonError(msg, code)` and
-   the CLI will propagate it.
+   the CLI will propagate it. A check that can fail without being misused
+   (`expect`) returns `{ok: false, ...}` instead, and the CLI maps it to exit 1
+   (`EXIT_ASSERT` in `dispatch.rs`), or exit 4 when the code is `EXPECT_ERROR`
+   (the check itself could not run).
 
 ## Architecture invariants
 

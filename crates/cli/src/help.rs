@@ -124,6 +124,20 @@ Batch / recording:
   record stop
   record status
   replay <file>
+  (chain, batch and replay take --report <path>: JSON of every step's ok/ms/actual)
+
+Checks (poll until true or --timeout ms, default 5000; exit 1 when one fails):
+  expect --url <regex> | --title <regex>
+  expect --text <substring> [--selector <css>]
+  expect --visible <@ref|css> | --hidden <@ref|css>
+  expect --count <css> (--n N | --min N [--max N])
+  expect --value <@ref|css> --expected <text>
+  expect --eval <js>                (must be truthy)
+  expect ... [--timeout <ms>] [--report <path>]
+  As a plan step: {"cmd":"expect","opts":{"url":"dashboard","timeout":3000}}.
+  The first failed expect ends the plan, even with stopOnError off.
+  Exit codes: 0 ok, 1 usage error or failed expect, 2 not attached, 4 error
+  (including an expect that could not run, code EXPECT_ERROR: bridge gone, probe hung).
 
 Orchestrated:
   qa --url <u> [--url <u> ...] [--urls a,b,c]

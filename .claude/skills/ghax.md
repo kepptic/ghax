@@ -278,6 +278,11 @@ ghax viewport 375x667
 ghax responsive /tmp/shot                # mobile + tablet + desktop
 ghax diff https://prod.example.com https://staging.example.com
 
+# Check a flow with no model in the loop (exit 1 on the first failed expect)
+ghax expect --url 'dashboard' --timeout 3000
+ghax expect --visible @e7
+ghax batch '[{"cmd":"goto","args":["https://app.example.com"]},{"cmd":"expect","opts":{"title":"Sign in"}}]' --report /tmp/run.json
+
 # Batch + record
 echo '[{"cmd":"goto","args":["https://example.com"]},{"cmd":"snapshot","opts":{"interactive":true}}]' | ghax chain
 ghax record start my-session
@@ -329,6 +334,36 @@ ghax ext sw <ext-id> eval "await fetch('/me', {headers:{Authorization:'Bearer '+
 ghax ext storage <ext-id> local set someKey null
 ```
 
+### Run a check as one batch with expects
+
+When a flow is known, don't read every page to see whether it worked. Put the
+checks in the plan; ghax runs it with no model in the loop and stops at the
+first thing that is wrong.
+
+```bash
+ghax batch '[
+  {"cmd":"goto","args":["https://app.example.com/login"]},
+  {"cmd":"expect","opts":{"visible":"#email"}},
+  {"cmd":"fill","args":["#email","qa@example.com"]},
+  {"cmd":"fill","args":["#password","'"$QA_PASSWORD"'"]},
+  {"cmd":"click","args":["button[type=submit]"]},
+  {"cmd":"expect","opts":{"url":"/dashboard$","timeout":8000}},
+  {"cmd":"expect","opts":{"text":"Welcome back","selector":"h1"}},
+  {"cmd":"expect","opts":{"count":"table tbody tr","min":1}}
+]' --report /tmp/login-check.json
+echo $?   # 0 = every check held, 1 = an expect failed, 4 = a step errored or an expect could not run (EXPECT_ERROR)
+```
+
+- Checks: `url`/`title` (regex), `text` (substring, optional `selector`),
+  `visible`/`hidden` (`@ref` or selector), `count` (`n` or `min`/`max`),
+  `value` (+ `expected`), `eval` (truthy JS). Each polls until `timeout` ms
+  (default 5000); `timeout: 0` looks once.
+- On failure, read the failing step: `{step, expect, expected, actual,
+  elapsedMs}`. Act on that and `/tmp/login-check.json`; only open a snapshot
+  if `actual` doesn't explain it.
+- The same steps work in `chain` and in a `replay` file, so a recording can be
+  edited to carry its checks.
+
 ### Verify a deploy by diffing text against staging
 
 ```bash
@@ -362,7 +397,8 @@ walking them and no automation tool can force entry.
 ## Exit codes
 
 - `0` — success
-- `1` — usage error
+- `1` — usage error, or an `expect` that did not hold (stdout has the result)
+- `4` also covers an `expect` that could not run (`EXPECT_ERROR`: bridge disconnect, hung probe)
 - `2` — not attached (run `ghax attach` first)
 - `3` — target not found (wrong ext-id, wrong tab id)
 - `4` — CDP error

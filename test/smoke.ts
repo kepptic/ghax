@@ -2230,6 +2230,157 @@ c('--trace prints a trace line on stderr and leaves stdout alone', async () => {
   assert(/^trace: /m.test(leading.stderr), `leading --trace ignored: ${leading.stderr}`);
 });
 
+// ─── expect ─────────────────────────────────────────────────────
+
+/** Serve a small page whose #late element appears 600 ms after load. */
+async function withExpectPage(fn: (base: string) => Promise<void>): Promise<void> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<!doctype html><title>Dash board</title><body>
+      <h1>Welcome back</h1>
+      <input id="name" value="ada">
+      <ul><li>a</li><li>b</li><li>c</li></ul>
+      <div id="gone" style="display:none">hidden thing</div>
+      <button id="go">Go</button>
+      <script>setTimeout(() => { const d = document.createElement('div'); d.id = 'late'; d.textContent = 'arrived'; document.body.append(d); }, 600);</script>
+    </body>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  try {
+    await fn(`http://127.0.0.1:${(server.address() as AddressInfo).port}/dashboard`);
+  } finally {
+    await new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); });
+  }
+}
+
+type ExpectOut = { ok: boolean; expect: string; actual: unknown; elapsedMs: number };
+
+c('expect: every kind passes on a matching page, exit 0', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const btn = await snapRef('button', 'Go');
+    const ok = async (args: string[]) => {
+      const r = await run(['expect', ...args, '--timeout', '2000']);
+      const out = parseJson<ExpectOut>(r.stdout);
+      assert(out.ok === true, `expect ${args.join(' ')} => ${r.stdout}`);
+      return out;
+    };
+    assert((await ok(['--url', '/dash.*$'])).actual === url, 'url actual is the page url');
+    await ok(['--title', '^Dash']);
+    await ok(['--text', 'Welcome back']);
+    await ok(['--text', 'Welcome', '--selector', 'h1']);
+    await ok(['--visible', '#name']);
+    await ok(['--visible', btn]);
+    await ok(['--hidden', '#gone']);
+    await ok(['--hidden', '#nope']);
+    assert((await ok(['--count', 'li', '--n', '3'])).actual === 3, 'count actual');
+    await ok(['--count', 'li', '--min', '2', '--max', '5']);
+    await ok(['--value', '#name', '--expected', 'ada']);
+    await ok(['--eval', 'document.querySelectorAll("li").length === 3']);
+  });
+});
+
+c('expect: a failing check exits 1 with {expect, actual, elapsedMs}; --timeout bounds the poll', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const started = Date.now();
+    const r = await run(['expect', '--text', 'Goodbye', '--timeout', '700'], { allowFailure: true });
+    const took = Date.now() - started;
+    assert(r.exitCode === 1, `failed expect must exit 1, got ${r.exitCode}: ${r.stderr}`);
+    const out = parseJson<ExpectOut>(r.stdout);
+    assert(out.ok === false && out.expect === 'text', `result: ${r.stdout}`);
+    assert(typeof out.actual === 'string' && (out.actual as string).includes('Welcome back'), `actual should show the page text: ${r.stdout}`);
+    assert(out.elapsedMs >= 600 && out.elapsedMs < 3000, `polled for ~700 ms, elapsedMs=${out.elapsedMs}`);
+    assert(took < 6000, `timeout not honoured: ${took} ms`);
+    const count = await run(['expect', '--count', 'li', '--n', '9', '--timeout', '0'], { allowFailure: true });
+    assert(count.exitCode === 1 && parseJson<ExpectOut>(count.stdout).actual === 3, `count failure: ${count.stdout}`);
+    const usage = await run(['expect', '--url', 'a', '--title', 'b'], { allowFailure: true });
+    assert(usage.exitCode === 1 && /one check per step/.test(usage.stderr), `two checks is a usage error: ${usage.stderr}`);
+  });
+});
+
+c('expect: polls until an element that appears late is there', async () => {
+  await withExpectPage(async (url) => {
+    await run(['goto', url]);
+    const r = await run(['expect', '--visible', '#late', '--timeout', '3000']);
+    const out = parseJson<ExpectOut>(r.stdout);
+    assert(out.ok && out.elapsedMs >= 200, `should have waited for #late, elapsedMs=${out.elapsedMs}`);
+    // With no budget the same check is a single look and fails.
+    await run(['goto', url]);
+    const now = await run(['expect', '--visible', '#late', '--timeout', '0'], { allowFailure: true });
+    assert(now.exitCode === 1, `timeout 0 is one look, got exit ${now.exitCode}`);
+  });
+});
+
+c('expect in batch: first failure stops the plan, exit 1, --report lists every step', async () => {
+  await withExpectPage(async (url) => {
+    const report = `/tmp/ghax-expect-report-${process.pid}.json`;
+    const plan = JSON.stringify([
+      { cmd: 'goto', args: [url] },
+      { cmd: 'expect', opts: { url: '/dashboard$', timeout: 2000 } },
+      { cmd: 'expect', opts: { text: 'Never on this page', timeout: 300 } },
+      { cmd: 'eval', args: ['window.__after = 1'] },
+    ]);
+    const r = await run(['batch', plan, '--report', report], { allowFailure: true });
+    assert(r.exitCode === 1, `batch with a failed expect must exit 1, got ${r.exitCode}: ${r.stdout}`);
+    const steps = parseJson<Array<{ cmd: string; ok: boolean; code?: string; step?: number; expect?: string; actual?: unknown; elapsedMs?: number }>>(r.stdout);
+    assert(steps.length === 3, `plan must stop at the failed expect, got ${steps.length} results`);
+    assert(steps[1].ok && steps[2].ok === false && steps[2].code === 'EXPECT_FAILED'
+      && steps[2].step === 2 && steps[2].expect === 'text' && typeof steps[2].elapsedMs === 'number'
+      && typeof steps[2].actual === 'string', `failed step: ${JSON.stringify(steps[2])}`);
+    const after = await run(['eval', 'String(window.__after)']);
+    assert(after.stdout.trim() === 'undefined', 'the step after the failed expect must not have run');
+    const rep = parseJson<{ ok: boolean; exit: number; steps: Array<{ cmd: string; ok: boolean; ms: number; actual?: unknown }> }>(
+      fs.readFileSync(report, 'utf8'));
+    assert(rep.ok === false && rep.exit === 1 && rep.steps.length === 3, `report: ${JSON.stringify(rep)}`);
+    assert(rep.steps.every((st) => typeof st.ms === 'number') && rep.steps[1].actual === url && rep.steps[2].ok === false, `report steps: ${JSON.stringify(rep.steps)}`);
+    fs.rmSync(report, { force: true });
+    // An unrelated step failure is still exit 4, not an assertion.
+    const broken = await run(['batch', JSON.stringify([{ cmd: 'no-such-verb' }])], { allowFailure: true });
+    assert(broken.exitCode === 4, `a non-expect failure keeps exit 4, got ${broken.exitCode}`);
+  });
+});
+
+c('expect: nested batch failure stops the outer plan; bare --report is a usage error', async () => {
+  await withExpectPage(async (url) => {
+    const plan = JSON.stringify([
+      { cmd: 'goto', args: [url] },
+      { cmd: 'batch', args: [[{ cmd: 'expect', opts: { text: 'Never on this page', timeout: 200 } }]] },
+      { cmd: 'eval', args: ['window.__after2 = 1'] },
+    ]);
+    const r = await run(['batch', plan], { allowFailure: true });
+    assert(r.exitCode === 1, `nested failed expect must exit 1, got ${r.exitCode}: ${r.stdout}`);
+    const steps = parseJson<Array<{ cmd: string; ok: boolean; code?: string }>>(r.stdout);
+    assert(steps.length === 2 && steps[1].cmd === 'batch' && steps[1].code === 'EXPECT_FAILED', `outer plan stops: ${r.stdout}`);
+    const after = await run(['eval', 'String(window.__after2)']);
+    assert(after.stdout.trim() === 'undefined', 'step after the nested failure must not have run');
+    const chain = await run(['chain'], { stdin: JSON.stringify([{ cmd: 'batch', args: [[{ cmd: 'expect', opts: { text: 'Never on this page', timeout: 200 } }]] }]), allowFailure: true });
+    assert(chain.exitCode === 1 && parseJson<Array<{ code?: string }>>(chain.stdout)[0].code === 'EXPECT_FAILED', `chain nested: ${chain.exitCode} ${chain.stdout}`);
+    for (const argv of [['expect', '--url', '.', '--report'], ['batch', '[]', '--report']]) {
+      const bare = await run(argv, { allowFailure: true });
+      assert(bare.exitCode === 1 && /--report needs a file path/.test(bare.stderr), `bare --report on ${argv[0]}: ${bare.exitCode} ${bare.stderr}`);
+    }
+  });
+});
+
+c('expect in chain and replay files: failure exits 1', async () => {
+  await withExpectPage(async (url) => {
+    const steps = [{ cmd: 'goto', args: [url] }, { cmd: 'expect', opts: { title: 'Nope', timeout: 200 } }, { cmd: 'text' }];
+    const chain = await run(['chain'], { stdin: JSON.stringify(steps), allowFailure: true });
+    assert(chain.exitCode === 1, `chain exit: ${chain.exitCode} ${chain.stdout}`);
+    const res = parseJson<Array<{ cmd: string; code?: string }>>(chain.stdout);
+    assert(res.length === 2 && res[1].code === 'EXPECT_FAILED', `chain stops at the failed expect: ${chain.stdout}`);
+    const file = `/tmp/ghax-expect-replay-${process.pid}.json`;
+    fs.writeFileSync(file, JSON.stringify({ steps }));
+    const replay = await run(['replay', file], { allowFailure: true });
+    assert(replay.exitCode === 1 && /✗ expect/.test(replay.stderr), `replay: ${replay.exitCode} ${replay.stderr}`);
+    fs.writeFileSync(file, JSON.stringify({ steps: [steps[0], { cmd: 'expect', opts: { title: 'Dash', timeout: 1000 } }] }));
+    const good = await run(['replay', file]);
+    assert(/✓ expect/.test(good.stdout), `passing replay: ${good.stdout}`);
+    fs.rmSync(file, { force: true });
+  });
+});
+
 c('GHAX_RPC_TIMEOUT bounds a call that never answers', async () => {
   const prev = process.env.GHAX_RPC_TIMEOUT;
   process.env.GHAX_RPC_TIMEOUT = '2';

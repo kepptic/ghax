@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
+/// A plan's `expect` (or `ghax expect`) did not hold. Shares the value 1 with
+/// usage errors on purpose: both mean "the check, not the browser, said no".
+pub const EXIT_ASSERT: i32 = 1;
 pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
 
@@ -58,6 +61,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "chain" => return small::cmd_chain(rest),
         "batch" => return small::cmd_batch(rest),
         "replay" => return small::cmd_replay(rest),
+        "expect" => return crate::expect::cmd_expect(rest),
         "gif" => return small::cmd_gif(rest),
         "qa" => return qa::cmd_qa(&args::parse(rest)),
         "canary" => return canary::cmd_canary(&args::parse(rest)),

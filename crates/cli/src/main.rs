@@ -8,6 +8,7 @@ mod bridge;
 mod canary;
 mod cookies;
 mod dispatch;
+mod expect;
 mod help;
 mod output;
 mod qa;

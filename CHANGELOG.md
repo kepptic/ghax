@@ -5,8 +5,26 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`expect`: a plan carries its own checks.** A step `{"cmd":"expect","opts":{...}}`
+  in `batch`, `chain` and `replay` files, and `ghax expect` on its own, asserts
+  one thing about the page and polls until it holds or `--timeout` ms
+  (default 5000) pass. Checks: `url` / `title` (regex), `text` (substring of
+  the page, or of `selector`), `visible` / `hidden` (`@ref` or selector; a
+  missing element counts as hidden), `count` (selector with `n`, or `min` /
+  `max`), `value` (`@ref` or selector with `expected`), `eval` (JS that must
+  be truthy). Works on CDP and the bridge. A known flow can now run with no
+  model reading pages in between.
+- **Exit code 1 for a failed assertion.** The first failing `expect` ends the
+  plan (even with `stopOnError` off) and the process exits 1; the failing step
+  reports `{step, expect, expected, actual, elapsedMs}` with code
+  `EXPECT_FAILED`. If the last look threw (a bridge disconnect, a hung `--eval`),
+  nothing was observed: the step reports `EXPECT_ERROR` and the process exits 4,
+  not 1. A nested `batch` holding a failed expect stops the outer plan too. A
+  bare `--report` with no path is a usage error. Other step failures still exit 4.
+- **`--report <path>`** on `batch`, `chain`, `replay` and `expect` writes a JSON
+  file with `ok`, `exit`, `totalMs` and every step that ran (`ok`, `ms`, and
+  `actual` for expects). `batch` results now carry `ms` per step.
 
 ## [0.9.0] - 2026-09-27
 ### Added
