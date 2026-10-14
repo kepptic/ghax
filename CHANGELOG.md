@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.10.1] - 2026-10-14
 ### Fixed
 - **`install-release.sh` works when piped.** Under `curl ... | bash`, `$0` is
   `bash`, so the script looked for `bootstrap-daemon-runtime.sh` in the caller's
@@ -1582,7 +1585,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/kepptic/ghax/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/kepptic/ghax/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/kepptic/ghax/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/kepptic/ghax/compare/v0.7.1...v0.8.0
