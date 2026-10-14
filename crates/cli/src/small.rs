@@ -16,7 +16,7 @@ use crate::args;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_NOT_ATTACHED, EXIT_OK, EXIT_USAGE};
 use crate::output;
 use crate::rpc::{self, RpcError};
-use crate::state::{self, read_state};
+use crate::state::{self, read_state, Config};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -29,20 +29,19 @@ use std::io::Read as _;
 /// If not attached (no state or daemon unreachable) prints "not attached" and
 /// returns EXIT_NOT_ATTACHED.  Otherwise does RPC `status` and pretty-prints
 /// tabs / targets / extensions / uptime, or `--json` for the raw object.
-pub fn cmd_status(rest: &[String]) -> Result<i32> {
+pub fn cmd_status(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
-    let cfg = state::resolve_config();
-    let Some(daemon_state) = read_state(&cfg) else {
+    let Some(daemon_state) = read_state(cfg) else {
         println!("not attached");
-        print_daemon_log_hint(&cfg);
+        print_daemon_log_hint(cfg);
         return Ok(EXIT_NOT_ATTACHED);
     };
     // Health-check the daemon; treat failure as "not attached".
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(_) => {
             println!("not attached");
-            print_daemon_log_hint(&cfg);
+            print_daemon_log_hint(cfg);
             return Ok(EXIT_NOT_ATTACHED);
         }
     };
@@ -58,7 +57,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
             "browserKind": daemon_state.browser_kind,
             "attachedAt":  daemon_state.attached_at,
             "cwd":         daemon_state.cwd,
-            "daemonLog":   daemon_log_path(&cfg).display().to_string(),
+            "daemonLog":   daemon_log_path(cfg).display().to_string(),
         });
         if let (Some(m), Some(data_obj)) = (merged.as_object_mut(), data.as_object()) {
             for (k, v) in data_obj {
@@ -93,7 +92,7 @@ pub fn cmd_status(rest: &[String]) -> Result<i32> {
         println!("targets     {}", data.get("targetCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("extensions  {}", data.get("extensionCount").and_then(|v| v.as_u64()).unwrap_or(0));
         println!("cwd         {}", daemon_state.cwd);
-        println!("log         {}", daemon_log_path(&cfg).display());
+        println!("log         {}", daemon_log_path(cfg).display());
     }
     Ok(EXIT_OK)
 }
@@ -131,13 +130,12 @@ fn print_daemon_log_hint(cfg: &state::Config) {
 ///
 /// Only the `status` subcommand is shipped; the broader `pair` suite is
 /// deferred as noted in CLAUDE.md.
-pub fn cmd_pair(rest: &[String]) -> Result<i32> {
+pub fn cmd_pair(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let sub = parsed.positional.first().map(|s| s.as_str()).unwrap_or("status");
     match sub {
         "status" | "info" => {
-            let cfg = state::resolve_config();
-            let Some(daemon_state) = read_state(&cfg) else {
+            let Some(daemon_state) = read_state(cfg) else {
                 println!("not attached — run `ghax attach` first");
                 return Ok(EXIT_NOT_ATTACHED);
             };
@@ -378,7 +376,7 @@ fn diff_values(path: &str, a: &Value, b: &Value, out: &mut Vec<DiffEntry>) {
 ///
 /// `chain` always prints results as JSON (the TS implementation hard-codes
 /// `printResult(results, true)`). Returns EXIT_CDP_ERROR if any step failed.
-pub fn cmd_chain(rest: &[String]) -> Result<i32> {
+pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let stop_on_error = parsed
         .flags
@@ -409,8 +407,7 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
         }
     };
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -468,7 +465,7 @@ pub fn cmd_chain(rest: &[String]) -> Result<i32> {
 /// and re-snapshots between steps that reference `@e<n>` refs. That fixes
 /// the mid-sequence ref-shift on framework-heavy forms where the ARIA tree
 /// reindexes mid-plan.
-pub fn cmd_batch(rest: &[String]) -> Result<i32> {
+pub fn cmd_batch(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let Some(json_src) = parsed.positional.first() else {
         eprintln!("Usage: ghax batch '[{{\"cmd\":\"click\",\"args\":[\"@e7\"]}}, …]'");
@@ -486,8 +483,7 @@ pub fn cmd_batch(rest: &[String]) -> Result<i32> {
         return Ok(EXIT_USAGE);
     }
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -517,7 +513,7 @@ pub fn cmd_batch(rest: &[String]) -> Result<i32> {
 /// Reads a recording file (JSON with a top-level `steps` array or a bare
 /// array), executes each step in order, and prints `✓`/`✗` per step.
 /// Aborts on the first failure.
-pub fn cmd_replay(rest: &[String]) -> Result<i32> {
+pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let file = match parsed.positional.first() {
         Some(f) => f.clone(),
@@ -555,8 +551,7 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
         }
     };
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");
@@ -611,7 +606,7 @@ pub fn cmd_replay(rest: &[String]) -> Result<i32> {
 ///
 /// Default delay: 1000ms, default scale: 800px.
 /// Exit code 4 if ffmpeg is not on PATH.
-pub fn cmd_gif(rest: &[String]) -> Result<i32> {
+pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
     let rec_file = match parsed.positional.first() {
         Some(f) => f.clone(),
@@ -685,8 +680,7 @@ pub fn cmd_gif(rest: &[String]) -> Result<i32> {
 
     println!("rendering {} steps → {}", steps.len(), out_gif);
 
-    let cfg = state::resolve_config();
-    let port = match state::require_daemon(&cfg) {
+    let port = match state::require_daemon(cfg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("ghax: {e}");

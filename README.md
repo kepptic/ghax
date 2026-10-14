@@ -202,6 +202,16 @@ ghax tabs --browser chrome               # peek at a parked browser's tabs
 ghax attach --extension --browser edge   # only Edge may bind; others park
 ```
 
+`attach --extension` doesn't bind the first browser that says hello. It waits 1.5 s after the first one (`GHAX_BRIDGE_SETTLE_MS`), then binds only if exactly one connected browser matches `--browser`. Two browsers and no `--browser` exits 2 with `BRIDGE_AMBIGUOUS`; a `--browser` nothing matches keeps waiting for it to connect, then exits 2 with `BRIDGE_NO_CANDIDATE` when the attach timeout ends. Both list every browser seen as `browser · label · instanceId · port`:
+
+```
+ghax: BRIDGE_AMBIGUOUS: 2 browsers connected and no --browser picks one:
+  edge · Work · 3f2a1b9c-... · :9223
+  chrome · - · 9c8d7e10-... · :9223
+```
+
+Re-run with `--browser edge` (or a label), or keep the daemon and pick with `ghax bridge use <id|browser|label>`. Two profiles of the same brand need distinct labels in the extension popup.
+
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 
 **Why is this verb slow?** Every bridge command is a relay hop, so call count is usually the answer:
@@ -321,6 +331,8 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
 ```
 
 Same browser process, separate windows and separate daemon state. Neither agent sees the other's active-tab pointer.
+
+**Finding a daemon from another directory.** The state file follows the git root of your cwd, so a daemon attached from `~/work/a` used to be invisible from `~/work/b`. Every daemon now registers in `~/.ghax/daemons/<pid>.json` (removed when it exits; entries for dead pids are pruned on read). When your directory has no live daemon and `GHAX_STATE_FILE` is unset, ghax uses the one registered daemon and prints one stderr line naming its cwd and browser. With several running it refuses and lists each with the `GHAX_STATE_FILE=` to set. `ghax attach` never reuses another directory's daemon, and `ghax detach` only stops the one it resolves to.
 
 The same recipe works over the bridge — swap `ghax attach` for `ghax attach --extension`. The daemons auto-pick adjacent bridge ports and the extension multiplexes between them; a tab may only be driven by one agent at a time. See [Real session via the ghax bridge](#real-session-via-the-ghax-bridge-experimental-v05).
 

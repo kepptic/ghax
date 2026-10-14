@@ -132,6 +132,17 @@ function envMs(name: string, fallback: number): number {
 const LIVENESS_MS = envMs('GHAX_BRIDGE_LIVENESS_MS', 25_000);
 /** DEGRADED → EXPIRED. Covers the ≤8s extension reconnect backoff + attach. */
 const GRACE_MS = envMs('GHAX_BRIDGE_GRACE_MS', 20_000);
+/**
+ * How long the first `hello` waits for other browsers before anything binds
+ * (plan 11, phase 1). Two browsers dialling the same daemon arrive within a
+ * second of each other; without this window the first one simply won. `0`
+ * restores first-hello-wins, which is what the single-browser sims use.
+ */
+function settleMsFromEnv(): number {
+  const raw = Number(process.env.GHAX_BRIDGE_SETTLE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1500;
+}
+const SETTLE_MS = settleMsFromEnv();
 
 /**
  * How many consecutive ports one browser's extension will look for daemons on,
@@ -163,6 +174,8 @@ export interface BridgeOptions {
    * design/plan/07. Off by default — no behaviour change unless requested.
    */
   pairCode?: string | null;
+  /** First-bind settle window. Defaults to GHAX_BRIDGE_SETTLE_MS or 1500ms; 0 = first hello binds. */
+  settleMs?: number;
 }
 /** Commands queued while DEGRADED before we stop pretending and fail fast. */
 const QUEUE_CAP = 32;
@@ -177,6 +190,38 @@ export type PeerRole = 'bound' | 'parked';
  * answers *what happens when the driver blinks*.
  */
 export type BridgeSessionState = 'UNBOUND' | 'BOUND' | 'DEGRADED' | 'EXPIRED';
+
+/**
+ * Outcome of the first-bind selection (plan 11, phase 1).
+ *   idle         — no hello yet
+ *   settling     — first hello landed, waiting GHAX_BRIDGE_SETTLE_MS for others
+ *   bound        — exactly one candidate matched and was bound (or `bridge use`)
+ *   no-candidate — the window closed and no connected instance matched --browser
+ *   ambiguous    — more than one matched; nothing binds until `bridge use`
+ */
+export type BridgeSelectionState = 'idle' | 'settling' | 'bound' | 'no-candidate' | 'ambiguous';
+
+/** One instance as the selection saw it when the settle window closed. */
+export interface BridgeCandidate {
+  instanceId: string;
+  browser: string;
+  label: string;
+  /** The bridge port the instance reached — this daemon's. */
+  port: number;
+  connected: boolean;
+  /** Passed the --browser filter (always true when there is no filter). */
+  matches: boolean;
+}
+
+export interface BridgeSelection {
+  state: BridgeSelectionState;
+  code?: 'BRIDGE_NO_CANDIDATE' | 'BRIDGE_AMBIGUOUS';
+  message?: string;
+  /** The --browser filter in force when the window closed, or null. */
+  filter?: string | null;
+  /** Every instance seen when the window closed, matching or not. */
+  instances?: BridgeCandidate[];
+}
 
 /** A connected extension instance, as reported by `ghax bridge instances`. */
 export interface BridgeInstance {
@@ -318,6 +363,9 @@ export class Bridge extends EventEmitter {
   private legacySeq = 0;
   /** Non-null → only instances matching (browser or label) may bind. */
   private bindFilter: string | null = null;
+  private readonly settleMs: number;
+  private settleTimer: NodeJS.Timeout | null = null;
+  private _selection: BridgeSelection = { state: 'idle' };
   /** Timestamps of bind-ownership changes, for the livelock detector. */
   private bindEvents: number[] = [];
   private livelockWarned = false;
@@ -377,6 +425,7 @@ export class Bridge extends EventEmitter {
     this.log = log;
     this.graceMs = opts.graceMs ?? GRACE_MS;
     this.livenessMs = opts.livenessMs ?? LIVENESS_MS;
+    this.settleMs = opts.settleMs ?? SETTLE_MS;
     this.pairCode = opts.pairCode && opts.pairCode.trim() ? opts.pairCode.trim() : null;
     this.wss = opts.server ?? new WebSocketServer({ host: '127.0.0.1', port });
     this.port = port;
@@ -462,6 +511,71 @@ export class Bridge extends EventEmitter {
   /** Restrict binding to a browser brand or label. Applied on the next hello. */
   setBindFilter(filter: string | null): void {
     this.bindFilter = filter && filter.trim() ? filter.trim().toLowerCase() : null;
+  }
+
+  /** First-bind selection outcome — backs `/bridge-status` `selection`. */
+  get selection(): BridgeSelection {
+    return this._selection;
+  }
+
+  private matchesFilter(p: Peer): boolean {
+    return !this.bindFilter
+      || p.browser.toLowerCase() === this.bindFilter
+      || p.label.toLowerCase() === this.bindFilter;
+  }
+
+  /**
+   * Close the selection: bind exactly one matching connected instance, or
+   * record why not. Never takes [0] of several (target-verification rule):
+   * more than one candidate refuses and lists them. Returns the winner.
+   */
+  private decideSelection(): Peer | null {
+    if (this.settleTimer) {
+      clearTimeout(this.settleTimer);
+      this.settleTimer = null;
+    }
+    const seen = [...this.peers.values()];
+    const instances: BridgeCandidate[] = seen.map((p) => ({
+      instanceId: p.instanceId,
+      browser: p.browser,
+      label: p.label,
+      port: this.port,
+      connected: p.ws?.readyState === WebSocket.OPEN,
+      matches: this.matchesFilter(p),
+    }));
+    const candidates = seen.filter((p) => p.ws?.readyState === WebSocket.OPEN && this.matchesFilter(p));
+    const list = instances.map((i) => `${i.browser || '?'} · ${i.label || '-'} · ${i.instanceId} · :${i.port}`).join('; ');
+    if (candidates.length === 1) {
+      this._selection = { state: 'bound', filter: this.bindFilter, instances };
+      return candidates[0];
+    }
+    if (candidates.length === 0) {
+      const message = this.bindFilter
+        ? `BRIDGE_NO_CANDIDATE: no connected browser matches --browser ${this.bindFilter} (seen: ${list || 'none'})`
+        : `BRIDGE_NO_CANDIDATE: no connected browser (seen: ${list || 'none'})`;
+      this._selection = { state: 'no-candidate', code: 'BRIDGE_NO_CANDIDATE', message, filter: this.bindFilter, instances };
+      this.log(`bridge: ${message}`);
+      return null;
+    }
+    const why = this.bindFilter
+      ? `${candidates.length} browsers match --browser ${this.bindFilter}; give each a distinct label in the extension popup`
+      : `${candidates.length} browsers connected and no --browser to pick one`;
+    const message = `BRIDGE_AMBIGUOUS: ${why} (${list}). Nothing is bound until \`ghax bridge use <id|browser|label>\``;
+    this._selection = { state: 'ambiguous', code: 'BRIDGE_AMBIGUOUS', message, filter: this.bindFilter, instances };
+    this.log(`bridge: ${message}`);
+    return null;
+  }
+
+  /** Settle window expired: bind the single candidate, if there is one. */
+  private closeSettle(): void {
+    this.settleTimer = null;
+    if (this.boundId !== null) {
+      // `bridge use` picked one while we were waiting.
+      this._selection = { ...this._selection, state: 'bound' };
+      return;
+    }
+    const winner = this.decideSelection();
+    if (winner) this.bindPeer(winner, 'role', `first-bind after ${this.settleMs}ms settle`);
   }
 
   /** Snapshot of every known instance — backs `ghax bridge instances`. */
@@ -775,28 +889,44 @@ export class Bridge extends EventEmitter {
     // reconnecting first took the session and demoted the returning incumbent
     // to parked, mid-drive. Takeover inside the window stays explicit: `use()`.
     const boundGone = !noBoundPeer && !isResume && this._state === 'EXPIRED';
-    const matchesFilter = !this.bindFilter
-      || browser.toLowerCase() === this.bindFilter
-      || label.toLowerCase() === this.bindFilter;
+    const matches = this.matchesFilter(peer);
 
     let role: PeerRole;
+    let reason: string;
+    // A peer other than this one picked by a zero-length settle window.
+    let promote: Peer | null = null;
     if (isResume) {
       role = 'bound';
-    } else if ((noBoundPeer || boundGone) && matchesFilter) {
+      reason = 'resume';
+    } else if (boundGone && matches) {
       role = 'bound';
+      // A takeover reads exactly like a first bind in the log otherwise, which
+      // is how "the session moved" hid behind "an extension connected".
+      reason = `takeover — ${this.describePeer(this.boundPeer)} never came back`;
+    } else if (noBoundPeer && this._selection.state === 'ambiguous') {
+      role = 'parked';
+      reason = 'selection is ambiguous, waiting for `ghax bridge use`';
+    } else if (noBoundPeer && this.settleMs > 0) {
+      // First-bind selection: everyone parks until the window closes, then
+      // closeSettle promotes the single candidate over its live socket.
+      role = 'parked';
+      reason = `settling ${this.settleMs}ms`;
+      if (this._selection.state !== 'settling') {
+        this._selection = { state: 'settling', filter: this.bindFilter };
+        this.settleTimer = setTimeout(() => this.closeSettle(), this.settleMs);
+        this.settleTimer.unref?.();
+      }
+    } else if (noBoundPeer) {
+      const winner = this.decideSelection();
+      role = winner === peer ? 'bound' : 'parked';
+      if (winner && winner !== peer) promote = winner;
+      reason = winner === peer ? 'first-bind' : (this._selection.message ?? 'not selected');
     } else {
       role = 'parked';
-    }
-
-    // A takeover reads exactly like a first bind in the log otherwise, which is
-    // how "the session moved" hid behind "an extension connected".
-    const reason = role === 'bound'
-      ? (isResume
-        ? 'resume'
-        : (noBoundPeer ? 'first-bind' : `takeover — ${this.describePeer(this.boundPeer)} never came back`))
-      : (matchesFilter
+      reason = matches
         ? `${this.describePeer(this.boundPeer)} is bound`
-        : `does not match --browser ${this.bindFilter}`);
+        : `does not match --browser ${this.bindFilter}`;
+    }
     this.log(
       `bridge: hello ${this.describePeer(peer)} v${version} → ${role} (${reason})`,
     );
@@ -807,14 +937,25 @@ export class Bridge extends EventEmitter {
         type: 'hello-ack', role: 'parked', daemonId: this.daemonId, graceMs: this.graceMs,
       });
       this.emit('instances');
+      if (promote) this.bindPeer(promote, 'role', 'first-bind');
       return;
     }
+    this.bindPeer(peer, 'hello-ack', reason);
+  }
 
-    // ─── Bind / resume ───────────────────────────────────────
+  /**
+   * Make `peer` the driver: hello-time (`hello-ack`) or a promotion of an
+   * already-parked socket after the settle window (`role`, same wire shape
+   * `use()` sends — the extension treats both identically).
+   */
+  private bindPeer(peer: Peer, via: 'hello-ack' | 'role', reason: string): void {
+    const instanceId = peer.instanceId;
+    if (via === 'role') this.log(`bridge: bound → ${this.describePeer(peer)} (${reason})`);
     const previousBound = this.boundId;
     const ownershipChanged = previousBound !== instanceId;
     peer.role = 'bound';
     this.boundId = instanceId;
+    if (this._selection.state !== 'bound') this._selection = { ...this._selection, state: 'bound' };
     if (!this.sessionToken || ownershipChanged) {
       this.sessionToken = crypto.randomBytes(16).toString('hex');
     }
@@ -826,8 +967,8 @@ export class Bridge extends EventEmitter {
     this._state = 'BOUND';
     if (ownershipChanged) this.noteBindChange();
 
-    this.rawSend(ws, {
-      type: 'hello-ack',
+    this.rawSend(peer.ws, {
+      type: via,
       role: 'bound',
       // Identity of the DAEMON, not the port: the extension hands back any tab
       // it was driving for a different daemon before it starts driving for this
@@ -951,6 +1092,12 @@ export class Bridge extends EventEmitter {
         }, timeoutMs).unref?.();
       });
     }
+    // An unresolved selection is the more useful answer than "load the
+    // extension": the browsers ARE connected, the daemon just won't guess.
+    const sel = this._selection;
+    if (this._state === 'UNBOUND' && sel.message && (sel.state === 'ambiguous' || sel.state === 'no-candidate')) {
+      return Promise.reject(new Error(`ghax bridge: ${sel.message}`));
+    }
     return Promise.reject(
       new Error(
         'ghax bridge: no extension connected. Load extension/ unpacked, then click "Control this tab" in the ghax bridge popup.',
@@ -1001,15 +1148,26 @@ export class Bridge extends EventEmitter {
    */
   async use(selector: string): Promise<BridgeInstance> {
     const want = selector.trim().toLowerCase();
-    const target = [...this.peers.values()].find(
+    const matches = [...this.peers.values()].filter(
       (p) => p.instanceId.toLowerCase().startsWith(want)
         || p.browser.toLowerCase() === want
         || p.label.toLowerCase() === want,
     );
-    if (!target) {
+    if (matches.length === 0) {
       const known = this.instances().map((i) => `${i.browser}·${i.instanceId.slice(0, 6)}`).join(', ') || 'none';
       throw new Error(`bridge: no instance matching '${selector}'. Known instances: ${known}`);
     }
+    // Never pick by arrival order: more than one match is a refusal that
+    // lists every candidate so the caller can name one precisely.
+    if (matches.length > 1) {
+      const rows = matches
+        .map((p) => `  ${p.browser} · ${p.label || '-'} · ${p.instanceId} · :${this.port}`)
+        .join('\n');
+      throw new Error(
+        `bridge: '${selector}' matches ${matches.length} instances; use an instanceId (or a unique prefix) or a distinct label:\n${rows}`,
+      );
+    }
+    const target = matches[0];
     if (target.ws?.readyState !== WebSocket.OPEN) {
       throw new Error(`bridge: instance ${this.describePeer(target)} is not connected`);
     }
@@ -1038,6 +1196,11 @@ export class Bridge extends EventEmitter {
     target.role = 'bound';
     this.boundId = target.instanceId;
     this._state = 'BOUND';
+    if (this.settleTimer) {
+      clearTimeout(this.settleTimer);
+      this.settleTimer = null;
+    }
+    this._selection = { ...this._selection, state: 'bound' };
     this.sessionToken = crypto.randomBytes(16).toString('hex');
     this.noteBindChange();
     this.rawSend(target.ws, {
@@ -1161,6 +1324,7 @@ export class Bridge extends EventEmitter {
     for (const q of this.queue.splice(0)) q.reject(err);
     for (const w of this.resumeWaiters.splice(0)) w.reject(err);
     if (this.graceTimer) clearTimeout(this.graceTimer);
+    if (this.settleTimer) clearTimeout(this.settleTimer);
     if (this.livenessTimer) clearInterval(this.livenessTimer);
     for (const peer of this.peers.values()) {
       try {

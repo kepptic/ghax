@@ -5,8 +5,33 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Added
+- **Daemon discovery.** Every daemon registers in `~/.ghax/daemons/<pid>.json`
+  and removes the entry when it exits; readers prune entries whose pid is dead.
+  When the cwd's state file has no live daemon and `GHAX_STATE_FILE` is unset,
+  ghax uses the one registered daemon and prints one stderr line naming its cwd
+  and browser. With more than one running it refuses and lists each with the
+  `GHAX_STATE_FILE=` to set. `attach` never reuses another directory's daemon;
+  `detach` lists them but only stops the one it resolves to. Fixes the
+  "no daemon state" error when an agent attached from a different directory.
 
-_No changes yet._
+### Changed
+- **`attach --extension` no longer binds the first browser that says hello.**
+  It waits `GHAX_BRIDGE_SETTLE_MS` (default 1500 ms) after the first hello,
+  then binds only if exactly one connected browser matches `--browser`. More
+  than one exits 2 with `BRIDGE_AMBIGUOUS`. If none matches, attach keeps
+  waiting for one to connect and exits 2 with `BRIDGE_NO_CANDIDATE` only
+  when the attach timeout ends. Both list `browser · label · instanceId · port` for
+  every browser seen. `ghax bridge use` still picks one by hand (it refuses
+  a selector that matches more than one instance and lists them, instead of
+  taking the first), and a hello
+  after a bind still parks. Breaking: two browsers without `--browser` no
+  longer bind silently. `/bridge-status` gains a `selection` field.
+  Daemon registry entries are written via temp file + rename; an unreadable
+  entry whose pid is alive blocks adoption instead of being ignored.
+  `GHAX_GLOBAL=1` disables daemon discovery like `GHAX_STATE_FILE`, and
+  `diff-state` / plain `version` never run discovery.
+  Design: `docs/design/plan/11-multi-browser.md` (phase 1).
 
 ## [0.9.0] - 2026-09-27
 ### Added

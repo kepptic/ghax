@@ -19,7 +19,7 @@
 use crate::args::Parsed;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_OK, EXIT_USAGE};
 use crate::rpc;
-use crate::state;
+use crate::state::{self, Config};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -252,7 +252,7 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
 
 // ── Main entry point ───────────────────────────────────────────────────────
 
-pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
+pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     // ── Collect URLs ──
     let mut urls: Vec<String> = Vec::new();
 
@@ -324,8 +324,7 @@ pub fn cmd_qa(parsed: &Parsed) -> Result<i32> {
     }
 
     // ── Daemon ──
-    let cfg = state::resolve_config();
-    let port = state::require_daemon(&cfg)?;
+    let port = state::require_daemon(cfg)?;
 
     let started_ms = now_ms();
     let started_at = iso_now();

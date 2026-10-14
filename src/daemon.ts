@@ -40,7 +40,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
 import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
-import { resolveConfig, type DaemonState, writeState, readState } from './config';
+import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
@@ -4616,6 +4616,9 @@ async function main() {
         state: ctx.bridge?.state ?? 'UNBOUND',
         instances: ctx.bridge?.instances() ?? [],
         livelockSuspected: ctx.bridge?.livelockSuspected ?? false,
+        // First-bind outcome: `attach --extension` fails fast on
+        // no-candidate / ambiguous instead of waiting out its 60s.
+        selection: ctx.bridge?.selection ?? { state: 'idle' },
       });
       return;
     }
@@ -4802,6 +4805,20 @@ async function main() {
     cwd: process.cwd(),
   };
   writeState(cfg, state);
+  // Discovery entry for CLIs whose cwd resolves to a different state file.
+  // Removed in the exit hook so every clean exit path (shutdown, idle, a
+  // process.exit elsewhere) cleans up; a SIGKILL leaves it for readers to prune.
+  const registryFile = registerDaemon({
+    pid: process.pid,
+    port,
+    // Absolute: a reader in another cwd must be able to open it.
+    stateFile: path.resolve(cfg.stateFile),
+    cwd: process.cwd(),
+    browserKind,
+    bridgePort: bridgeMode ? bridgePort : null,
+    startedAt: new Date(ctx.startedAt).toISOString(),
+  });
+  process.on('exit', () => unregisterDaemon(registryFile));
   log(`listening on 127.0.0.1:${port}`);
 
   // Idle watchdog.

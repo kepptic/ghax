@@ -8,6 +8,13 @@ Connection:
   attach --extension [--control-active] [--browser <bind-filter>] [--pair[=code]]
                                   # drive your REAL session via the bridge ext;
                                   #   --pair requires a code typed into the popup
+                                  #   Waits GHAX_BRIDGE_SETTLE_MS (1500) after the
+                                  #   first browser connects, then binds only if
+                                  #   exactly one matches --browser. More than one
+                                  #   exits 2 with BRIDGE_AMBIGUOUS. None matching keeps
+                                  #   waiting for one to connect, then exits 2 with
+                                  #   BRIDGE_NO_CANDIDATE at the attach timeout.
+                                  #   Both list each browser seen.
          [--headless] [--load-extension <path>] [--data-dir <path>]
          [--capture-bodies[=<url-glob>]] [--verbose]
          # Without --port, scans :9222-9230. Multiple running → picker.
@@ -149,6 +156,10 @@ Each call to the daemon times out after 120 s (GHAX_RPC_TIMEOUT=<seconds>,
   0 = none); verbs with their own --timeout get that plus 30 s; batch gets
   120 s per step.
 Put -- before a value that starts with a dash (ghax eval -- '--i').
+No daemon for this directory? If exactly one ghax daemon is running anywhere
+  (registered in ~/.ghax/daemons/), commands use it and say so on stderr. More
+  than one: the error lists each with the GHAX_STATE_FILE to set. attach never
+  reuses another directory's daemon.
 Add --trace to any command for a one-line CDP call summary on stderr
   (count, time, heaviest methods). stdout is unchanged.
 "#;

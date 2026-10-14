@@ -14,7 +14,13 @@ pub const EXIT_NOT_ATTACHED: i32 = 2;
 pub const EXIT_CDP_ERROR: i32 = 4;
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
-    let cfg = state::resolve_config();
+    let cfg = match resolve_for_verb(verb, rest) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("ghax: {err}");
+            return EXIT_NOT_ATTACHED;
+        }
+    };
     // `--trace` is global: pull it out before any per-verb parser sees it, so
     // `ghax click --trace @e3` can't read "@e3" as the flag's value. Tokens
     // after a `--` terminator are values and stay put (args::take_trace).
@@ -46,21 +52,77 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
     }
 }
 
+/// Verbs that never talk to a daemon, so discovery (and its ambiguity /
+/// unreadable-registry errors) has no business running for them: `diff-state`
+/// compares two files on disk, and plain `version` prints the CLI banner
+/// (only `version --full` looks for a daemon). `help`/`--help`/`--version`
+/// return in main.rs before dispatch. Every other verb in `dispatch_inner`
+/// calls `require_daemon` or reads daemon state.
+fn is_local_only(verb: &str, rest: &[String]) -> bool {
+    match verb {
+        "diff-state" => true,
+        "version" => !args::parse(rest).flags.contains_key("full"),
+        _ => false,
+    }
+}
+
+/// Which state file a verb talks to. `attach`/`restart` never adopt another
+/// directory's daemon (they'd pair with it instead of starting their own), and
+/// `detach` never stops one it wasn't pointed at. Local-only verbs never look
+/// for a daemon. Everything else goes through discovery (state.rs
+/// `resolve_config_for_use`).
+fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
+    if is_local_only(verb, rest) {
+        return Ok(state::resolve_config());
+    }
+    match verb {
+        "attach" | "restart" | "detach" | "review" | "ship" | "update" | "shell" => {
+            Ok(state::resolve_config())
+        }
+        // `ghax version --full` must work with no daemon at all; an ambiguous
+        // registry only costs it the daemon half.
+        "version" => Ok(state::resolve_config_for_use().unwrap_or_else(|err| {
+            eprintln!("ghax: {err}");
+            state::resolve_config()
+        })),
+        _ => state::resolve_config_for_use(),
+    }
+}
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn local_only_verbs_skip_discovery() {
+        assert!(is_local_only("diff-state", &v(&["a.json", "b.json"])));
+        assert!(is_local_only("version", &v(&[])));
+        assert!(is_local_only("version", &v(&["--json"])));
+        assert!(!is_local_only("version", &v(&["--full"])));
+        assert!(!is_local_only("tabs", &v(&[])));
+        assert!(!is_local_only("status", &v(&[])));
+    }
+}
+
 fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
     match verb {
         "attach" => return attach::cmd_attach(&args::parse(rest), cfg),
         "detach" => return attach::cmd_detach(cfg),
         "restart" => return attach::cmd_restart(&args::parse(rest), cfg),
         "bridge" => return crate::bridge::cmd_bridge(cfg, rest),
-        "status" => return small::cmd_status(rest),
-        "pair" => return small::cmd_pair(rest),
+        "status" => return small::cmd_status(cfg, rest),
+        "pair" => return small::cmd_pair(cfg, rest),
         "diff-state" => return small::cmd_diff_state(rest),
-        "chain" => return small::cmd_chain(rest),
-        "batch" => return small::cmd_batch(rest),
-        "replay" => return small::cmd_replay(rest),
-        "gif" => return small::cmd_gif(rest),
-        "qa" => return qa::cmd_qa(&args::parse(rest)),
-        "canary" => return canary::cmd_canary(&args::parse(rest)),
+        "chain" => return small::cmd_chain(cfg, rest),
+        "batch" => return small::cmd_batch(cfg, rest),
+        "replay" => return small::cmd_replay(cfg, rest),
+        "gif" => return small::cmd_gif(cfg, rest),
+        "qa" => return qa::cmd_qa(cfg, &args::parse(rest)),
+        "canary" => return canary::cmd_canary(cfg, &args::parse(rest)),
         "review" => return review::cmd_review(&args::parse(rest)),
         "ship" => return ship::cmd_ship(&args::parse(rest)),
         "update" => return update::cmd_update(&args::parse(rest)),

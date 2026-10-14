@@ -93,7 +93,9 @@ this.
 | Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (cookies, storage, viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
 | Bridge connected but `goto`/commands return "Cannot attach to this target" | The controlled tab landed on a privileged page (`chrome://`, `edge://`, cert-error/`chrome-error://` interstitial) — `chrome.debugger` can't attach there. `goto` self-recovers via `chrome.tabs.update`; if stuck, `ghax bridge control --active` after navigating the tab to a normal page. |
 | A scratch (`--user-data-dir`) Edge is the only Edge running and the user says extensions/sign-ins "vanished" | Dock-icon hijack, **not** data loss — check `ps aux | grep -i "Microsoft Edge" \| grep user-data-dir`; make sure their normal (no-flags) Edge is also running. |
-| Two bridge extensions competing (e.g. real Edge + a test scratch Edge both on `:9223`) | The bridge accepts one connection, latest-wins — isolate a test instance on a different `--bridge-port` and pin the test extension's `DEFAULT_PORT` to match. |
+| `attach --extension` exits with `BRIDGE_AMBIGUOUS` | More than one browser (or profile) has the bridge extension loaded and nothing said which to drive. Re-run with `--browser edge\|chrome\|<label>`, or keep the daemon and `ghax bridge use <id\|browser\|label>`. Never pick one at random: ask the user which browser if it isn't obvious. |
+| `attach --extension` exits with `BRIDGE_NO_CANDIDATE` | Browsers connected but none matches `--browser` by the end of the attach timeout (attach keeps waiting until then). The error lists what it saw; fix the filter, or wait for the right browser (the daemon keeps running and binds it when it connects). |
+| A command says "no daemon here, using the one attached from <dir>" | Expected: this cwd has no daemon, exactly one is registered in `~/.ghax/daemons/`, and ghax used it. If that's the wrong one, set the printed `GHAX_STATE_FILE`. With several running, the error lists each one's `GHAX_STATE_FILE`; set one, don't guess. |
 
 So there are two lanes; pick by what the task needs.
 

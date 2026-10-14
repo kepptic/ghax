@@ -1591,10 +1591,23 @@ fn wait_for_extension(
         .timeout(Duration::from_millis(1500))
         .build()?;
     let url = format!("http://127.0.0.1:{port}/bridge-status");
+    // A no-candidate window closing is not final: the matching browser may
+    // still connect and bind. Remember the latest report and surface it only
+    // when the normal timeout ends. Ambiguity cannot fix itself: fail now.
+    let mut no_candidate: Option<String> = None;
     loop {
         if let Ok(resp) = client.get(&url).send() {
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
+                    if let Some(msg) = selection_failure(&body) {
+                        if selection_state(&body) == Some("no-candidate") {
+                            no_candidate = Some(msg);
+                        } else {
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                    } else {
+                        no_candidate = None;
+                    }
                     if body.get("connected").and_then(|v| v.as_bool()) == Some(true) {
                         let controlled = body.get("controlledTabId").and_then(|v| v.as_i64());
                         // With --control-active, don't declare success until
@@ -1619,6 +1632,9 @@ fn wait_for_extension(
             }
         }
         if Instant::now() >= deadline {
+            if let Some(msg) = no_candidate {
+                return Err(anyhow::anyhow!(msg));
+            }
             let extra = if require_control {
                 "\n  (--control-active) The extension connected but never reported a controlled tab. \
                  Make sure a normal tab is focused (not edge://extensions itself)."
@@ -1634,6 +1650,87 @@ fn wait_for_extension(
         }
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+fn selection_state(body: &serde_json::Value) -> Option<&str> {
+    body.get("selection")?.get("state")?.as_str()
+}
+
+/// `/bridge-status` `selection` → the attach error for a first-bind that
+/// refused to guess (plan 11, phase 1), or None while it's still open or bound.
+/// One row per instance the daemon saw: browser · label · instanceId · port.
+fn selection_failure(body: &serde_json::Value) -> Option<String> {
+    let sel = body.get("selection")?;
+    let state = sel.get("state").and_then(|v| v.as_str())?;
+    if state != "ambiguous" && state != "no-candidate" {
+        return None;
+    }
+    let filter = sel.get("filter").and_then(|v| v.as_str());
+    let instances = sel
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let text = |i: &serde_json::Value, k: &str| -> String {
+        match i.get(k).and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "-".to_string(),
+        }
+    };
+    let rows: Vec<String> = instances
+        .iter()
+        // An ambiguous pick lists only the browsers that tied; no-candidate
+        // lists everything seen, since none of it matched.
+        .filter(|i| {
+            state != "ambiguous" || i.get("matches").and_then(|v| v.as_bool()) == Some(true)
+        })
+        .map(|i| {
+            let port = i.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+            let gone = if i.get("connected").and_then(|v| v.as_bool()) == Some(false) {
+                "  (disconnected)"
+            } else {
+                ""
+            };
+            format!(
+                "  {} · {} · {} · :{port}{gone}",
+                text(i, "browser"),
+                text(i, "label"),
+                text(i, "instanceId")
+            )
+        })
+        .collect();
+    let list = if rows.is_empty() {
+        "  (none)".to_string()
+    } else {
+        rows.join("\n")
+    };
+    Some(if state == "ambiguous" {
+        let head = match filter {
+            Some(f) => format!(
+                "BRIDGE_AMBIGUOUS: {} browsers match --browser {f}; give each a distinct label in the ghax bridge popup:",
+                rows.len()
+            ),
+            None => format!(
+                "BRIDGE_AMBIGUOUS: {} browsers connected and no --browser picks one:",
+                rows.len()
+            ),
+        };
+        format!(
+            "{head}\n{list}\n  Fix: `ghax detach && ghax attach --extension --browser <browser|label>`, \
+             or keep this daemon and run `ghax bridge use <instanceId|browser|label>`."
+        )
+    } else {
+        let head = match filter {
+            Some(f) => {
+                format!("BRIDGE_NO_CANDIDATE: no connected browser matches --browser {f}. Seen:")
+            }
+            None => "BRIDGE_NO_CANDIDATE: no connected browser. Seen:".to_string(),
+        };
+        format!(
+            "{head}\n{list}\n  Waited the full attach timeout for a matching browser. The daemon is still running \
+             and binds the first matching browser that connects. `ghax detach` stops it."
+        )
+    })
 }
 
 /// Best-effort discovery of the `extension/` directory to tell the user
@@ -1690,6 +1787,7 @@ pub fn cmd_detach(cfg: &Config) -> Result<i32> {
     let state = match state::read_state(cfg) {
         None => {
             println!("not attached");
+            print_registered_daemons_hint();
             return Ok(EXIT_OK);
         }
         Some(s) => s,
@@ -1731,6 +1829,29 @@ pub fn cmd_detach(cfg: &Config) -> Result<i32> {
     clear_state(cfg);
     println!("detached");
     Ok(EXIT_OK)
+}
+
+/// `detach` never stops a daemon it wasn't pointed at, but saying "not
+/// attached" while another directory's daemon is running is how people end up
+/// with two. Name them and the exact env var that targets each.
+fn print_registered_daemons_hint() {
+    let live = state::registry_dir()
+        .map(|dir| state::live_registered_daemons(&dir))
+        .unwrap_or_default();
+    if live.is_empty() {
+        return;
+    }
+    eprintln!(
+        "ghax: {} daemon(s) attached from elsewhere. To stop one:",
+        live.len()
+    );
+    for e in &live {
+        eprintln!(
+            "  GHAX_STATE_FILE={} ghax detach   ({})",
+            e.state_file.display(),
+            e.describe()
+        );
+    }
 }
 
 /// `ghax restart` — mirror of `cmdRestart` in cli.ts.
@@ -1779,6 +1900,121 @@ mod tests {
     fn bridge_port_from_state_rejects_a_non_bridge_url() {
         let state = state_with_browser_url("http://127.0.0.1:9222");
         assert_eq!(bridge_port_from_state(&state), None);
+    }
+
+    #[test]
+    fn selection_failure_lists_tied_browsers_when_ambiguous() {
+        let body = serde_json::json!({ "selection": {
+            "state": "ambiguous", "filter": null,
+            "instances": [
+                { "instanceId": "aaa111", "browser": "edge", "label": "Work", "port": 9223, "connected": true, "matches": true },
+                { "instanceId": "bbb222", "browser": "chrome", "label": "", "port": 9223, "connected": true, "matches": true },
+            ],
+        }});
+        let msg = selection_failure(&body).expect("ambiguous must fail attach");
+        assert!(
+            msg.starts_with("BRIDGE_AMBIGUOUS: 2 browsers connected"),
+            "{msg}"
+        );
+        assert!(msg.contains("edge · Work · aaa111 · :9223"), "{msg}");
+        assert!(msg.contains("chrome · - · bbb222 · :9223"), "{msg}");
+        assert!(msg.contains("ghax bridge use"), "{msg}");
+    }
+
+    #[test]
+    fn selection_failure_names_what_was_seen_when_nothing_matches() {
+        let body = serde_json::json!({ "selection": {
+            "state": "no-candidate", "filter": "edge",
+            "instances": [
+                { "instanceId": "ccc333", "browser": "chrome", "label": "", "port": 9224, "connected": true, "matches": false },
+            ],
+        }});
+        let msg = selection_failure(&body).expect("no-candidate must fail attach");
+        assert!(msg.contains("matches --browser edge"), "{msg}");
+        assert!(msg.contains("chrome · - · ccc333 · :9224"), "{msg}");
+    }
+
+    /// Serve `/bridge-status` bodies from `body_for(elapsed)` on a loopback
+    /// port until the process ends; returns the port.
+    fn serve_bridge_status(
+        body_for: impl Fn(Duration) -> String + Send + 'static,
+    ) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t0 = Instant::now();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = body_for(t0.elapsed());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        port
+    }
+
+    fn no_candidate_body() -> String {
+        serde_json::json!({ "connected": false, "selection": {
+            "state": "no-candidate", "filter": "edge",
+            "instances": [{ "instanceId": "ccc333", "browser": "chrome", "label": "", "port": 9224, "connected": true, "matches": false }],
+        }})
+        .to_string()
+    }
+
+    #[test]
+    fn no_candidate_keeps_waiting_until_the_timeout_then_reports() {
+        let port = serve_bridge_status(|_| no_candidate_body());
+        let t0 = Instant::now();
+        let err = wait_for_extension(port, 9223, Duration::from_millis(1200), false)
+            .expect_err("nothing ever matches");
+        assert!(t0.elapsed() >= Duration::from_millis(1200), "returned early: {:?}", t0.elapsed());
+        let msg = err.to_string();
+        assert!(msg.contains("BRIDGE_NO_CANDIDATE"), "{msg}");
+        assert!(msg.contains("chrome · - · ccc333"), "{msg}");
+    }
+
+    #[test]
+    fn no_candidate_then_a_match_connects_before_the_timeout() {
+        let port = serve_bridge_status(|elapsed| {
+            if elapsed < Duration::from_millis(500) {
+                no_candidate_body()
+            } else {
+                serde_json::json!({ "connected": true, "extensionInfo": { "agent": "edge", "version": "1.0" } })
+                    .to_string()
+            }
+        });
+        let (info, _) = wait_for_extension(port, 9223, Duration::from_secs(5), false)
+            .expect("a late match must bind, not fail");
+        assert_eq!(info.map(|i| i.0), Some("edge".to_string()));
+    }
+
+    #[test]
+    fn ambiguous_still_fails_immediately() {
+        let port = serve_bridge_status(|_| {
+            serde_json::json!({ "connected": false, "selection": { "state": "ambiguous", "instances": [] } })
+                .to_string()
+        });
+        let t0 = Instant::now();
+        let err = wait_for_extension(port, 9223, Duration::from_secs(30), false).unwrap_err();
+        assert!(t0.elapsed() < Duration::from_secs(5), "should not wait: {:?}", t0.elapsed());
+        assert!(err.to_string().contains("BRIDGE_AMBIGUOUS"));
+    }
+
+    #[test]
+    fn selection_failure_is_none_while_settling_or_bound() {
+        for state in ["idle", "settling", "bound"] {
+            let body = serde_json::json!({ "selection": { "state": state } });
+            assert!(selection_failure(&body).is_none(), "{state}");
+        }
+        // A pre-phase-1 daemon has no `selection` at all.
+        assert!(selection_failure(&serde_json::json!({ "connected": false })).is_none());
     }
 
     #[test]

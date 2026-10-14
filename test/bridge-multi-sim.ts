@@ -30,6 +30,9 @@ const root = path.resolve(here, '..');
 
 const GRACE_MS = 400;
 const LIVENESS_MS = 600;
+/** One browser per daemon here, so first-hello-wins is the behaviour under
+ * test; the settle window is bridge-sim's business. */
+const SETTLE_MS = 0;
 /** Must match LEGACY_FALLBACK_MS in extension/background.js. */
 const LEGACY_FALLBACK_MS = 1000;
 
@@ -426,8 +429,8 @@ async function main(): Promise<void> {
 
   await test('two daemons on one base port land on adjacent ports', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     try {
       assert(a.port === base, `first daemon should take the base port, got ${a.port}`);
       assert(b.port === base + 1, `second daemon should take the next port, got ${b.port}`);
@@ -442,7 +445,7 @@ async function main(): Promise<void> {
   // the user's carefully-configured extension would dial an empty port.
   await test('an EXPLICIT port never scans — it binds or it errors', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     try {
       let caught: any;
       try {
@@ -466,11 +469,11 @@ async function main(): Promise<void> {
     const bridges: Bridge[] = [];
     try {
       for (let i = 0; i < BRIDGE_PORT_RANGE; i++) {
-        bridges.push(await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS }));
+        bridges.push(await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS }));
       }
       let caught: any;
       try {
-        await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+        await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
       } catch (err) {
         caught = err;
       }
@@ -504,8 +507,8 @@ async function main(): Promise<void> {
 
   await test('one extension, two daemons: each binds independently', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       const ca = await ext.connect(a.port);
@@ -537,8 +540,8 @@ async function main(): Promise<void> {
 
   await test('a tab owned by another agent is refused with a fix-it message', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -581,8 +584,8 @@ async function main(): Promise<void> {
   // eviction — with no operator action needed.
   await test('reload broadcasts to every agent sharing the browser; each reclaims its own tab', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       const ca = await ext.connect(a.port);
@@ -618,8 +621,8 @@ async function main(): Promise<void> {
 
   await test('stopping releases the tab so the other agent can take it', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -640,8 +643,8 @@ async function main(): Promise<void> {
 
   await test('list-tabs reports which agent owns each tab', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -672,8 +675,8 @@ async function main(): Promise<void> {
 
   await test('a debugger event for one agent\'s tab reaches only that daemon', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     const seenA: string[] = [];
     const seenB: string[] = [];
@@ -705,8 +708,8 @@ async function main(): Promise<void> {
 
   await test('control-active is refused when the focused tab is owned by another agent', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -738,8 +741,8 @@ async function main(): Promise<void> {
 
   await test('a refused switch leaves an already-controlling agent on its own tab', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -770,8 +773,8 @@ async function main(): Promise<void> {
 
   await test('new-window from two agents lands each on its own distinct tab', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       await ext.connect(a.port);
@@ -800,8 +803,8 @@ async function main(): Promise<void> {
 
   await test('a legacy single-port extension still works when a second daemon has scanned past it', async () => {
     const base = reserveBase();
-    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const a = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const b = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       assert(b.port === a.port + 1, `second daemon should have landed on ${a.port + 1}, got ${b.port}`);
@@ -861,7 +864,7 @@ async function main(): Promise<void> {
   // would silently inherit the previous agent's tab — and drive it.
   await test('a new daemon on a freed port does not inherit the previous agent\'s tab', async () => {
     const base = reserveBase();
-    const first = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const first = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     let second: Bridge | null = null;
     try {
@@ -876,7 +879,7 @@ async function main(): Promise<void> {
       await sleep(60);
       assert(conn.controlledTabId === 1, 'the extension keeps its tab when the daemon exits');
 
-      second = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+      second = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
       assert(second.port === first.port, `the freed port should be reused, got ${second.port}`);
       await conn.reopen();
       await until(() => conn.role === 'bound', 'agent B to bind on the reused port');
@@ -896,7 +899,7 @@ async function main(): Promise<void> {
 
   await test('the SAME daemon returning re-adopts its tab and reports it', async () => {
     const base = reserveBase();
-    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       const conn = await ext.connect(bridge.port);
@@ -925,8 +928,8 @@ async function main(): Promise<void> {
   // other agents that browser is legitimately driving.
   await test('a parked connection refuses control-tab without touching ownership', async () => {
     const base = reserveBase();
-    const x = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const y = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const x = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const y = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const browserA = new FakeExtension();
     const browserB = new FakeExtension();
     try {
@@ -968,8 +971,8 @@ async function main(): Promise<void> {
   // one (CLAUDE.md invariant 3) — silently.
   await test('a switch that cannot attach is a no-op, not a half-move', async () => {
     const base = reserveBase();
-    const x = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
-    const y = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const x = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
+    const y = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const ext = new FakeExtension();
     try {
       const cx = await ext.connect(x.port, 'inst-x');
@@ -1006,7 +1009,7 @@ async function main(): Promise<void> {
   // service-worker eviction was an opportunity for another install to seize it.
   await test('a rival parks during the grace window and binds only after it expires', async () => {
     const base = reserveBase();
-    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const browserA = new FakeExtension();
     const browserB = new FakeExtension();
     try {
@@ -1036,7 +1039,7 @@ async function main(): Promise<void> {
   // id alone let ANY connected peer answer a request it never received.
   await test('a control-ack from another peer cannot answer the bound peer\'s request', async () => {
     const base = reserveBase();
-    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS });
+    const bridge = await Bridge.create(base, () => undefined, { graceMs: GRACE_MS, livenessMs: LIVENESS_MS, settleMs: SETTLE_MS });
     const browserA = new FakeExtension();
     const browserB = new FakeExtension();
     try {

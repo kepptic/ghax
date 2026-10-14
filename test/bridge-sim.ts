@@ -20,6 +20,10 @@
  */
 
 import { WebSocket } from 'ws';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { registerDaemon } from '../src/config';
 import {
   Bridge,
   BridgeInterrupted,
@@ -259,13 +263,16 @@ class FakeExt {
 let nextPort = 19400;
 async function withBridge(
   fn: (b: Bridge, port: number, logs: string[]) => Promise<void>,
-  extraOpts: { pairCode?: string } = {},
+  extraOpts: { pairCode?: string; settleMs?: number } = {},
 ): Promise<void> {
   const port = nextPort++;
   const logs: string[] = [];
   const bridge = new Bridge(port, (m) => logs.push(m), {
     graceMs: GRACE_MS,
     livenessMs: LIVENESS_MS,
+    // 0 = first hello binds, which most checks here assume. The settle-window
+    // checks pass their own.
+    settleMs: 0,
     ...extraOpts,
   });
   try {
@@ -1079,6 +1086,101 @@ async function main(): Promise<void> {
     });
   });
 
+  // ─── First-bind selection (plan 11, phase 1) ────────────────────
+  // Two browsers dialling one daemon used to race: first hello won. Now the
+  // first hello opens a settle window and the daemon binds only when exactly
+  // one connected instance matches.
+  const SETTLE = 150;
+
+  await test('settle: two browsers, no --browser → BRIDGE_AMBIGUOUS, nothing binds', async () => {
+    await withBridge(async (bridge, port) => {
+      const edge = new FakeExt(port, 'inst-edge', 'edge', 'Work');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome');
+      await edge.connect();
+      await chrome.connect();
+      await until(() => edge.role === 'parked' && chrome.role === 'parked', 'both park while settling');
+      assert(bridge.selection.state === 'settling', `selection ${bridge.selection.state}`);
+      await until(() => bridge.selection.state !== 'settling', 'settle window to close');
+      const sel = bridge.selection;
+      assert(sel.state === 'ambiguous' && sel.code === 'BRIDGE_AMBIGUOUS', `got ${JSON.stringify(sel)}`);
+      assert(sel.instances?.length === 2, 'both instances listed');
+      assert(/edge · Work · inst-edge · :\d+/.test(sel.message ?? ''), `message lists edge: ${sel.message}`);
+      assert(/chrome · - · inst-chrome/.test(sel.message ?? ''), `message lists chrome: ${sel.message}`);
+      assert(!bridge.connected && bridge.state === 'UNBOUND', `must not bind, state ${bridge.state}`);
+      assert(edge.role === 'parked' && chrome.role === 'parked', 'neither may be promoted');
+      // A late hello while ambiguous parks too: [0] is never taken by arrival.
+      const late = new FakeExt(port, 'inst-late', 'edge');
+      await late.connect();
+      await until(() => late.role !== null, 'late disposition');
+      assert(late.role === 'parked' && bridge.state === 'UNBOUND', 'late hello must park while ambiguous');
+      // The error a verb sees names the ambiguity, not "load the extension".
+      let caught: any = null;
+      try { await bridge.send('Runtime.evaluate', {}); } catch (e) { caught = e; }
+      assert(/BRIDGE_AMBIGUOUS/.test(String(caught?.message)), `send error: ${caught?.message}`);
+      // `bridge use` still resolves it.
+      await bridge.use('chrome');
+      await until(() => chrome.role === 'bound', 'use promotes chrome');
+      assert((bridge.selection.state as string) === 'bound', `selection after use: ${bridge.selection.state}`);
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: --browser edge binds Edge, Chrome stays parked', async () => {
+    await withBridge(async (bridge, port) => {
+      bridge.setBindFilter('edge');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome');
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      // Chrome first: under first-hello-wins with no filter it would have won.
+      await chrome.connect();
+      await edge.connect();
+      await until(() => edge.role === 'bound', 'edge promoted after settle');
+      assert(chrome.role === 'parked', `chrome should stay parked, got ${chrome.role}`);
+      assert(edge.roleHistory.join(',') === 'parked,bound', `edge history ${edge.roleHistory}`);
+      assert(bridge.selection.state === 'bound', `selection ${bridge.selection.state}`);
+      await bridge.send('Runtime.evaluate', { expression: '1' });
+      assert(edge.received.length === 1 && chrome.received.length === 0, 'CDP goes to edge only');
+      // Late hellos after a bind keep the old park behaviour.
+      const late = new FakeExt(port, 'inst-edge-2', 'edge');
+      await late.connect();
+      await until(() => late.role !== null, 'late disposition');
+      assert(late.role === 'parked' && edge.role === 'bound', 'a late match parks; the bound one keeps the session');
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: nothing matches --browser → BRIDGE_NO_CANDIDATE naming what was seen', async () => {
+    await withBridge(async (bridge, port) => {
+      bridge.setBindFilter('firefox');
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      const chrome = new FakeExt(port, 'inst-chrome', 'chrome', 'Personal');
+      await edge.connect();
+      await chrome.connect();
+      await until(() => bridge.selection.state === 'no-candidate', 'window to close with no candidate');
+      const sel = bridge.selection;
+      assert(sel.code === 'BRIDGE_NO_CANDIDATE', `code ${sel.code}`);
+      assert(sel.filter === 'firefox', `filter ${sel.filter}`);
+      assert(sel.instances?.length === 2 && sel.instances.every((i) => !i.matches), 'both seen, neither matches');
+      assert(/inst-edge/.test(sel.message ?? '') && /chrome · Personal · inst-chrome/.test(sel.message ?? ''), `message: ${sel.message}`);
+      assert(bridge.state === 'UNBOUND', 'nothing binds');
+      // A matching browser arriving later reopens the window and binds.
+      const ff = new FakeExt(port, 'inst-ff', 'firefox');
+      await ff.connect();
+      await until(() => ff.role === 'bound', 'late match binds after its own settle');
+      assert(edge.role === 'parked' && chrome.role === 'parked', 'non-matching stay parked');
+    }, { settleMs: SETTLE });
+  });
+
+  await test('settle: a single browser binds once the window closes', async () => {
+    await withBridge(async (bridge, port) => {
+      const edge = new FakeExt(port, 'inst-edge', 'edge');
+      const t0 = Date.now();
+      await edge.connect();
+      await until(() => edge.role === 'parked', 'parks first');
+      await until(() => bridge.connected, 'binds after settle');
+      assert(Date.now() - t0 >= SETTLE - 20, `bound too early (${Date.now() - t0}ms)`);
+      // The bridge flips to connected before the fake has read the role frame.
+      await until(() => edge.role === 'bound', 'edge to receive its bound role');
+    }, { settleMs: SETTLE });
+  });
+
   await test('bridge.use rebinds over live sockets (no disconnect) and clears refs', async () => {
     await withBridge(async (bridge, port) => {
       const a = new FakeExt(port, 'inst-a', 'edge');
@@ -1101,6 +1203,42 @@ async function main(): Promise<void> {
       assert(controlledEmitted, 'rebind must emit controlled so refs clear');
       assert(a.closes === 0 && b.closes === 0, 'rebind must not disconnect either peer');
     });
+  });
+
+  await test('use(): ambiguous selector refuses and lists every match; a unique id prefix binds', async () => {
+    await withBridge(async (bridge, port) => {
+      const a = new FakeExt(port, 'aaa111-edge', 'edge', 'Work');
+      await a.connect();
+      await until(() => a.role === 'bound', 'a bound');
+      const b = new FakeExt(port, 'bbb222-edge', 'edge', 'Home');
+      await b.connect();
+      await until(() => b.role === 'parked', 'b parked');
+      let caught: any = null;
+      try { await bridge.use('edge'); } catch (e) { caught = e; }
+      const msg = String(caught?.message);
+      assert(caught && /matches 2 instances/.test(msg), `use('edge') must refuse: ${msg}`);
+      assert(/edge · Work · aaa111-edge · :/.test(msg) && /edge · Home · bbb222-edge · :/.test(msg), `must list both: ${msg}`);
+      assert(a.role === 'bound' && (b.role as string) === 'parked', 'a refusal must not rebind');
+      await bridge.use('bbb');
+      await until(() => b.role === 'bound', 'unique id prefix binds');
+      assert((a.role as string) === 'parked', `a demoted, got ${a.role}`);
+    });
+  });
+
+  await test('registerDaemon writes via temp+rename: the visible file is never written in place', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-reg-'));
+    const target = path.join(dir, '4242.json');
+    const written: string[] = [];
+    registerDaemon(
+      { pid: 4242, port: 1, stateFile: '/x', cwd: '/x', browserKind: 'edge', bridgePort: null, startedAt: 'now' },
+      dir,
+      (f, data, opts) => { written.push(f); fs.writeFileSync(f, data, opts); },
+    );
+    assert(!written.includes(target), `entry written directly to ${target}`);
+    assert(written.length === 1 && !written[0].endsWith('.json'), `temp name ${written}`);
+    assert(JSON.parse(fs.readFileSync(target, 'utf8')).pid === 4242, 'final file parses');
+    assert(fs.readdirSync(dir).join() === '4242.json', `leftovers: ${fs.readdirSync(dir)}`);
+    fs.rmSync(dir, { recursive: true });
   });
 
   await test('same instance reconnecting is a resume, not a rival', async () => {
