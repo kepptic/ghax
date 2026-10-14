@@ -25,6 +25,10 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BridgeInterrupted, BRIDGE_PORT_RANGE } from '../src/bridge';
 import { PeerRegistry } from '../src/bridge-peers';
+import { CircularBuffer, type ConsoleEntry, type NetworkEntry } from '../src/buffers';
+import {
+  activePeerState, pickMainFrameContext, wireBridgePageEvents, type BridgePageSink,
+} from '../src/bridge-page-state';
 import {
   bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
 } from '../src/tab-identity';
@@ -1664,6 +1668,122 @@ async function main(): Promise<void> {
       bridge.close();
       await sleep(20);
     }
+  });
+
+  // ─── Per-peer page state (plan 12, brief B) ───
+
+  /** Two bound peers (A active on tab 1, B on tab 2) wired the way the daemon wires them. */
+  async function withPageState(
+    fn: (h: {
+      bridge: Bridge; a: FakeConnection; b: FakeConnection; sink: BridgePageSink; refClears: () => number;
+    }) => Promise<void>,
+  ): Promise<void> {
+    await withBindAll(async (bridge, [edge, chrome]) => {
+      let clears = 0;
+      const sink: BridgePageSink = {
+        bridgePeers: new Map(),
+        consoleBuf: new CircularBuffer<ConsoleEntry>(100),
+        networkBuf: new CircularBuffer<NetworkEntry>(100),
+        consoleListeners: new Set(),
+        networkListeners: new Set(),
+        captureBodiesRe: null,
+      };
+      wireBridgePageEvents(bridge, sink, {
+        tabIdOf: (id, tab) => `${id}:${tab}`,
+        onActiveMainFrameNavigated: () => { clears++; },
+      });
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      await until(() => b.role === 'bound', 'B to bind');
+      a.send({ type: 'controlled', tabId: 1 });
+      b.send({ type: 'controlled', tabId: 2 });
+      // A sentinel per peer, so the controlled frames above have landed.
+      a.send({ type: 'event', method: 'Page.loadEventFired', params: {} });
+      b.send({ type: 'event', method: 'Page.loadEventFired', params: {} });
+      await until(() => sink.bridgePeers.size === 2, 'both peers to have state');
+      assert(bridge.boundInstanceId === 'inst-a', 'A is active');
+      await fn({ bridge, a, b, sink, refClears: () => clears });
+    });
+  }
+
+  const ctxCreated = (frameId: string, uniqueId: string, id: number) => ({
+    type: 'event', method: 'Runtime.executionContextCreated',
+    params: { context: { id, uniqueId, auxData: { isDefault: true, frameId } } },
+  });
+
+  await test('all: both peers\' console events land in the buffer, each tagged with its tab id', async () => {
+    await withPageState(async ({ a, b, sink }) => {
+      a.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'log', args: [{ value: 'from-a' }] } });
+      b.send({ type: 'event', method: 'Runtime.consoleAPICalled', params: { type: 'error', args: [{ value: 'from-b' }] } });
+      b.send({ type: 'event', method: 'Network.requestWillBeSent', params: { requestId: 'r1', request: { url: 'https://b.test/' } } });
+      await until(() => sink.consoleBuf.toArray().length === 2 && sink.networkBuf.toArray().length === 1, 'entries to arrive');
+      const byText = Object.fromEntries(sink.consoleBuf.toArray().map((e) => [e.text, e.tabId]));
+      assert(byText['from-a'] === 'inst-a:1' && byText['from-b'] === 'inst-b:2', `console tags: ${JSON.stringify(byText)}`);
+      assert(sink.networkBuf.toArray()[0].tabId === 'inst-b:2', `network tag: ${sink.networkBuf.toArray()[0].tabId}`);
+    });
+  });
+
+  await test('all: a non-active peer\'s frameNavigated leaves refs and A\'s state alone; A\'s clears refs', async () => {
+    await withPageState(async ({ bridge, a, b, sink, refClears }) => {
+      a.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'A-main' } } });
+      a.send(ctxCreated('A-main', 'ctx-a', 1));
+      b.send({ type: 'event', method: 'Network.requestWillBeSent', params: { requestId: 'rb', request: { url: 'https://b.test/' } } });
+      await until(() => pickMainFrameContext(activePeerState(sink, bridge)) === 'ctx-a', 'A\'s context');
+      assert(refClears() === 1, `A's navigation clears refs once: ${refClears()}`);
+      assert(activePeerState(sink, bridge).networkRequests.size === 0, 'B\'s in-flight request is not A\'s');
+
+      b.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'B-main' } } });
+      b.send(ctxCreated('B-main', 'ctx-b', 1));
+      await until(() => sink.bridgePeers.get('inst-b')?.mainFrameId === 'B-main' && sink.bridgePeers.get('inst-b')!.contexts.size === 1, 'B\'s nav');
+      assert(refClears() === 1, `B's navigation must not clear refs: ${refClears()}`);
+      const stA = activePeerState(sink, bridge);
+      assert(stA.mainFrameId === 'A-main', `A's main frame intact: ${stA.mainFrameId}`);
+      // Same numeric context id on both peers: per-peer maps keep them apart.
+      assert(pickMainFrameContext(stA) === 'ctx-a', `A's context after B navigated: ${pickMainFrameContext(stA)}`);
+      b.send({ type: 'event', method: 'Runtime.executionContextsCleared', params: {} });
+      await until(() => sink.bridgePeers.get('inst-b')!.contexts.size === 0, 'B\'s contexts cleared');
+      assert(pickMainFrameContext(activePeerState(sink, bridge)) === 'ctx-a', 'B\'s clear does not reach A');
+
+      a.send({ type: 'event', method: 'Page.frameNavigated', params: { frame: { id: 'A-main' } } });
+      await until(() => refClears() === 2, 'A\'s second navigation to clear refs');
+    });
+  });
+
+  await test('all: a peer\'s disconnect drops only its state; boundInstanceId is null once the active peer expires', async () => {
+    await withPageState(async ({ bridge, a, b, sink }) => {
+      a.send(ctxCreated('A-main', 'ctx-a', 1));
+      await until(() => sink.bridgePeers.get('inst-a')!.contexts.size === 1, 'A\'s context');
+      b.close();
+      await until(() => !sink.bridgePeers.has('inst-b'), 'B\'s state to drop');
+      assert(sink.bridgePeers.get('inst-a')?.contexts.size === 1, 'A\'s state survives B\'s disconnect');
+
+      const expired: string[] = [];
+      bridge.on('expired', (id: string) => expired.push(id));
+      a.close();
+      await until(() => expired.includes('inst-a'), 'A to expire', GRACE_MS * 4);
+      assert(!sink.bridgePeers.has('inst-a'), 'A\'s state drops at expiry');
+      assert(bridge.boundInstanceId === null, `an expired active peer is not bound: ${bridge.boundInstanceId}`);
+    });
+  });
+
+  await test('all: joins and expiry-returns never count as ownership flapping', async () => {
+    await withBindAll(async (bridge, [edge, chrome], logs) => {
+      const a = await edge.connect(bridge.port, 'inst-a');
+      await until(() => a.role === 'bound', 'A to bind');
+      const b = await chrome.connect(bridge.port, 'inst-b');
+      const expired: string[] = [];
+      bridge.on('expired', (id: string) => expired.push(id));
+      for (let i = 0; i < 3; i++) {
+        await until(() => b.role === 'bound', 'B to bind');
+        b.close();
+        await until(() => expired.length === i + 1, 'B to expire', GRACE_MS * 4);
+        await b.reopen();
+      }
+      await until(() => b.role === 'bound', 'B to rejoin');
+      assert(!bridge.livelockSuspected, 'three expiry-returns under all tripped the livelock warning');
+      assert(!logs.some((l) => /flapping/.test(l)), `flapping logged: ${logs.filter((l) => /flapping/.test(l))}`);
+    });
   });
 
   console.log();

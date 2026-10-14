@@ -42,6 +42,9 @@ import { chromium, type Browser, type BrowserContext, type Page, type Locator, t
 import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
+import {
+  activePeerState, capBody, CAPTURABLE_CONTENT_TYPE_RE, pickMainFrameContext, wireBridgePageEvents, type PeerPageState,
+} from './bridge-page-state';
 import { SourceMapCache, resolveStack } from './source-maps';
 import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
@@ -154,21 +157,10 @@ interface Ctx {
   // snapshot. `batch` compares it to decide whether a ref step needs a
   // re-snapshot. Null whenever the ref map is cleared.
   lastSnapshotMarker: string | null;
-  bridgeNetworkRequests: Map<string, NetworkEntry>;
-  // Execution-context tracking (plan §2.5). `chrome.debugger` attaches to the
-  // tab's top-level target, so we only ever see the main frame — this is NOT
-  // frame selection. It exists to stop `Runtime.evaluate` landing on a
-  // document that navigation already destroyed: without a pinned context, a
-  // read issued around a navigation can execute against the OLD document (or
-  // fail with "Cannot find context with specified id"), which is one source
-  // of the intermittent nav-shell-only reads this phase targets.
-  bridgeMainFrameId: string | null;
-  // frameId → the frame's DEFAULT execution context. `uniqueId` is preferred
-  // over the numeric id, which Chromium reuses across navigations.
-  bridgeContexts: Map<string, { uniqueId: string; id: number }>;
-  // Timestamp of the last main-frame load event, so read verbs can tell
-  // "small page" from "page still settling" (suspicious-empty, §2.6).
-  bridgeLastLoadAt: number;
+  // Per bound browser: main frame, execution contexts, load timing and
+  // in-flight requests (plan 12, brief B). Keyed by instanceId; readers use
+  // the ACTIVE peer's via activePeerState(). See bridge-page-state.ts.
+  bridgePeers: Map<string, PeerPageState>;
   instrumented: WeakSet<Page>;
   startedAt: number;
   stateDir: string;
@@ -350,7 +342,6 @@ async function activePage(ctx: Ctx): Promise<Page> {
   return p;
 }
 
-const BODY_CAP_BYTES = 32 * 1024;
 // Cap concurrent body reads so a traffic burst doesn't blow memory —
 // each pending read buffers the full response before we truncate, and
 // large images/video matched by an overly-broad glob would pile up. 8
@@ -397,26 +388,6 @@ function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Respon
       })
       .finally(release);
   });
-}
-
-// Content-type gate shared by request- and response-body capture: only
-// capture bodies that are plausibly JSON/text (GraphQL mutations included
-// — most send `application/json`, but some servers reply/accept
-// `application/graphql`). Binary payloads (images, video, octet-stream)
-// are skipped even when the URL matches the glob.
-const CAPTURABLE_CONTENT_TYPE_RE = /json|text|javascript|xml|html|css|graphql/;
-
-// Apply the shared 32KB cap + truncation marker to a body string. Used by
-// both response and request capture so the two stay byte-for-byte
-// consistent.
-function capBody(body: string): { text: string; truncated: boolean } {
-  if (body.length > BODY_CAP_BYTES) {
-    return {
-      text: body.slice(0, BODY_CAP_BYTES) + `\n[truncated ${body.length - BODY_CAP_BYTES} bytes]`,
-      truncated: true,
-    };
-  }
-  return { text: body, truncated: false };
 }
 
 /**
@@ -537,180 +508,13 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   });
 }
 
-function remoteObjectText(value: unknown): string {
-  const obj = value as { value?: unknown; description?: string; unserializableValue?: string };
-  if (obj.value !== undefined) {
-    if (typeof obj.value === 'string') return obj.value;
-    try { return JSON.stringify(obj.value); } catch { return String(obj.value); }
-  }
-  return obj.unserializableValue ?? obj.description ?? '';
-}
-
-function bridgeTimestamp(raw: unknown): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return Date.now();
-  return n > 10_000_000_000 ? n : Math.round(n * 1000);
-}
-
-function bridgeHeaders(raw: unknown): Record<string, string> {
-  if (!raw || typeof raw !== 'object') return {};
-  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k.toLowerCase(), String(v)]));
-}
-
 function wireBridgeEvents(ctx: Ctx): void {
   const bridge = requireBridge(ctx);
-  // shortcut: another bound peer's events (console/network included) are
-  // DROPPED, because ctx holds one session's refs, frames, contexts and
-  // buffers; upgrade trigger: plan 12 brief B gives each peer its own state.
-  bridge.onActive('event', (ev: BridgeEvent) => {
-    const p = ev.params as any;
-    // ─── Execution-context bookkeeping (plan §2.5) ────────────
-    // Track, don't guess: knowing the live main-frame context is what stops
-    // a read from executing against a document navigation already replaced.
-    if (ev.method === 'Runtime.executionContextCreated') {
-      const c = p.context ?? {};
-      const aux = c.auxData ?? {};
-      // Only the frame's DEFAULT context (i.e. not an isolated world /
-      // content-script sandbox) sees the page's own JS state.
-      if (aux.isDefault && typeof aux.frameId === 'string' && typeof c.uniqueId === 'string') {
-        ctx.bridgeContexts.set(aux.frameId, { uniqueId: c.uniqueId, id: Number(c.id) });
-      }
-      return;
-    }
-    if (ev.method === 'Runtime.executionContextDestroyed') {
-      const goneUnique = typeof p.executionContextUniqueId === 'string' ? p.executionContextUniqueId : null;
-      const goneId = typeof p.executionContextId === 'number' ? p.executionContextId : null;
-      for (const [frameId, entry] of ctx.bridgeContexts) {
-        if ((goneUnique && entry.uniqueId === goneUnique) || (goneId !== null && entry.id === goneId)) {
-          ctx.bridgeContexts.delete(frameId);
-        }
-      }
-      return;
-    }
-    if (ev.method === 'Runtime.executionContextsCleared') {
-      ctx.bridgeContexts.clear();
-      return;
-    }
-    if (ev.method === 'Page.frameNavigated') {
-      const frame = p.frame ?? {};
-      // A main-frame navigation invalidates every context we knew about, and
-      // also every @ref: backend node ids belong to the old document.
-      if (typeof frame.id === 'string' && !frame.parentId) {
-        ctx.bridgeMainFrameId = frame.id;
-        ctx.bridgeContexts.clear();
-        clearSnapshotRefs(ctx);
-      }
-      return;
-    }
-    if (ev.method === 'Page.loadEventFired') {
-      ctx.bridgeLastLoadAt = Date.now();
-      return;
-    }
-    if (ev.method === 'Runtime.consoleAPICalled') {
-      const levels: Record<string, ConsoleEntry['level']> = {
-        log: 'log', info: 'info', warning: 'warn', error: 'error', debug: 'debug', verbose: 'debug', trace: 'trace', assert: 'error',
-      };
-      const frame = p.stackTrace?.callFrames?.[0];
-      const entry: ConsoleEntry = {
-        timestamp: bridgeTimestamp(p.timestamp),
-        level: levels[String(p.type)] ?? 'log',
-        text: Array.isArray(p.args) ? p.args.map(remoteObjectText).join(' ') : '',
-        ...(frame?.url ? { url: String(frame.url) } : {}),
-        source: 'tab',
-      };
-      ctx.consoleBuf.push(entry);
-      for (const listener of ctx.consoleListeners) listener(entry);
-      return;
-    }
-    if (ev.method === 'Runtime.exceptionThrown') {
-      const details = p.exceptionDetails ?? {};
-      const description = details.exception?.description ?? details.text ?? 'Uncaught exception';
-      const stack = parseStack(String(description));
-      const entry: ConsoleEntry = {
-        timestamp: bridgeTimestamp(p.timestamp),
-        level: 'error',
-        text: `[pageerror] ${String(details.exception?.description ?? details.text ?? 'Uncaught exception').split('\n')[0]}`,
-        ...(details.url ? { url: String(details.url) } : {}),
-        source: 'tab',
-        ...(stack.length > 0 ? { stack } : {}),
-      };
-      ctx.consoleBuf.push(entry);
-      for (const listener of ctx.consoleListeners) listener(entry);
-      return;
-    }
-    if (ev.method === 'Log.entryAdded') {
-      const logEntry = p.entry ?? {};
-      const rawLevel = String(logEntry.level ?? 'log');
-      const level: ConsoleEntry['level'] = rawLevel === 'warning' ? 'warn' :
-        (['log', 'info', 'warn', 'error', 'debug', 'trace'].includes(rawLevel) ? rawLevel : 'log') as ConsoleEntry['level'];
-      const entry: ConsoleEntry = {
-        timestamp: bridgeTimestamp(logEntry.timestamp),
-        level,
-        text: String(logEntry.text ?? ''),
-        ...(logEntry.url ? { url: String(logEntry.url) } : {}),
-        source: 'tab',
-      };
-      ctx.consoleBuf.push(entry);
-      for (const listener of ctx.consoleListeners) listener(entry);
-      return;
-    }
-    if (ev.method === 'Network.requestWillBeSent') {
-      const request = p.request ?? {};
-      const entry: NetworkEntry = {
-        timestamp: Date.now(),
-        method: String(request.method ?? 'GET'),
-        url: String(request.url ?? ''),
-        resourceType: p.type ? String(p.type).toLowerCase() : undefined,
-        requestHeaders: bridgeHeaders(request.headers),
-      };
-      if (request.postData !== undefined && ctx.captureBodiesRe?.test(entry.url)) {
-        const ct = entry.requestHeaders?.['content-type'] ?? '';
-        if (CAPTURABLE_CONTENT_TYPE_RE.test(ct)) {
-          const capped = capBody(String(request.postData));
-          entry.requestBody = capped.text;
-          if (capped.truncated) entry.requestBodyTruncated = true;
-        }
-      }
-      ctx.networkBuf.push(entry);
-      ctx.bridgeNetworkRequests.set(String(p.requestId), entry);
-      for (const listener of ctx.networkListeners) listener(entry);
-      return;
-    }
-    if (ev.method === 'Network.responseReceived') {
-      const entry = ctx.bridgeNetworkRequests.get(String(p.requestId));
-      if (!entry) return;
-      const response = p.response ?? {};
-      entry.status = Number(response.status ?? 0);
-      entry.statusText = String(response.statusText ?? '');
-      entry.responseHeaders = bridgeHeaders(response.headers);
-      entry.responseAt = Date.now();
-      entry.duration = entry.responseAt - entry.timestamp;
-      return;
-    }
-    if (ev.method === 'Network.loadingFinished' || ev.method === 'Network.loadingFailed') {
-      const requestId = String(p.requestId);
-      const entry = ctx.bridgeNetworkRequests.get(requestId);
-      if (entry) {
-        entry.responseAt ??= Date.now();
-        entry.duration ??= entry.responseAt - entry.timestamp;
-        if (ev.method === 'Network.loadingFinished' && typeof p.encodedDataLength === 'number') entry.size = p.encodedDataLength;
-        if (ev.method === 'Network.loadingFailed' && !entry.statusText) entry.statusText = String(p.errorText ?? 'failed');
-        if (
-          ev.method === 'Network.loadingFinished' &&
-          ctx.captureBodiesRe?.test(entry.url) &&
-          CAPTURABLE_CONTENT_TYPE_RE.test(entry.responseHeaders?.['content-type'] ?? '')
-        ) {
-          void bridge.send('Network.getResponseBody', { requestId }).then((bodyResult) => {
-            const body = bodyResult as { body?: string; base64Encoded?: boolean };
-            if (typeof body.body !== 'string' || body.base64Encoded) return;
-            const capped = capBody(body.body);
-            entry.responseBody = capped.text;
-            if (capped.truncated) entry.responseBodyTruncated = true;
-          }).catch(() => undefined);
-        }
-      }
-      ctx.bridgeNetworkRequests.delete(requestId);
-    }
+  wireBridgePageEvents(bridge, ctx, {
+    tabIdOf: (instanceId, chromeTabId) => bridgeTabId(ctx, chromeTabId, instanceId),
+    // A main-frame navigation kills every @ref: backend node ids belong to
+    // the old document.
+    onActiveMainFrameNavigated: () => clearSnapshotRefs(ctx),
   });
 }
 
@@ -720,16 +524,7 @@ function wireBridgeEvents(ctx: Ctx): void {
  * lagging by a few ms must never turn a valid read into an error.
  */
 async function mainFrameContextId(ctx: Ctx, waitMs = 2000): Promise<string | null> {
-  const pick = (): string | null => {
-    if (ctx.bridgeMainFrameId) {
-      const hit = ctx.bridgeContexts.get(ctx.bridgeMainFrameId);
-      if (hit) return hit.uniqueId;
-    }
-    // No main frame id yet (e.g. attached mid-session, before any
-    // frameNavigated). Exactly one tracked context is unambiguous.
-    if (ctx.bridgeContexts.size === 1) return [...ctx.bridgeContexts.values()][0].uniqueId;
-    return null;
-  };
+  const pick = (): string | null => pickMainFrameContext(activePeerState(ctx, requireBridge(ctx)));
   const immediate = pick();
   if (immediate) return immediate;
   const deadline = Date.now() + waitMs;
@@ -756,7 +551,7 @@ async function bridgeEval(ctx: Ctx, expression: string, timeoutMs?: number): Pro
   } catch (err) {
     if (!isStaleContextError(err)) throw err;
     // Re-announce every context, wait for the new main-frame default, retry.
-    ctx.bridgeContexts.clear();
+    activePeerState(ctx, bridge).contexts.clear();
     await bridge.send('Runtime.disable').catch(() => undefined);
     await bridge.send('Runtime.enable').catch(() => undefined);
     const fresh = await mainFrameContextId(ctx, 2000);
@@ -895,8 +690,9 @@ async function waitForStability(
  */
 function looksSuspiciouslyEmpty(ctx: Ctx, yieldSize: number, threshold: number): boolean {
   if (yieldSize >= threshold) return false;
-  if (ctx.bridgeNetworkRequests.size > 0) return true;              // requests in flight
-  if (ctx.bridgeLastLoadAt && Date.now() - ctx.bridgeLastLoadAt < 2000) return true; // just loaded
+  const st = activePeerState(ctx, requireBridge(ctx));
+  if (st.networkRequests.size > 0) return true;              // requests in flight
+  if (st.lastLoadAt && Date.now() - st.lastLoadAt < 2000) return true; // just loaded
   return false;
 }
 
@@ -1925,7 +1721,7 @@ register('bridge.use', async (ctx, args, opts) => {
   if (!selector) throw new Error('Usage: ghax bridge use <instance-id|browser|label>');
   const instance = await ctx.bridge.use(selector);
   clearSnapshotRefs(ctx);
-  ctx.bridgeNetworkRequests.clear();
+  activePeerState(ctx, ctx.bridge).networkRequests.clear();
   // A different browser means a different alias, so the active id changes
   // even when the chrome tab number happens to match.
   const controlled = ctx.bridge.controlledTabId;
@@ -3327,9 +3123,10 @@ register('wait', async (ctx, args, opts) => {
     if (opts.networkidle) {
       await bridge.send('Network.enable');
       const deadline = Date.now() + 30_000;
-      let idleSince = ctx.bridgeNetworkRequests.size === 0 ? Date.now() : 0;
+      const inFlight = () => activePeerState(ctx, bridge).networkRequests.size;
+      let idleSince = inFlight() === 0 ? Date.now() : 0;
       while (Date.now() < deadline) {
-        if (ctx.bridgeNetworkRequests.size === 0) {
+        if (inFlight() === 0) {
           if (!idleSince) idleSince = Date.now();
           if (Date.now() - idleSince >= 500) return { ok: true };
         } else {
@@ -4589,10 +4386,7 @@ async function main() {
     bridgeRefs: new Map(),
     refRegistry: new RefRegistry(),
     lastSnapshotMarker: null,
-    bridgeNetworkRequests: new Map(),
-    bridgeMainFrameId: null,
-    bridgeContexts: new Map(),
-    bridgeLastLoadAt: 0,
+    bridgePeers: new Map(),
     instrumented: new WeakSet<Page>(),
     startedAt: Date.now(),
     stateDir: cfg.stateDir,
@@ -4611,9 +4405,9 @@ async function main() {
     wireBridgeEvents(ctx);
     // Only the ACTIVE peer's tab changes are ours: a non-active peer's tab id
     // composed with the active alias would point at the wrong browser.
+    // (Per-peer page state resets in wireBridgePageEvents for every peer.)
     bridge.onActive('controlled', (tabId: number | null) => {
       clearSnapshotRefs(ctx);
-      ctx.bridgeNetworkRequests.clear();
       ctx.activePageId = tabId === null ? null : bridgeTabId(ctx, tabId);
       if (tabId !== null) void enableBridgeDomains(ctx);
     });

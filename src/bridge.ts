@@ -578,9 +578,13 @@ export class Bridge extends EventEmitter {
     return this.registry.aliasOf(instanceId);
   }
 
-  /** Identity of the active bound instance, or null when nothing is bound. */
+  /**
+   * Identity of the active bound instance, or null when nothing is bound.
+   * Under `all` an expired active peer leaves `bound` but not `activeId`, so
+   * the id alone would name a browser nobody drives.
+   */
   get boundInstanceId(): string | null {
-    return this.activeId;
+    return this.activeId && this.bound.has(this.activeId) ? this.activeId : null;
   }
 
   /** browser / profile / alias of one instance, for tab listings. */
@@ -977,7 +981,9 @@ export class Bridge extends EventEmitter {
     }
     const wasInterrupted = session.state !== 'BOUND';
     session.state = 'BOUND';
-    if (ownershipChanged && countBind) this.noteBindChange();
+    // Under `all` a new session never displaces another: a fresh hello or an
+    // expired peer returning is a join, not ownership flapping.
+    if (ownershipChanged && countBind && !this.bindAll) this.noteBindChange();
 
     this.rawSend(peer.ws, {
       type: via,
@@ -1436,9 +1442,9 @@ export class Bridge extends EventEmitter {
 
   /**
    * Subscribe to a session event, delivered only while it is about the ACTIVE
-   * peer. Daemon state (refs, main frame, contexts, buffers, active tab) is
-   * single-session until plan 12 brief B, so another bound peer's traffic must
-   * not reach it. Returns an unsubscribe function.
+   * peer — for daemon-wide state (refs, active tab) that another bound peer's
+   * traffic must not touch. Per-peer page state listens to every peer
+   * (bridge-page-state.ts). Returns an unsubscribe function.
    */
   onActive(name: 'event' | 'controlled' | 'hello', listener: (...args: any[]) => void): () => void {
     const wrapped = (...args: any[]) => {
@@ -1655,42 +1661,54 @@ function axProps(node: AxNode): string {
 // CDP says the context is gone. Fill stays in the main world on purpose: it
 // needs the page's own `monaco` global.
 
-interface WorldState { contextId: number | null }
-const worlds = new WeakMap<Bridge, WorldState>();
+/** instanceId → its isolated world's context id, per Bridge. */
+const worlds = new WeakMap<Bridge, Map<string, number>>();
 
-function worldState(bridge: Bridge): WorldState {
-  let st = worlds.get(bridge);
-  if (st) return st;
-  const state: WorldState = { contextId: null };
-  worlds.set(bridge, state);
-  bridge.onActive('event', (ev: BridgeEvent) => {
+function worldMap(bridge: Bridge): Map<string, number> {
+  let map = worlds.get(bridge);
+  if (map) return map;
+  const byPeer = new Map<string, number>();
+  worlds.set(bridge, byPeer);
+  // Each bound browser has its own tab and so its own world: a peer's events
+  // forget only that peer's world.
+  bridge.onEvent((ev: BridgeEvent) => {
+    const id = ev.instanceId;
+    const contextId = id ? byPeer.get(id) : undefined;
+    if (!id || contextId === undefined) return;
     const p = ev.params as { executionContextId?: unknown; frame?: { parentId?: unknown } };
-    if (ev.method === 'Runtime.executionContextsCleared') state.contextId = null;
-    else if (ev.method === 'Runtime.executionContextDestroyed' && p.executionContextId === state.contextId) state.contextId = null;
-    else if (ev.method === 'Page.frameNavigated' && !p.frame?.parentId) state.contextId = null;
+    if (
+      ev.method === 'Runtime.executionContextsCleared' ||
+      (ev.method === 'Runtime.executionContextDestroyed' && p.executionContextId === contextId) ||
+      (ev.method === 'Page.frameNavigated' && !p.frame?.parentId)
+    ) byPeer.delete(id);
   });
-  bridge.onActive('controlled', () => { state.contextId = null; });
-  bridge.on('disconnect', () => { state.contextId = null; });
-  return state;
+  bridge.on('controlled', (_tabId: number | null, id: string) => { byPeer.delete(id); });
+  bridge.on('disconnect', (id: string) => { byPeer.delete(id); });
+  bridge.on('expired', (id: string) => { byPeer.delete(id); });
+  return byPeer;
 }
 
-/** The execution context id of ghax's isolated world in the controlled tab. */
+/** The execution context id of ghax's isolated world in the active peer's controlled tab. */
 export async function bridgeIsolatedWorld(bridge: Bridge): Promise<number> {
-  const st = worldState(bridge);
-  if (st.contextId !== null) return st.contextId;
-  const tree = await bridge.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } };
+  const byPeer = worldMap(bridge);
+  const id = bridge.boundInstanceId;
+  const cached = id ? byPeer.get(id) : undefined;
+  if (cached !== undefined) return cached;
+  // Pin both calls to the peer the world is cached under.
+  const peer = id ? { peer: id } : undefined;
+  const tree = await bridge.send('Page.getFrameTree', {}, undefined, peer) as { frameTree?: { frame?: { id?: string } } };
   const frameId = tree.frameTree?.frame?.id;
   if (!frameId) throw new Error('bridge: no main frame to create the ghax isolated world in');
   const res = await bridge.send('Page.createIsolatedWorld', {
     frameId,
     worldName: 'ghax',
     grantUniveralAccess: true,
-  }) as { executionContextId?: number };
+  }, undefined, peer) as { executionContextId?: number };
   if (typeof res.executionContextId !== 'number') {
     throw new Error('bridge: Page.createIsolatedWorld returned no execution context');
   }
-  st.contextId = res.executionContextId;
-  return st.contextId;
+  if (id) byPeer.set(id, res.executionContextId);
+  return res.executionContextId;
 }
 
 /** Run `fn` in the isolated world, re-creating it once if it went stale. */
@@ -1699,7 +1717,8 @@ async function inWorld<T>(bridge: Bridge, fn: (contextId: number) => Promise<T>)
     return await fn(await bridgeIsolatedWorld(bridge));
   } catch (err) {
     if (!isStaleContextError(err)) throw err;
-    worldState(bridge).contextId = null;
+    const id = bridge.boundInstanceId;
+    if (id) worldMap(bridge).delete(id);
     return await fn(await bridgeIsolatedWorld(bridge));
   }
 }

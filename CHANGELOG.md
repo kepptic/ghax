@@ -25,12 +25,16 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   separately.
   A read interrupted on one browser is never replayed on another (it fails
   with `BRIDGE_PEER_CHANGED` naming the browser instead). Only the active
-  browser's events, tab changes and hellos reach the daemon's session state;
-  other bound browsers' console and network entries are dropped for now.
+  browser's events, tab changes and hellos touch refs and the active tab.
+  Each bound browser keeps its own main frame, execution contexts, load time
+  and in-flight requests, so one browser navigating never disturbs another's
+  reads. Console and network entries from every bound browser are kept, each
+  tagged with its `tabId`.
   `bridge reload` waits for the browser it reloaded, not any hello. Naming an
   unbound browser for control is refused. Under `all`, an expired browser
   leaves the bound set, and an extension without an instance id is refused
-  with a reload hint.
+  with a reload hint. Under `all`, browsers joining or returning after expiry
+  no longer trip the "ownership is flapping" warning.
 
 ### Fixed
 - **`tabs --browser <x>` no longer picks the first of several matches.** A
