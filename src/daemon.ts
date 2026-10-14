@@ -3249,11 +3249,18 @@ register('is', async (ctx, args) => {
 
 type ExpectResultLike = { code?: string; message?: string; expect?: string; expected?: unknown; actual?: unknown; elapsedMs?: number };
 
-const VIS_JS = `(el) => {
+// Real functions, not source strings: Playwright's locator.evaluate(string)
+// evaluates the string as an expression and never calls the function it
+// yields, so every selector probe came back "absent". The bridge gets the
+// same function as source via toString(), so the two transports can't drift.
+// Keep them self-contained (no closures, no helpers): they run in the page.
+const VIS_FN = (el: Element): string => {
   const s = getComputedStyle(el); const r = el.getBoundingClientRect();
   return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0 ? 'visible' : 'hidden';
-}`;
-const VALUE_JS = `(el) => ('value' in el ? String(el.value) : String(el.textContent ?? ''))`;
+};
+const VALUE_FN = (el: Element): string => ('value' in el ? String((el as HTMLInputElement).value) : String(el.textContent ?? ''));
+const TEXT_FN = (el: Element): string => (el as HTMLElement).innerText;
+type ProbeFn = (el: Element) => string;
 
 function expectProbes(ctx: Ctx): ExpectProbes {
   const isRef = (t: string) => /^@[ec]\d+$/.test(t);
@@ -3266,7 +3273,8 @@ function expectProbes(ctx: Ctx): ExpectProbes {
     || /not found in the latest snapshot/.test(String((err as Error | null)?.message ?? ''));
 
   // Runs `fnSrc(el)` on the target. undefined: nothing matched.
-  const onTarget = async (target: string, fnSrc: string): Promise<unknown> => {
+  const onTarget = async (target: string, fn: ProbeFn): Promise<unknown> => {
+    const fnSrc = fn.toString();
     if (ctx.bridgeMode) {
       if (isRef(target)) {
         try {
@@ -3285,7 +3293,7 @@ function expectProbes(ctx: Ctx): ExpectProbes {
       throw err;
     }
     if (await loc.count() === 0) return undefined;
-    return await loc.first().evaluate(fnSrc, undefined, { timeout: 1000 });
+    return await loc.first().evaluate(fn, undefined, { timeout: 1000 });
   };
 
   return {
@@ -3293,18 +3301,18 @@ function expectProbes(ctx: Ctx): ExpectProbes {
     title: async () => ctx.bridgeMode ? String(await bridgeEval(ctx, 'document.title')) : await (await activePage(ctx)).title(),
     text: async (selector) => {
       if (!selector) return String(await pageEval('document.body ? document.body.innerText : ""'));
-      const r = await onTarget(selector, '(el) => el.innerText');
+      const r = await onTarget(selector, TEXT_FN);
       return r == null ? null : String(r);
     },
     visibility: async (target) => {
-      const r = await onTarget(target, VIS_JS);
+      const r = await onTarget(target, VIS_FN);
       return (r == null ? 'absent' : r) as VisState;
     },
     count: async (selector) => ctx.bridgeMode
       ? Number(await bridgeEval(ctx, `document.querySelectorAll(${JSON.stringify(selector)}).length`))
       : await (await activePage(ctx)).locator(selector).count(),
     value: async (target) => {
-      const r = await onTarget(target, VALUE_JS);
+      const r = await onTarget(target, VALUE_FN);
       return r == null ? null : String(r);
     },
     evaluate: pageEval,
