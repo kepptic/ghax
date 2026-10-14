@@ -103,6 +103,16 @@ Logs:
          #   matches more than one domain/path it refuses and lists them
          #   (name, domain, path; never values). --domain must equal the
          #   cookie's domain, --path must equal its path.
+  auth export --out <path> --domain <d>[,<d>...] [--origin <url>...] [--force]
+         # Writes a Playwright storageState file (newContext({storageState}))
+         #   from the attached browser. Works on CDP and over the bridge.
+         # --domain is required: cookies whose domain equals a listed domain
+         #   or is a subdomain of it (list example.com to get .example.com).
+         # --origin adds that origin's localStorage, read from a tab already
+         #   open there (bridge: the controlled tab). Never navigates.
+         # The file is created 0600 and never printed. Refuses an existing
+         #   file without --force, a symlink, and an un-gitignored path in a
+         #   git work tree. Prints counts, path and earliest expiry only.
 
 Extensions (MV3):
   ext list

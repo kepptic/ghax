@@ -59,7 +59,7 @@ struct QaReport {
 
 /// Extract all values for a repeatable `--flag` from `raw` argv, matching
 /// TS: `argv[i] === '--url' && argv[i+1]` plus `--url=<value>`.
-fn collect_repeated_flag<'a>(raw: &'a [String], flag: &str) -> Vec<&'a str> {
+pub(crate) fn collect_repeated_flag<'a>(raw: &'a [String], flag: &str) -> Vec<&'a str> {
     let long = format!("--{flag}");
     let prefix = format!("--{flag}=");
     let mut out = Vec::new();

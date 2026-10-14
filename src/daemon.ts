@@ -72,6 +72,7 @@ import {
   type BridgeTab,
   type ControlTarget,
 } from './bridge';
+import { AuthExportError, exportAuth, LOCAL_STORAGE_EXPR, originOf, parseLocalStorage, type AuthSource } from './auth-export';
 import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -197,7 +198,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
   'bridge.stats',
-  'cookies', 'cookies.delete', 'storage',
+  'cookies', 'cookies.delete', 'storage', 'auth.export',
   'batch', 'record.start', 'record.stop', 'record.status',
 ]);
 
@@ -3046,6 +3047,52 @@ register('cookies.delete', async (ctx, args, opts) => {
   }
 });
 
+// `auth export`: a Playwright storageState file for headless suites. The
+// file is written HERE, not in the CLI, so cookie and localStorage values
+// never travel back over the RPC socket (see src/auth-export.ts). Not
+// retry-safe: a replay after the file landed would hit O_EXCL.
+function authSource(ctx: Ctx): AuthSource {
+  const cookies = async () => cookieBackend(ctx).list(null);
+  if (ctx.bridgeMode) {
+    return {
+      cookies,
+      // The bridge evaluates only in the tab it controls, so that tab must
+      // already be at the origin. Never navigate it for an export.
+      localStorage: async (origin) => {
+        const at = originOf(String(await bridgeEval(ctx, 'location.href')));
+        if (at !== origin) {
+          throw new AuthExportError(
+            `the controlled tab is at ${at ?? 'a non-web page'}, not ${origin}. Open ${origin} in a tab and ` +
+              '`ghax tab <id>` to it first; ghax does not navigate your tabs for an export.',
+          );
+        }
+        return parseLocalStorage(await bridgeEval(ctx, LOCAL_STORAGE_EXPR), origin);
+      },
+    };
+  }
+  return {
+    cookies,
+    localStorage: async (origin) => {
+      const page = (await allPages(ctx)).find((p) => originOf(p.url()) === origin);
+      if (!page) {
+        throw new AuthExportError(
+          `no open tab at ${origin}. Open it in the browser first; ghax does not navigate your tabs for an export.`,
+        );
+      }
+      return parseLocalStorage(await page.evaluate(LOCAL_STORAGE_EXPR), origin);
+    },
+  };
+}
+
+register('auth.export', async (ctx, _args, opts) => {
+  try {
+    return await exportAuth(authSource(ctx), opts);
+  } catch (err) {
+    if (err instanceof AuthExportError) throw new DaemonError(err.message, 2);
+    throw err;
+  }
+});
+
 register('storage', async (ctx, args) => {
   const area = String(args[0] ?? 'local');
   const op = String(args[1] ?? 'get');
@@ -4141,6 +4188,8 @@ const NEVER_RECORD = new Set([
   'record.start', 'record.stop', 'record.status',
   'status', 'health',
   'tabs', 'console', 'network', 'cookies', 'text', 'html',
+  // Writes a secrets file; a replay must never re-export a session.
+  'auth.export',
   // Read-only queries that don't change page state — replay would re-fire
   // the measurement, not the action, and waste time. Add every new
   // read-only handler here.

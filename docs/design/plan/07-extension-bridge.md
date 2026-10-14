@@ -196,7 +196,7 @@ the extension bridge.
 takes a `backendNodeId` directly, so it reuses the exact ref-resolution path
 `click`/`fill` already established above instead of needing new CDP surface.
 See `register('upload', ...)` in `src/daemon.ts` and `BRIDGE_SUPPORTED_COMMANDS`.
-**Update (2026-10-13):** `cookies`, `cookies delete` and `storage` are ported. Cookies use `Network.getCookies`/`getAllCookies`/`deleteCookies` through the existing `chrome.debugger` session (the extension already holds `debugger` + `<all_urls>`, no new permission); `storage` runs the CDP expressions via `Runtime.evaluate` on the controlled tab. Shared logic lives in `src/cookies.ts`.
+**Update (2026-10-13):** `cookies`, `cookies delete` and `storage` are ported. Cookies use `Network.getCookies`/`getAllCookies`/`deleteCookies` through the existing `chrome.debugger` session (the extension already holds `debugger` + `<all_urls>`, no new permission); `storage` runs the CDP expressions via `Runtime.evaluate` on the controlled tab. Shared logic lives in `src/cookies.ts`. `auth export` (Playwright storageState) reuses the same cookie read plus a `Runtime.evaluate` of localStorage on the controlled tab; the file write lives in the daemon (`src/auth-export.ts`).
 
 Remaining product work is handshake authentication and packaging (signed
 `.crx` / store listing versus unpacked team use). Authentication is deliberately

@@ -4,6 +4,7 @@
 
 mod args;
 mod attach;
+mod auth;
 mod bridge;
 mod canary;
 mod cookies;

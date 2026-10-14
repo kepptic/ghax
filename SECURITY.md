@@ -62,6 +62,7 @@ to 127.0.0.1.
 
 ghax can read:
 - Every tab's DOM, cookies, localStorage, sessionStorage. Over the bridge, `ghax cookies --all --values` returns every cookie in the real profile, HttpOnly ones included.
+- `ghax auth export` writes cookies (HttpOnly included) and localStorage to a Playwright storageState file: a live, replayable session. Guard rails: `--domain` is required and only those domains and their subdomains are exported; localStorage only for `--origin` values already open in a tab (never navigates). The daemon writes the file itself so values never cross the RPC socket or reach stdout; it is created `0600` with `O_EXCL|O_NOFOLLOW` (with `--force`: refuses symlinks and hard-linked files, chmods `0600` before truncating); a path inside a git work tree is refused unless `git check-ignore` reports it ignored. Errors and the printed result carry names, counts and paths, never values. Anyone who can read the file can act as you until those cookies expire: keep it out of repos, chat and CI logs, and delete it when the suite is done.
 - Every extension's `chrome.storage.*` (auth tokens often live here).
 - Full console + network capture (5k rolling buffers each).
 - Page errors including stack traces and source locations.

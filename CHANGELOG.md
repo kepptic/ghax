@@ -7,6 +7,16 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`ghax auth export --out <path> --domain <d>[,<d>...] [--origin <url>...]`**
+  writes a Playwright storageState file from the attached browser, on CDP and
+  over the bridge, so a headless suite can reuse your real SSO login without
+  CDP on the default profile. Cookies are limited to the listed domains and
+  their subdomains (`--domain` is required); `--origin` adds localStorage from
+  a tab already open at that origin and never navigates. The daemon writes the
+  file itself (0600, `O_EXCL` unless `--force`, refuses symlinks and
+  un-gitignored paths inside a git work tree), so values never cross the RPC
+  socket or reach stdout. Output is the path, per-domain cookie counts, origin
+  count and earliest expiry.
 - **`cookies`, `cookies delete` and `storage` work over the extension bridge.**
   Cookies read through `Network.getCookies` / `getAllCookies` with the same
   scoping, redaction and `--has` exit codes as on CDP; `storage` runs over
