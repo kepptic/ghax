@@ -5,10 +5,21 @@
 # Usage:
 #   bun run install-release            # latest release
 #   bun run install-release v0.4.2     # specific version
+#   curl -fsSL https://raw.githubusercontent.com/kepptic/ghax/main/scripts/install-release.sh | bash
 #
-# Installs to:
-#   ~/.cargo/bin/ghax            (the standard installer location)
-#   ~/.local/share/ghax/ghax-daemon.mjs + node_modules/ (bootstrap)
+# Installs the binary to the first of:
+#   1. $GHAX_BIN_DIR/ghax        (explicit override)
+#   2. the dir of the `ghax` already on PATH, if that is a regular file
+#      (not a symlink) in a writable dir, so the new version replaces the
+#      one you actually run
+#   3. ~/.cargo/bin/ghax         (the standard installer location)
+# and the daemon to ~/.local/share/ghax/ghax-daemon.mjs + node_modules/.
+#
+# After installing, if `ghax` on PATH still resolves to some other file, the
+# script prints that path with a fix and exits 1 (the install itself is done).
+#
+# When run from a pipe, the helper bootstrap-daemon-runtime.sh is not next to
+# the script, so it is downloaded from the same tag.
 #
 # Public repo, so plain `curl` against GitHub's release-download URLs needs
 # no auth and is the default. Falls back to `gh release download` (which
@@ -26,7 +37,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="kepptic/ghax"
 VERSION="${1:-}"
 SHARE_DIR="$HOME/.local/share/ghax"
-BIN_DIR="$HOME/.cargo/bin"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -43,6 +53,32 @@ if [ -z "$VERSION" ]; then
   [ -z "$VERSION" ] && { echo "install-release: no published (non-prerelease) release found in $REPO" >&2; exit 1; }
 fi
 echo "install-release: version $VERSION"
+
+# Pick the install dir: GHAX_BIN_DIR, else replace a regular-file ghax already
+# on PATH (if we can write there), else ~/.cargo/bin.
+if [ -n "${GHAX_BIN_DIR:-}" ]; then
+  BIN_DIR="$GHAX_BIN_DIR"
+else
+  BIN_DIR="$HOME/.cargo/bin"
+  EXISTING="$(command -v ghax 2>/dev/null || true)"
+  if [ -n "$EXISTING" ] && [ -f "$EXISTING" ] && [ ! -L "$EXISTING" ] \
+     && [ -w "$(dirname "$EXISTING")" ]; then
+    BIN_DIR="$(dirname "$EXISTING")"
+  fi
+fi
+
+# Follow symlinks to the final file (readlink -f is not on macOS bash 3.2 era).
+resolve_path() {
+  local p="$1" t
+  while [ -L "$p" ]; do
+    t="$(readlink "$p")"
+    case "$t" in
+      /*) p="$t" ;;
+      *)  p="$(dirname "$p")/$t" ;;
+    esac
+  done
+  echo "$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
+}
 
 # Detect platform → triple.
 case "$(uname -s)-$(uname -m)" in
@@ -83,16 +119,31 @@ tar xJf "$ARCHIVE"
 INNER="$TMP_DIR/ghax-$TRIPLE"
 [ -x "$INNER/ghax" ]            || { echo "install-release: ghax binary missing in archive"   >&2; exit 1; }
 [ -f "$INNER/ghax-daemon.mjs" ] || { echo "install-release: daemon bundle missing in archive" >&2; exit 1; }
-mkdir -p "$BIN_DIR" "$SHARE_DIR"
-cp "$INNER/ghax" "$BIN_DIR/ghax"
-chmod +x "$BIN_DIR/ghax"
+mkdir -p "$BIN_DIR" "$SHARE_DIR" \
+  || { echo "install-release: cannot create $BIN_DIR or $SHARE_DIR. Set GHAX_BIN_DIR to a writable dir and re-run" >&2; exit 1; }
+# Copy to a temp name then rename: overwriting a signed Mach-O in place can
+# leave the kernel's cached code signature stale ("Killed: 9" on macOS).
+BIN_TMP="$BIN_DIR/.ghax.tmp.$$"
+{ cp "$INNER/ghax" "$BIN_TMP" && chmod +x "$BIN_TMP" && mv -f "$BIN_TMP" "$BIN_DIR/ghax"; } \
+  || { rm -f "$BIN_TMP"; echo "install-release: cannot write $BIN_DIR/ghax. Set GHAX_BIN_DIR to a writable dir and re-run" >&2; exit 1; }
 cp "$INNER/ghax-daemon.mjs" "$SHARE_DIR/ghax-daemon.mjs"
 
 # Bootstrap node_modules. The shared helper handles version-mismatch
 # detection too — so users who upgrade across a playwright bump get a
 # refreshed install_modules without us hardcoding versions here.
 echo "install-release: bootstrapping daemon runtime in $SHARE_DIR (no-op if already current)..."
-bash "$SCRIPT_DIR/bootstrap-daemon-runtime.sh" "$SHARE_DIR" > /dev/null
+# Piped installs (`curl ... | bash`) have no scripts/ dir next to $0, so fetch
+# the helper from the same tag. It reads ../package.json only if present and
+# otherwise uses embedded defaults, so it needs no other sibling files.
+BOOTSTRAP="$SCRIPT_DIR/bootstrap-daemon-runtime.sh"
+if [ ! -f "$BOOTSTRAP" ]; then
+  BOOTSTRAP_URL="https://raw.githubusercontent.com/$REPO/$VERSION/scripts/bootstrap-daemon-runtime.sh"
+  mkdir -p "$TMP_DIR/scripts"
+  BOOTSTRAP="$TMP_DIR/scripts/bootstrap-daemon-runtime.sh"
+  curl -fsSL -o "$BOOTSTRAP" "$BOOTSTRAP_URL" \
+    || { echo "install-release: could not download $BOOTSTRAP_URL. Check your network, or run the script from a ghax checkout" >&2; exit 1; }
+fi
+bash "$BOOTSTRAP" "$SHARE_DIR" > /dev/null
 
 # Sanity check.
 INSTALLED="$("$BIN_DIR/ghax" --version 2>/dev/null || echo unknown)"
@@ -100,18 +151,31 @@ echo "install-release: installed → $BIN_DIR/ghax ($INSTALLED)"
 echo "install-release:           + $SHARE_DIR/ghax-daemon.mjs"
 echo "install-release:           + $SHARE_DIR/node_modules/"
 
-# Heads-up if the symlink at ~/.local/bin/ghax shadows the installed binary.
-if [ -L "$HOME/.local/bin/ghax" ]; then
-  TARGET="$(readlink "$HOME/.local/bin/ghax")"
-  case "$TARGET" in
-    *target/release/ghax)
-      echo ""
-      echo "install-release: NOTE — ~/.local/bin/ghax still points at the in-repo dev build:"
-      echo "                  $TARGET"
-      echo "                Your PATH likely picks that one up first. To make the released"
-      echo "                binary primary, either:"
-      echo "                  1. rm ~/.local/bin/ghax  (PATH falls through to ~/.cargo/bin)"
-      echo "                  2. ln -sf $BIN_DIR/ghax ~/.local/bin/ghax"
-      ;;
-  esac
+# Verify PATH resolves `ghax` to what we just installed. A different ghax
+# earlier on PATH (an old copy, or a symlink into a dev build) keeps the old
+# version active, so fail loudly with the fix.
+hash -r 2>/dev/null || true
+ACTIVE="$(command -v ghax 2>/dev/null || true)"
+if [ -z "$ACTIVE" ] || [ "$(resolve_path "$ACTIVE")" != "$(resolve_path "$BIN_DIR/ghax")" ]; then
+  echo "" >&2
+  if [ -z "$ACTIVE" ]; then
+    echo "install-release: $BIN_DIR is not on your PATH, so 'ghax' will not be found." >&2
+    echo "                Fix: add it, e.g. export PATH=\"$BIN_DIR:\$PATH\"" >&2
+  else
+    echo "install-release: 'ghax' on your PATH is $ACTIVE, not the one just installed ($BIN_DIR/ghax)." >&2
+    if [ -L "$ACTIVE" ]; then
+      LINK_TARGET="$(readlink "$ACTIVE")"
+      case "$LINK_TARGET" in
+        *target/release/ghax|*target/debug/ghax)
+          echo "                It is a symlink to $LINK_TARGET (likely an in-repo dev build)." >&2 ;;
+        *)
+          echo "                It is a symlink to $LINK_TARGET." >&2 ;;
+      esac
+    fi
+    echo "                Fix, either:" >&2
+    echo "                  1. rm \"$ACTIVE\"  (PATH falls through to $BIN_DIR)" >&2
+    echo "                  2. ln -sf \"$BIN_DIR/ghax\" \"$ACTIVE\"" >&2
+    echo "                  3. re-run with GHAX_BIN_DIR=\"$(dirname "$ACTIVE")\" to install over it" >&2
+  fi
+  exit 1
 fi
