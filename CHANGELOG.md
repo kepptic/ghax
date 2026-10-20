@@ -5,6 +5,10 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [0.11.0] - 2026-10-20
 ### Added
 - **`ghax new-tab [url] [--window <windowId>]`.** Opens an inactive tab in an
   existing window and makes it this daemon's tab, without raising the window or
@@ -1651,7 +1655,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/kepptic/ghax/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/kepptic/ghax/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/kepptic/ghax/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/kepptic/ghax/compare/v0.8.0...v0.9.0
