@@ -334,8 +334,9 @@ c('tabs rows carry index, browser and profile (CDP)', async () => {
     assert(t.index === i + 1, `row ${i} should have index ${i + 1}, got ${t.index}`);
     assert(typeof t.browser === 'string' && t.browser.length > 0, `browser missing: ${JSON.stringify(t)}`);
     // CDP has no profile name and no chrome tab id; the id is the target id.
+    // windowId comes from Browser.getWindowForTarget.
     assert(t.profile === '—', `CDP profile should be '—', got ${t.profile}`);
-    assert(t.chromeTabId === null && t.windowId === null, `CDP rows: ${JSON.stringify(t)}`);
+    assert(t.chromeTabId === null && typeof t.windowId === 'number', `CDP rows: ${JSON.stringify(t)}`);
   });
   const text = (await run(['tabs'])).stdout.split('\n')[0];
   assert(/^#1  \S+  ".*"  \S+ · —/.test(text), `tabs text line should be '#1  <id>  "<title>"  <Browser> · —', got: ${text}`);
