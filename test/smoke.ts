@@ -2156,6 +2156,31 @@ c('new-window opens a background window and auto-locks active tab', async () => 
   if (beforeActive) await run(['tab', beforeActive, '--quiet'], { allowFailure: true });
 });
 
+c('new-tab opens a background tab, locks onto it, and tab --focus is a switch', async () => {
+  const beforeTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const beforeActive = beforeTabs.find((t) => t.active)?.id;
+  const r = await run(['new-tab', 'data:text/html,<title>bg</title><p>bg tab</p>', '--json']);
+  const created = parseJson<{ id: string; url: string; index: number }>(r.stdout);
+  try {
+    assert(typeof created.id === 'string' && created.id.length > 0, `new-tab should return an id: ${r.stdout}`);
+    assert(created.index === 0 && /^data:/.test(created.url), `new-tab shape: ${r.stdout}`);
+    const afterTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+    assert(afterTabs.length === beforeTabs.length + 1, `expected tab count +1, got ${afterTabs.length - beforeTabs.length}`);
+    assert(afterTabs.find((t) => t.active)?.id === created.id, 'the new tab should be the daemon\'s active tab');
+    const text = (await run(['text'])).stdout;
+    assert(/bg tab/.test(text), `text should read the new tab, got: ${text.slice(0, 120)}`);
+    // CDP's createTarget has no window parameter, so --window refuses there.
+    const win = await run(['new-tab', 'about:blank', '--window', '1'], { allowFailure: true });
+    assert(win.exitCode !== 0 && /bridge-only/.test(win.stderr + win.stdout), `--window over CDP should refuse: ${win.stderr || win.stdout}`);
+    // --focus must not swallow the selector that follows it.
+    const f = await run(['tab', '--focus', created.id, '--json']);
+    assert(parseJson<{ id: string }>(f.stdout).id === created.id, `tab --focus <id>: ${f.stdout}`);
+  } finally {
+    await run(['eval', 'window.close()'], { allowFailure: true });
+    if (beforeActive) await run(['tab', beforeActive], { allowFailure: true });
+  }
+});
+
 c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {
   // Need at least two tabs to exercise the switch path. If the smoke
   // session is running on a single-tab browser, spawn a second window

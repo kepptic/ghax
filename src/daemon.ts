@@ -201,7 +201,7 @@ const handlers = new Map<string, Handler>();
 // depends on Playwright, /json/list, or browser-level CDP fails with a useful
 // message instead of leaking a cryptic URL/parser error from those paths.
 const BRIDGE_SUPPORTED_COMMANDS = new Set([
-  'status', 'tabs', 'tab', 'find', 'newWindow',
+  'status', 'tabs', 'tab', 'find', 'newWindow', 'newTab',
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
@@ -452,6 +452,14 @@ function globToRegExp(pattern: string): RegExp {
 async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   if (ctx.instrumented.has(page)) return;
   ctx.instrumented.add(page);
+  // A driven tab is usually a background one (`new-tab`, `tab` without
+  // --focus). Chromium stops rendering hidden tabs, so rAF never fires and
+  // input waits for a frame that never comes. Focus emulation marks the page
+  // visible and focused for as long as this session lives, without raising
+  // anything. Kept attached on purpose: detaching ends the emulation.
+  void page.context().newCDPSession(page)
+    .then((session) => session.send('Emulation.setFocusEmulationEnabled', { enabled: true }))
+    .catch(() => undefined);
 
   page.on('console', (msg) => {
     const entry: ConsoleEntry = {
@@ -738,6 +746,13 @@ async function enableBridgeDomains(bridge: Bridge, instanceId: string): Promise<
     conn.send('Log.enable'),
     conn.send('Network.enable'),
     conn.send('DOM.enable'),
+    // The controlled tab is usually in the background. Chromium does not
+    // render hidden tabs: requestAnimationFrame never fires (`wait --stable`
+    // hangs) and each Input.dispatchMouseEvent waits ~1.8 s for a frame
+    // (`click` took 5.6 s). Focus emulation marks the page visible and
+    // focused for this debugger session only; it raises no window and
+    // moves no tab. Measured on Edge 150, see CHANGELOG "background tabs".
+    conn.send('Emulation.setFocusEmulationEnabled', { enabled: true }),
   ]).catch(() => undefined);
 }
 
@@ -971,7 +986,7 @@ async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInsta
  * driving. A browser that is not bound at all is refused (resolveTabSelector
  * already did, since only bound tabs are listed).
  */
-async function controlResolvedTab(ctx: Ctx, tab: TabIdentity, extra: { quiet?: boolean } = {}): Promise<ControlAck> {
+async function controlResolvedTab(ctx: Ctx, tab: TabIdentity, extra: { focus?: boolean; quiet?: boolean } = {}): Promise<ControlAck> {
   const bridge = requireBridge(ctx);
   const alias = aliasOfId(tab.id);
   let owner: string | null = null;
@@ -1310,12 +1325,18 @@ register('tabs', async (ctx, _args, opts) => {
 
 register('tab', async (ctx, args, opts) => {
   const id = String(args[0] ?? '');
-  if (!id) throw new Error('Usage: tab <#n | id | chrome-tab-id>');
+  if (!id) throw new Error('Usage: tab <#n | id | chrome-tab-id> [--focus]');
+  // Switching tabs never raises a window or moves the user's active tab
+  // unless asked: several agents drive tabs in one browser while the user
+  // works in it. `--quiet` (the old opt-out) is accepted and does nothing.
+  const focus = opts.focus === true || opts.focus === 'true';
   if (ctx.bridgeMode) {
     // `#n`, the full `<alias>:<n>` id, or a bare chrome tab id that matches
     // exactly one tab. Anything else is refused with every candidate listed.
     const tab = await resolveBridgeTab(ctx, id);
-    await controlResolvedTab(ctx, tab, { quiet: Boolean(opts.quiet) });
+    // Background unless --focus. `quiet` rides along for extensions older
+    // than this change, which raised the tab unless told `quiet`.
+    await controlResolvedTab(ctx, tab, { focus, quiet: !focus });
     // The `controlled` push already cleared refs; this covers an extension
     // that acked without one.
     setActiveTab(ctx, tab.id);
@@ -1332,10 +1353,7 @@ register('tab', async (ctx, args, opts) => {
       // DOM. The CLAUDE.md invariant is explicit about this.
       setActiveTab(ctx, tid);
       await instrumentPage(ctx, p);
-      // --quiet skips bringToFront. Useful when an agent locks onto a tab
-      // while the user is working elsewhere — no focus steal, no window
-      // raised. Default preserves v0.1 human-friendly behavior.
-      if (!opts.quiet) {
+      if (focus) {
         await p.bringToFront().catch(() => undefined);
       }
       return tabResult({ ...target, url: p.url(), title: await p.title().catch(() => '') });
@@ -1352,7 +1370,7 @@ function tabResult(t: TabIdentity): Record<string, unknown> {
   };
 }
 
-// ─── find / newWindow — dedicated-window workflow ──────────────
+// ─── find / newWindow / newTab — background tabs ──────────────
 //
 // The multi-agent + user-working-alongside pattern. Each agent owns a
 // window that ghax put there; the user's other windows/tabs are off-
@@ -1384,37 +1402,71 @@ register('find', async (ctx, args) => {
 });
 
 register('newWindow', async (ctx, args) => {
+  return openBackgroundTab(ctx, 'newWindow', args[0] ? String(args[0]) : 'about:blank', null);
+});
+
+register('newTab', async (ctx, args, opts) => {
   const url = args[0] ? String(args[0]) : 'about:blank';
+  let windowId: number | null = null;
+  if (opts.window !== undefined) {
+    windowId = Number(opts.window);
+    if (!Number.isInteger(windowId)) {
+      throw new Error(`new-tab --window: '${String(opts.window)}' is not a window id. Read windowId from 'ghax tabs --json'.`);
+    }
+  }
+  return openBackgroundTab(ctx, 'newTab', url, windowId);
+});
+
+/**
+ * Open a background tab (`newTab`, in an existing window) or a background
+ * window (`newWindow`) and make it this daemon's active tab. Neither raises a
+ * window nor changes the user's active tab: that is what lets several agents
+ * share the user's browser while the user keeps working in it.
+ */
+async function openBackgroundTab(
+  ctx: Ctx, verb: 'newTab' | 'newWindow', url: string, windowId: number | null,
+): Promise<Record<string, unknown>> {
   if (ctx.bridgeMode) {
     const bridge = verbBridge(ctx);
-    const ack = await bridge.sendControl({ action: 'new-window', url });
+    const ack = await bridge.sendControl(verb === 'newWindow'
+      ? { action: 'new-window', url }
+      : { action: 'new-tab', url, ...(windowId === null ? {} : { windowId }) });
     const tab = ack.result as Partial<BridgeTab> | undefined;
-    if (!tab || typeof tab.id !== 'number') throw new Error('newWindow: extension did not return the new tab');
-    bridge.setDesiredControl({ action: 'control-tab', tabId: tab.id, quiet: true });
+    if (!tab || typeof tab.id !== 'number') {
+      throw new Error(`${verb}: extension did not return the new tab. If it predates new-tab, run 'ghax bridge reload'.`);
+    }
+    bridge.setDesiredControl({ action: 'control-tab', tabId: tab.id, focus: false, quiet: true });
     const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.instanceId);
     const id = composeTabId(who.alias, tab.id);
     setActiveTab(ctx, id);
-    // index 0: a new window is in no listing yet, so it has no `#n`.
+    // index 0: a new tab is in no listing yet, so it has no `#n`.
     return tabResult({
       index: 0, id, chromeTabId: tab.id, browser: who.browser, profile: who.profile,
       windowId: typeof tab.windowId === 'number' ? tab.windowId : null,
       title: tab.title ?? '', url: tab.url ?? url, active: true,
     });
   }
+  if (windowId !== null) {
+    // Target.createTarget has no window parameter: a CDP tab lands in the
+    // browser's last active window.
+    throw new Error('new-tab --window is bridge-only. Over CDP the tab opens in the last active window; drop --window.');
+  }
   const browser = ctx.browser;
-  if (!browser) throw new Error('newWindow: no browser available');
+  if (!browser) throw new Error(`${verb}: no browser available`);
   const context = browser.contexts()[0];
-  if (!context) throw new Error('newWindow: no browser context available');
+  if (!context) throw new Error(`${verb}: no browser context available`);
   const cdpSession = traceSend(await browser.newBrowserCDPSession());
   try {
     // Race-free: subscribe to the "page" event BEFORE firing createTarget.
     // Playwright surfaces the new page as soon as the target becomes
     // attachable, so waitForEvent resolves right after CDP confirms.
+    // `background: true` keeps the new tab inactive (and, with newWindow,
+    // the new window unfocused).
     const [newPage] = await Promise.all([
       context.waitForEvent('page', { timeout: 10_000 }),
       cdpSession.send('Target.createTarget', {
         url,
-        newWindow: true,
+        newWindow: verb === 'newWindow',
         background: true,
       }),
     ]);
@@ -1423,7 +1475,7 @@ register('newWindow', async (ctx, args) => {
     await newPage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
     const id = (await pageTargetId(newPage)) ?? '';
     // Auto-lock this tab as the active one so subsequent commands land
-    // in the freshly-created window without an extra `ghax tab` step.
+    // in it without an extra `ghax tab` step.
     // Same refs-invalidation rule as the `tab` handler.
     setActiveTab(ctx, id);
     await instrumentPage(ctx, newPage);
@@ -1434,7 +1486,7 @@ register('newWindow', async (ctx, args) => {
   } finally {
     await cdpSession.detach().catch(() => undefined);
   }
-});
+}
 
 // ─── Downloads ─────────────────────────────────────────────────
 //

@@ -5,8 +5,28 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Added
+- **`ghax new-tab [url] [--window <windowId>]`.** Opens an inactive tab in an
+  existing window and makes it this daemon's tab, without raising the window or
+  changing the tab you are looking at. Returns the same shape as `new-window`.
+  `--window` takes a `windowId` from `ghax tabs --json` and is bridge-only;
+  over CDP the tab opens in the last active window.
 
-_No changes yet._
+### Changed
+- **`ghax tab` no longer takes focus.** Switching tabs used to activate the tab
+  and focus its window (bridge) or `bringToFront` it (CDP). It now drives the
+  tab in the background. Pass `--focus` for the old behaviour. `--quiet` is
+  still accepted and does nothing. The daemon still sends `quiet` to the
+  extension, so an extension older than this release stays in the background
+  too.
+- **Background tabs render.** Chromium stops painting hidden tabs, so on a
+  background tab `requestAnimationFrame` never fired and `wait --stable` hung
+  until its 15 s timeout. Each `Input.dispatchMouseEvent` also waited about
+  1.8 s, which made `click` take 5.6 s. ghax now enables
+  `Emulation.setFocusEmulationEnabled` on the tab it drives, which marks the
+  page visible and focused for that debugger session only and raises nothing.
+  Measured on Edge 150 over the bridge, before and after: `click` 5.9 s to
+  0.8 s, `wait --stable` timeout to 0.7 s, `new-tab` 5.1 s to 0.5 s.
 
 ## [0.10.1] - 2026-10-14
 ### Fixed

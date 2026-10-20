@@ -27,7 +27,8 @@
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
  *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop"|
- *                             "list-tabs"|"new-window"|"reload","tabId?":N}
+ *                             "list-tabs"|"new-window"|"new-tab"|"reload","tabId?":N,
+ *                             "focus?":bool (control-tab only),"url?":"...","windowId?":N (new-tab)}
  *   -> daemon, control ack:  {"type":"control-ack","id":<n>,"ok":bool,"tabId?":N,"error?":"..."}
  *      "reload" is the odd one out: it acks BEFORE doing the thing (see
  *      handleControl), because chrome.runtime.reload() kills this worker
@@ -1055,11 +1056,21 @@ class BridgeConnection {
         });
         return;
       }
-      if (msg.action === 'new-window') {
-        const win = await chrome.windows.create({ url: msg.url || 'about:blank', focused: false });
-        const candidates = win.tabs?.length ? win.tabs : await chrome.tabs.query({ windowId: win.id });
-        let tab = candidates.find((candidate) => typeof candidate.id === 'number');
-        if (!tab?.id) throw new Error('new window did not create a controllable tab');
+      if (msg.action === 'new-window' || msg.action === 'new-tab') {
+        // Both open in the background: a new unfocused window, or an inactive
+        // tab in an existing window. Neither raises a window or moves the
+        // user's active tab.
+        let tab;
+        if (msg.action === 'new-window') {
+          const win = await chrome.windows.create({ url: msg.url || 'about:blank', focused: false });
+          const candidates = win.tabs?.length ? win.tabs : await chrome.tabs.query({ windowId: win.id });
+          tab = candidates.find((candidate) => typeof candidate.id === 'number');
+        } else {
+          const props = { url: msg.url || 'about:blank', active: false };
+          if (typeof msg.windowId === 'number') props.windowId = msg.windowId;
+          tab = await chrome.tabs.create(props);
+        }
+        if (!tab?.id) throw new Error(`${msg.action} did not create a controllable tab`);
         await this.switchControlTo(tab.id);
         const deadline = Date.now() + 5000;
         while (tab.status !== 'complete' && Date.now() < deadline) {
@@ -1090,7 +1101,10 @@ class BridgeConnection {
         // the user's window for nothing.
         const owner = ownerOf(tabId);
         if (owner && owner !== this) throw conflictError(tabId, owner);
-        if (!msg.quiet) {
+        // Background by default: only an explicit `focus: true` (`ghax tab
+        // --focus`) raises the tab and its window. Driving a tab never needs
+        // focus, and several agents share one browser with the user.
+        if (msg.focus === true) {
           const tab = await chrome.tabs.update(tabId, { active: true });
           if (typeof tab.windowId === 'number') await chrome.windows.update(tab.windowId, { focused: true });
         }

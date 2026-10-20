@@ -119,7 +119,7 @@ ghax bridge control [--active | --tab-id '#n'|<id> | --stop]   # (re)point mid-s
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
 snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box, gestures,
-tabs/tab/new-window, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
+tabs/tab/new-window/new-tab, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
 yet": viewport/responsive, qa/perf/profile,
 and the `ext` family (SW/panel/hot-reload).
@@ -218,6 +218,8 @@ ghax tabs --json                         # + index, chromeTabId, browser, profil
 ghax tab '#2'                            # row 2 of the last `tabs` (refused if it closed)
 ghax tab edge-work:42                    # full id: <brand>-<profile>:<chrome tab id> on the bridge
 ghax tab 42                              # only if exactly one tab has id 42, else refused
+ghax tab '#2' --focus                    # also raise it (default: background, no focus)
+ghax new-tab https://example.com         # background tab in the current window, now yours
 ghax goto https://example.com
 ghax text                                # clean page text
 ghax html [<selector>]                   # innerHTML

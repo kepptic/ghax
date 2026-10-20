@@ -191,7 +191,16 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             crate::auth::cmd_auth(cfg, &parsed)
         }
 
-        "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
+        "tab" => {
+            // `--focus` / `--quiet` are switches: `tab --focus '#2'` must not
+            // swallow the selector as the flag's value.
+            let mut parsed = args::parse(rest);
+            take_switch(&mut parsed, "focus");
+            take_switch(&mut parsed, "quiet");
+            simple(cfg, "tab", parsed)
+        }
+
+        "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
         | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
         | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
@@ -228,6 +237,11 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "new-window" => {
             let parsed = args::parse(rest);
             simple(cfg, "newWindow", parsed)
+        }
+
+        "new-tab" => {
+            let parsed = args::parse(rest);
+            simple(cfg, "newTab", parsed)
         }
 
         "fill" => {

@@ -49,12 +49,18 @@ Tab:
                                   #   browser's tabs without taking it over
                                   # --browser all daemon: every bound browser,
                                   #   numbered #1..N; a silent one is a `note:` row
-  tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
+  tab <'#n' | id | n> [--focus]   # '#n' = row n of the last 'tabs' (quote the #);
                                   #   n alone only if exactly one tab has that
-                                  #   chrome tab id. --quiet = don't bringToFront
+                                  #   chrome tab id. Drives the tab in the
+                                  #   background; --focus also raises it
+                                  #   (--quiet is accepted, a no-op)
                                   #   a tab in another bound browser makes it active
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
+  new-tab [url] [--window <windowId>]
+                                  # new background tab in an existing window
+                                  #   (windowId from 'tabs --json'; bridge only),
+                                  #   never focused; becomes the active tab
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js> [--timeout <ms>] [--no-wait]

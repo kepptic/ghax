@@ -75,9 +75,13 @@ export interface BridgeExtensionInfo {
  */
 export type ControlTarget =
   | { action: 'control-active' }
-  | { action: 'control-tab'; tabId: number; quiet?: boolean }
+  // `focus: true` raises the tab and its window; anything else drives it in
+  // the background. `quiet` is the pre-v0.11 spelling, still sent so an
+  // older extension (which focused unless `quiet`) stays in the background.
+  | { action: 'control-tab'; tabId: number; focus?: boolean; quiet?: boolean }
   | { action: 'list-tabs' }
   | { action: 'new-window'; url: string }
+  | { action: 'new-tab'; url: string; windowId?: number }
   | { action: 'reload' }
   | { action: 'stop' };
 
@@ -1384,7 +1388,7 @@ export class Bridge extends EventEmitter {
     let next: ControlTarget | null | undefined;
     if (target.action === 'stop') next = null;
     else if (target.action === 'control-active') next = target;
-    else if (target.action === 'control-tab') next = { ...target, quiet: true };
+    else if (target.action === 'control-tab') next = { ...target, focus: false, quiet: true };
     if (next === undefined) return;
     if (session) session.desiredControl = next;
     else this.initialDesiredControl = next;
