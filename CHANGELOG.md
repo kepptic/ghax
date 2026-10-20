@@ -5,8 +5,74 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Added
+- **`ghax new-tab [url] [--window <windowId>]`.** Opens an inactive tab in an
+  existing window and makes it this daemon's tab, without raising the window or
+  changing the tab you are looking at. Returns the same shape as `new-window`.
+  `--window` takes a `windowId` from `ghax tabs --json` and is bridge-only;
+  over CDP the tab opens in the last active window.
 
-_No changes yet._
+### Changed
+- **Breaking: `active` in `ghax tabs` now means the window's foreground tab.**
+  It used to mean "the tab this daemon drives". Every window of every listed
+  browser has one `active` row, whichever daemon drives it, and a background
+  tab you drive with `new-tab` is not `active`. Needs an extension that sends
+  `windowActive` (run `ghax bridge reload`); an older extension's rows show no
+  `active` at all. Scripts that read `active` to find their own tab should read
+  `controlledBy.self` instead.
+- **Breaking: `controlledBy` in `ghax tabs --json` is an object, not a port.**
+  It is `{port, pid, name, cwd, self}`, or `null` for a free tab. The text form
+  prints `you`, the agent name, `<cwd>/<pid>`, or `:<port>` as a last resort.
+  `ghax attach --name <agent>` (same as `GHAX_AGENT`) sets the name.
+- **Profile names come from the browser.** With no "Profile name" in the
+  extension popup, the daemon finds the profile whose extension storage holds
+  this install's id and reads its display name from `Local State` (only
+  `.name`; exactly one profile dir must match, else no name). A popup label
+  always wins. `GHAX_BROWSER_PROFILE_ROOTS` overrides the User Data roots; an
+  empty value turns the lookup off. The scan runs only when the hello carries
+  the extension's own id, reads only regular files (a symlink or FIFO is
+  skipped), caps every read at 8 MB, and runs off the hello path: the browser
+  binds at once and the name lands when the scan does. Hits are cached for the
+  daemon's life, misses for 60 s, 64 entries at most.
+- **`ghax tabs` text layout:** `#3  edge-dag-tech:42  "Title"  Edge · DAG Tech
+  · win 2  active  controlledBy=<owner>`. `--json` rows gain `window` (the
+  browser's windows numbered 1..n).
+- **`ghax tabs` covers parked browsers** and prints a "no open windows" note for
+  a browser with none. A daemon borrowed from another directory (the
+  "no daemon here" fallback) is read-only: `network --har` and
+  `--source-maps` are refused too, the daemon enforces the same list, and a
+  borrowed `tabs` no longer replaces the owner's listing that `tab '#n'`
+  resolves against.
+- **`ghax tab` no longer takes focus.** Switching tabs used to activate the tab
+  and focus its window (bridge) or `bringToFront` it (CDP). It now drives the
+  tab in the background. Pass `--focus` for the old behaviour. `--quiet` is
+  still accepted and does nothing. The daemon still sends `quiet` to the
+  extension, so an extension older than this release stays in the background
+  too.
+- **Background tabs render.** Chromium stops painting hidden tabs, so on a
+  background tab `requestAnimationFrame` never fired and `wait --stable` hung
+  until its 15 s timeout. Each `Input.dispatchMouseEvent` also waited about
+  1.8 s, which made `click` take 5.6 s. ghax now enables
+  `Emulation.setFocusEmulationEnabled` on the tab it drives, which marks the
+  page visible and focused for that debugger session only and raises nothing.
+  Measured on Edge 150 over the bridge, before and after: `click` 5.9 s to
+  0.8 s, `wait --stable` timeout to 0.7 s, `new-tab` 5.1 s to 0.5 s. The
+  extension re-applies it after every debugger re-attach (navigation,
+  interstitial, service-worker restart), since each attach is a new session
+  where it is off again.
+
+### Fixed
+- **`new-tab`/`new-window` over CDP take the tab they created.** They used to
+  adopt the first new page the browser reported, so a tab another agent or the
+  user opened in the same moment could become this daemon's tab. They now wait
+  for the page whose target id `Target.createTarget` returned (10 s timeout).
+- **`new-tab --window` with no value is a usage error** (exit 1). It used to
+  read as window 1.
+- **`ghax bridge control --tab-id` drives the tab in the background**, like
+  `ghax tab`. It still raised the tab.
+- **`controlledBy` names a long working directory by its last segment.** The
+  path was capped at 40 characters before the basename was taken, so a deep
+  directory showed a random middle segment.
 
 ## [0.10.1] - 2026-10-14
 ### Fixed

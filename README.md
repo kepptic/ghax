@@ -224,11 +224,11 @@ Re-run with `--browser edge` (or a label), or keep the daemon and pick with `gha
 **Which tab is which.** `ghax tabs` names every tab by row, id, title, browser and profile:
 
 ```
-#1  work:7   "Inbox"                    Edge · Work  controlledBy=:9223  active
-#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none
+#1  edge-work:7   "Inbox"                    Edge · Work · win 1  active  controlledBy=you
+#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work · win 1  controlledBy=none
 ```
 
-The id is `<brand>-<profile>:<chrome tab id>` (e.g. `edge-work:42`). Set the profile name in the extension popup; without one the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). Aliases are unique: a collision appends the instance prefix, and a live browser keeps its alias when another with the same name connects. `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab edge-work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches (including a same-number tab in a browser your last `ghax tabs --browser` listed). A `#n` is also refused after the browser restarts.
+`active` marks the foreground tab of each window, whoever drives it; `controlledBy` says who drives the tab (`you`, the agent's `--name`, `<dir>/<pid>`, or `none`). The id is `<brand>-<profile>:<chrome tab id>` (e.g. `edge-work:42`). The profile name is read from the browser's own profile data when exactly one profile matches; a name set in the extension popup wins. Without either the id uses `<brand>-<instance prefix>` (e.g. `edge-3f2a1b:42`). Aliases are unique: a collision appends the instance prefix, and a live browser keeps its alias when another with the same name connects. `ghax tab '#2'` picks row 2 of the last listing and refuses if that tab has closed since. `ghax tab edge-work:42` takes the full id. `ghax tab 42` works only when exactly one tab has that number; otherwise it refuses and lists the matches (including a same-number tab in a browser your last `ghax tabs --browser` listed). A `#n` is also refused after the browser restarts.
 
 If `ghax bridge instances` warns that ownership is flapping, an older build of the extension is still loaded somewhere — reload it in that profile, or disable the copies you don't drive.
 
@@ -250,10 +250,12 @@ GHAX_STATE_FILE=/tmp/ghax-a.json ghax attach --extension --control-active
 
 # Agent B — 9223 is taken, so this daemon takes 9224 and says so
 GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension
-GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://target.example
+GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-tab https://target.example
 ```
 
-One tab, one agent. `ghax tabs` gains a `controlledBy` field (the owning agent's bridge port, or `null` when free), and pointing an agent at a tab another one already drives is refused with the port to go stop it on, rather than two sessions quietly sharing a page. Design notes: [`09-bridge-multi-agent.md`](docs/design/plan/09-bridge-multi-agent.md).
+**Background by default.** ghax never takes focus unless you ask. `new-tab` opens an inactive tab in your current window (or `--window <windowId>` from `ghax tabs --json`), and `ghax tab <id>` switches the daemon without activating the tab or raising its window. Use `ghax tab <id> --focus` to bring it forward. A driven tab gets focus emulation, so `click`, `wait --stable`, `screenshot` and page code that waits on `requestAnimationFrame` behave as they would in a visible tab. You keep working in the front tab while several agents work in background tabs.
+
+One tab, one agent. `ghax tabs --json` has `controlledBy` (`{port, pid, name, cwd, self}`, or `null` when free; name it with `ghax attach --name`), and pointing an agent at a tab another one already drives is refused with the port to go stop it on, rather than two sessions quietly sharing a page. Design notes: [`09-bridge-multi-agent.md`](docs/design/plan/09-bridge-multi-agent.md).
 
 **Resilience.** If the service worker is evicted mid-session, the daemon holds the session open for a grace window instead of failing: commands issued during the gap queue and run on reconnect, each still honouring its own deadline. Read-only commands interrupted in flight are replayed; anything that could have mutated the page reports `BRIDGE_OUTCOME_UNKNOWN` — "the action MAY have landed, verify with `ghax snapshot`" — rather than risking a double-submit.
 
@@ -351,7 +353,7 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach
 GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-window https://app-b.com
 ```
 
-Same browser process, separate windows and separate daemon state. Neither agent sees the other's active-tab pointer.
+Same browser process, separate windows and separate daemon state. `new-tab` does the same with a background tab in an existing window instead of a new window. Neither agent sees the other's active-tab pointer.
 
 **Finding a daemon from another directory.** The state file follows the git root of your cwd, so a daemon attached from `~/work/a` used to be invisible from `~/work/b`. Every daemon now registers in `~/.ghax/daemons/<pid>.json` (removed when it exits; entries for dead pids are pruned on read). When your directory has no live daemon and `GHAX_STATE_FILE` is unset, ghax uses the one registered daemon and prints one stderr line naming its cwd and browser. With several running it refuses and lists each with the `GHAX_STATE_FILE=` to set. `ghax attach` never reuses another directory's daemon, and `ghax detach` only stops the one it resolves to.
 

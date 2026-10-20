@@ -1211,6 +1211,14 @@ unsafe fn libc_isatty(_fd: i32) -> i32 {
 pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     crate::update::maybe_show_banner();
 
+    // `--name <label>`: how this agent shows up as a tab owner in every other
+    // agent's `ghax tabs`. The daemon reads GHAX_AGENT (inherited from this
+    // process) and stores it in its ~/.ghax/daemons entry; setting the env
+    // var directly works the same.
+    if let Some(name) = parsed.flags.get("name").and_then(|v| v.as_str()) {
+        std::env::set_var("GHAX_AGENT", name);
+    }
+
     let explicit_port: Option<u16> = parsed
         .flags
         .get("port")

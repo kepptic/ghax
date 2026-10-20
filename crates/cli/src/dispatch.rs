@@ -126,9 +126,44 @@ fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
             eprintln!("ghax: {err}");
             state::resolve_config()
         })),
-        _ => state::resolve_config_for_use(),
+        _ => {
+            let (cfg, borrowed) = state::resolve_config_with_origin()?;
+            if let Some(entry) = borrowed {
+                if !borrow_allowed(verb, rest) {
+                    return Err(anyhow::anyhow!(state::borrowed_refusal(verb, &entry)));
+                }
+                state::note_adoption(&entry);
+                // The daemon enforces the same allowlist and keeps its session
+                // state (the `tab #n` listing) untouched for marked calls.
+                crate::rpc::set_borrowed(true);
+            }
+            Ok(cfg)
+        }
     }
 }
+
+/// What a daemon borrowed from another directory (discovery fallback) may be
+/// asked: reads that change nothing in the browser or in the daemon's
+/// session. Everything else belongs to whoever attached it, so it needs an
+/// explicit `ghax attach` here or GHAX_STATE_FILE.
+fn borrow_allowed(verb: &str, rest: &[String]) -> bool {
+    match verb {
+        "status" | "tabs" | "version" => true,
+        // `network --har` writes a file; `--source-maps` fetches scripts and
+        // fills the daemon's map cache. `--clear`/`--export` are refused up
+        // front so a future flag of that kind can't slip through.
+        "console" | "network" => !rest.iter().any(|a| {
+            let flag = a.split('=').next().unwrap_or(a);
+            BORROW_DENIED_FLAGS.contains(&flag)
+        }),
+        "bridge" => rest.first().map(String::as_str) == Some("instances"),
+        _ => false,
+    }
+}
+
+/// console/network flags that write a file or change daemon state. Must
+/// match BORROW_DENIED_OPTS in src/daemon.ts.
+const BORROW_DENIED_FLAGS: &[&str] = &["--har", "--source-maps", "--clear", "--export"];
 
 #[cfg(test)]
 mod local_only_tests {
@@ -146,6 +181,32 @@ mod local_only_tests {
         assert!(!is_local_only("version", &v(&["--full"])));
         assert!(!is_local_only("tabs", &v(&[])));
         assert!(!is_local_only("status", &v(&[])));
+    }
+
+    #[test]
+    fn borrowed_daemons_are_read_only() {
+        for verb in ["status", "tabs", "version", "console", "network"] {
+            assert!(borrow_allowed(verb, &v(&[])), "{verb}");
+        }
+        assert!(borrow_allowed("bridge", &v(&["instances"])));
+        assert!(!borrow_allowed("bridge", &v(&["use", "edge"])));
+        assert!(!borrow_allowed("bridge", &v(&["reload"])));
+        for verb in ["goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot"] {
+            assert!(!borrow_allowed(verb, &v(&[])), "{verb}");
+        }
+    }
+
+    #[test]
+    fn borrowed_console_and_network_refuse_writing_flags() {
+        assert!(!borrow_allowed("network", &v(&["--har", "/tmp/x.har"])));
+        assert!(!borrow_allowed("network", &v(&["--har=/tmp/x.har"])));
+        assert!(!borrow_allowed("network", &v(&["--pattern", "api", "--export", "x"])));
+        assert!(!borrow_allowed("console", &v(&["--clear"])));
+        assert!(!borrow_allowed("console", &v(&["--source-maps"])));
+        assert!(borrow_allowed("network", &v(&["--pattern", "api", "--last", "5"])));
+        assert!(borrow_allowed("console", &v(&["--errors", "--follow"])));
+        // A value that merely mentions a flag is not that flag.
+        assert!(borrow_allowed("network", &v(&["--pattern", "x--har"])));
     }
 }
 
@@ -191,7 +252,16 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             crate::auth::cmd_auth(cfg, &parsed)
         }
 
-        "tab" | "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
+        "tab" => {
+            // `--focus` / `--quiet` are switches: `tab --focus '#2'` must not
+            // swallow the selector as the flag's value.
+            let mut parsed = args::parse(rest);
+            take_switch(&mut parsed, "focus");
+            take_switch(&mut parsed, "quiet");
+            simple(cfg, "tab", parsed)
+        }
+
+        "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
         | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
         | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
@@ -228,6 +298,11 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "new-window" => {
             let parsed = args::parse(rest);
             simple(cfg, "newWindow", parsed)
+        }
+
+        "new-tab" => {
+            let parsed = args::parse(rest);
+            simple(cfg, "newTab", parsed)
         }
 
         "fill" => {

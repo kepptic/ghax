@@ -19,6 +19,8 @@
  * process.env assignment here, so the module would read the defaults).
  */
 
+// Never read the real machine's browser profiles: names come from hello only.
+process.env.GHAX_BROWSER_PROFILE_ROOTS = '';
 import { WebSocket } from 'ws';
 import * as fs from 'fs';
 import * as os from 'os';

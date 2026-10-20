@@ -19,6 +19,8 @@
  * Exit 0 on success, non-zero if any check failed.
  */
 
+// Never read the real machine's browser profiles: names come from hello only.
+process.env.GHAX_BROWSER_PROFILE_ROOTS = '';
 import { WebSocket, WebSocketServer } from 'ws';
 import { readFileSync, mkdtempSync, rmSync } from 'fs';
 import { spawn, type ChildProcess } from 'child_process';
@@ -27,12 +29,13 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BridgeInterrupted, BRIDGE_PORT_RANGE } from '../src/bridge';
 import { PeerRegistry } from '../src/bridge-peers';
+import { waitForTargetPage } from '../src/target-match';
 import { CircularBuffer, type ConsoleEntry, type NetworkEntry } from '../src/buffers';
 import {
   activePeerState, pickMainFrameContext, wireBridgePageEvents, type BridgePageSink,
 } from '../src/bridge-page-state';
 import {
-  bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
+  bridgeRowsToIdentities, cwdLabel, displayBrand, formatTabLine, mintAliases, ownerLabel, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity, type TabOwner,
 } from '../src/tab-identity';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -85,6 +88,8 @@ class FakeExtension {
    * stamped with another daemon's id must not be restored.
    */
   readonly controlledTabs = new Map<number, { daemonId: string | null; tabId: number }>();
+  /** Tab id shown in the (single) fake window; null = the first tab. */
+  foregroundTabId: number | null = null;
   tabs: FakeTab[] = [
     { id: 1, title: 'tab one', url: 'https://one.example' },
     { id: 2, title: 'tab two', url: 'https://two.example' },
@@ -193,6 +198,8 @@ class FakeConnection {
   attachFailure: Error | null = null;
   /** The id of the last control request seen — lets a test forge an ack for it. */
   lastControlId: number | null = null;
+  /** The last control message received, whole (focus/quiet flags included). */
+  lastControl: any = null;
   /**
    * Answer (or hold) a CDP command instead of the default echo. Return true
    * when handled; `reply` may be called later to release a held command.
@@ -380,6 +387,7 @@ class FakeConnection {
   private onControl(msg: any): void {
     const id = msg.id ?? null;
     if (typeof msg.id === 'number') this.lastControlId = msg.id;
+    this.lastControl = msg;
     if (this.swallowControl) return; // never answered — the request stays pending
     try {
       if (msg.action === 'reload') {
@@ -404,6 +412,8 @@ class FakeConnection {
               title: tab.title,
               url: tab.url,
               active: tab.id === this.controlledTabId,
+              // The window's foreground tab; the first tab unless a test moves it.
+              windowActive: tab.id === (this.ext.foregroundTabId ?? this.ext.tabs[0]?.id),
               controlledBy: owner ? owner.port : null,
               // Only extensions with tab identity report placement.
               ...(this.ext.profile !== null ? { windowId: 1, index: i } : {}),
@@ -1195,6 +1205,9 @@ async function main(): Promise<void> {
         line === '#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none',
         `tabs text line: ${line}`,
       );
+      // The window's foreground tab (first tab of the fake) gets the `active` word.
+      const fg = formatTabLine(work.find((t) => t.chromeTabId === 7)!);
+      assert(/^#1  edge-work:7  "Inbox"  Edge · Work( · win \d+)?  active  controlledBy=none$/.test(fg), `foreground line: ${fg}`);
     });
   });
 
@@ -1300,6 +1313,37 @@ async function main(): Promise<void> {
     const s = sanitizeLabel('Wo\nrk\x00\u202e\u200b ' + 'x'.repeat(80));
     assert(!/[\n\x00\u202e\u200b]/.test(s) && s.length <= 40 && s.startsWith('Work x'), JSON.stringify(s));
     assert(sanitizeLabel('Zoë') === 'Zoë', 'letters survive');
+  });
+
+  await test('cwdLabel takes the basename before capping, so a long path keeps its last segment', async () => {
+    const long = '/Users/someone/Documents/DevOps/kepptic/products/open-source/kepptic/ghax/';
+    assert(sanitizeLabel(long).split('/').pop() !== 'ghax', 'premise: capping first loses the basename');
+    assert(cwdLabel(long) === 'ghax', `cwdLabel: ${cwdLabel(long)}`);
+    assert(cwdLabel('C:\\work\\repo') === 'repo', 'windows separators');
+    assert(cwdLabel('/a/b\nc\u202e') === 'bc', `controls stripped after the split: ${JSON.stringify(cwdLabel('/a/b\nc\u202e'))}`);
+    const owner: TabOwner = { port: 9224, pid: 7, name: null, cwd: cwdLabel(long), self: false };
+    assert(ownerLabel(owner) === 'ghax/7', `ownerLabel: ${ownerLabel(owner)}`);
+  });
+
+  await test('CDP new-tab takes the page whose target id createTarget returned, not the first new page', async () => {
+    // Another agent's tab lands first; ours arrives 30 ms later.
+    const pages: string[] = ['existing'];
+    let wake: (() => void) | null = null;
+    const add = (id: string) => { pages.push(id); wake?.(); };
+    setTimeout(() => add('rival'), 5);
+    setTimeout(() => add('mine'), 30);
+    const got = await waitForTargetPage({
+      pages: () => [...pages],
+      targetIdOf: async (p) => p,
+      nextPage: (ms) => new Promise<void>((r) => { wake = r; setTimeout(r, ms); }),
+    }, 'mine', 2000, 20);
+    assert(got === 'mine', `matched ${got}`);
+    const t0 = Date.now();
+    let err = '';
+    try {
+      await waitForTargetPage({ pages: () => ['rival'], targetIdOf: async (p) => p, nextPage: (ms) => sleep(ms) }, 'never', 120, 20);
+    } catch (e) { err = String((e as Error).message); }
+    assert(/did not appear within 120 ms/.test(err) && Date.now() - t0 < 1000, `timeout: ${err}`);
   });
 
   await test('PeerRegistry.decide refuses two candidates (pure)', async () => {
@@ -2027,14 +2071,20 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('daemon, all: tabs marks only the daemon-active browser\'s tab active', async () => {
+  await test('daemon, all: tabs `active` is each browser\'s foreground tab, not the daemon-active one', async () => {
     await withDaemon(async (h) => {
-      const { rpc, chrome, alias } = h;
+      const { rpc, chrome, edgeExt, alias } = h;
       await driveEdgeTab1(h);
-      chrome.controlledTabId = 2; // the other browser drives a tab of its own
+      chrome.controlledTabId = 2; // the other browser drives a background tab of its own
+      edgeExt.foregroundTabId = 3;
       const tabs = await rpc('tabs');
-      const act = tabs.data.filter((t: any) => t.active);
-      assert(act.length === 1 && act[0].id === `${await alias('inst-edge')}:1`, `active rows: ${JSON.stringify(act)}`);
+      const ea = await alias('inst-edge');
+      const ca = await alias('inst-chrome');
+      const act = tabs.data.filter((t: any) => t.active).map((t: any) => t.id).sort();
+      const want = [`${ea}:3`, `${ca}:1`].sort();
+      assert(JSON.stringify(act) === JSON.stringify(want), `foreground rows ${JSON.stringify(want)}, got ${JSON.stringify(act)}`);
+      const driven = tabs.data.find((t: any) => t.id === `${ea}:1`);
+      assert(driven && !driven.active, 'the tab the daemon drives is not active when it is in the background');
     });
   });
 
@@ -2089,16 +2139,17 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('daemon, all: tabs --browser on a non-active browser marks nothing active', async () => {
+  await test('daemon, all: tabs --browser on a non-active browser still marks its foreground tab active', async () => {
     await withDaemon(async (h) => {
-      const { rpc, chrome } = h;
+      const { rpc, chrome, alias } = h;
       await driveEdgeTab1(h);
       chrome.controlledTabId = 2;
       const r = await rpc('tabs', [], { browser: 'inst-chrome' });
       assert(r.ok && r.data.length > 0, `tabs --browser: ${JSON.stringify(r)}`);
-      assert(r.data.every((t: any) => !t.active), `a parked browser's own active flag leaked: ${JSON.stringify(r.data.filter((t: any) => t.active))}`);
+      const act = r.data.filter((t: any) => t.active).map((t: any) => t.id);
+      assert(act.length === 1 && act[0] === `${await alias('inst-chrome')}:1`, `chrome's foreground tab, not the one it drives: ${JSON.stringify(act)}`);
       const own = await rpc('tabs', [], { browser: 'inst-edge' });
-      assert(own.ok && own.data.filter((t: any) => t.active).length === 1, `the active browser keeps its flag: ${JSON.stringify(own)}`);
+      assert(own.ok && own.data.filter((t: any) => t.active).length === 1, `one foreground tab per window: ${JSON.stringify(own)}`);
     });
   });
 
@@ -2109,6 +2160,51 @@ async function main(): Promise<void> {
         assert(!r.ok && /no active tab/.test(String(r.error)) && /--all/.test(String(r.error)), `${verb}: ${JSON.stringify(r)}`);
       }
       assert((await rpc('console', [], { all: true })).ok, '--all still works');
+    });
+  });
+
+  await test('daemon, borrowed: tabs leaves the owner\'s #n listing alone; writes and non-read verbs are refused', async () => {
+    await withDaemon(async ({ rpc, alias }) => {
+      const ca = await alias('inst-chrome');
+      const own = await rpc('tabs');
+      assert(own.ok && own.data.length === 6, `owner listing: ${JSON.stringify(own)}`);
+      const row5 = own.data.find((t: any) => t.index === 5);
+      // A borrowed listing of one browser only: 3 rows. Were it stored, the
+      // owner's `#5` would resolve against it and fail.
+      const peek = await rpc('tabs', [], { borrowed: true, browser: 'inst-chrome' });
+      assert(peek.ok && peek.data.length === 3, `borrowed tabs: ${JSON.stringify(peek)}`);
+      const sw = await rpc('tab', ['#5']);
+      assert(sw.ok && sw.data.id === row5.id && row5.id.startsWith(`${ca}:`), `owner's #5 after a borrowed listing: ${JSON.stringify(sw)}`);
+      for (const [cmd, opts] of [
+        ['goto', {}], ['tab', {}], ['eval', {}], ['batch', {}],
+        ['network', { har: '/tmp/ghax-borrowed.har' }], ['console', { 'source-maps': true }],
+      ] as const) {
+        const r = await rpc(cmd, cmd === 'goto' ? ['https://example.com'] : [], { ...opts, borrowed: true });
+        assert(!r.ok && /borrowed daemon \(read-only\)/.test(String(r.error)), `${cmd} ${JSON.stringify(opts)}: ${JSON.stringify(r)}`);
+      }
+      assert((await rpc('network', [], { borrowed: true, all: true })).ok, 'plain network still reads');
+      assert((await rpc('bridge.instances', [], { borrowed: true })).ok, 'bridge instances still reads');
+    });
+  });
+
+  await test('daemon: bridge control --tab-id drives the tab in the background (focus:false, quiet:true)', async () => {
+    await withDaemon(async ({ rpc, edge, alias }) => {
+      const ea = await alias('inst-edge');
+      const r = await rpc('bridge.control', [], { mode: 'tab', tabId: `${ea}:2` });
+      assert(r.ok, JSON.stringify(r));
+      assert(edge.lastControl?.action === 'control-tab' && edge.lastControl.focus === false && edge.lastControl.quiet === true,
+        `control message: ${JSON.stringify(edge.lastControl)}`);
+    });
+  });
+
+  await test('daemon: new-tab --window with no value or a boolean is a usage error', async () => {
+    await withDaemon(async ({ rpc }) => {
+      for (const w of [true, false, '', ' ']) {
+        const r: any = await rpc('newTab', ['https://example.com'], { window: w });
+        assert(!r.ok && r.exitCode === 1 && /requires a window id/.test(String(r.error)), `--window ${JSON.stringify(w)}: ${JSON.stringify(r)}`);
+      }
+      const bad: any = await rpc('newTab', [], { window: 'abc' });
+      assert(!bad.ok && bad.exitCode === 1 && /not a window id/.test(String(bad.error)), JSON.stringify(bad));
     });
   });
 

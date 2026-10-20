@@ -334,8 +334,9 @@ c('tabs rows carry index, browser and profile (CDP)', async () => {
     assert(t.index === i + 1, `row ${i} should have index ${i + 1}, got ${t.index}`);
     assert(typeof t.browser === 'string' && t.browser.length > 0, `browser missing: ${JSON.stringify(t)}`);
     // CDP has no profile name and no chrome tab id; the id is the target id.
+    // windowId comes from Browser.getWindowForTarget.
     assert(t.profile === '—', `CDP profile should be '—', got ${t.profile}`);
-    assert(t.chromeTabId === null && t.windowId === null, `CDP rows: ${JSON.stringify(t)}`);
+    assert(t.chromeTabId === null && typeof t.windowId === 'number', `CDP rows: ${JSON.stringify(t)}`);
   });
   const text = (await run(['tabs'])).stdout.split('\n')[0];
   assert(/^#1  \S+  ".*"  \S+ · —/.test(text), `tabs text line should be '#1  <id>  "<title>"  <Browser> · —', got: ${text}`);
@@ -2154,6 +2155,31 @@ c('new-window opens a background window and auto-locks active tab', async () => 
   // After close, subsequent commands need the active tab to point somewhere
   // valid — re-attach to the original.
   if (beforeActive) await run(['tab', beforeActive, '--quiet'], { allowFailure: true });
+});
+
+c('new-tab opens a background tab, locks onto it, and tab --focus is a switch', async () => {
+  const beforeTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const beforeActive = beforeTabs.find((t) => t.active)?.id;
+  const r = await run(['new-tab', 'data:text/html,<title>bg</title><p>bg tab</p>', '--json']);
+  const created = parseJson<{ id: string; url: string; index: number }>(r.stdout);
+  try {
+    assert(typeof created.id === 'string' && created.id.length > 0, `new-tab should return an id: ${r.stdout}`);
+    assert(created.index === 0 && /^data:/.test(created.url), `new-tab shape: ${r.stdout}`);
+    const afterTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+    assert(afterTabs.length === beforeTabs.length + 1, `expected tab count +1, got ${afterTabs.length - beforeTabs.length}`);
+    assert(afterTabs.find((t) => t.active)?.id === created.id, 'the new tab should be the daemon\'s active tab');
+    const text = (await run(['text'])).stdout;
+    assert(/bg tab/.test(text), `text should read the new tab, got: ${text.slice(0, 120)}`);
+    // CDP's createTarget has no window parameter, so --window refuses there.
+    const win = await run(['new-tab', 'about:blank', '--window', '1'], { allowFailure: true });
+    assert(win.exitCode !== 0 && /bridge-only/.test(win.stderr + win.stdout), `--window over CDP should refuse: ${win.stderr || win.stdout}`);
+    // --focus must not swallow the selector that follows it.
+    const f = await run(['tab', '--focus', created.id, '--json']);
+    assert(parseJson<{ id: string }>(f.stdout).id === created.id, `tab --focus <id>: ${f.stdout}`);
+  } finally {
+    await run(['eval', 'window.close()'], { allowFailure: true });
+    if (beforeActive) await run(['tab', beforeActive], { allowFailure: true });
+  }
 });
 
 c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {

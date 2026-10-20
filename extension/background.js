@@ -27,7 +27,8 @@
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
  *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop"|
- *                             "list-tabs"|"new-window"|"reload","tabId?":N}
+ *                             "list-tabs"|"new-window"|"new-tab"|"reload","tabId?":N,
+ *                             "focus?":bool (control-tab only),"url?":"...","windowId?":N (new-tab)}
  *   -> daemon, control ack:  {"type":"control-ack","id":<n>,"ok":bool,"tabId?":N,"error?":"..."}
  *      "reload" is the odd one out: it acks BEFORE doing the thing (see
  *      handleControl), because chrome.runtime.reload() kills this worker
@@ -36,7 +37,8 @@
  *      attachment, so a parked connection can still ask for it.
  *   -> daemon, control note: {"type":"controlled","tabId":N|null}   (pushed on any change)
  * `list-tabs` acks additionally carry `controlledBy` per tab: the bridge port
- * of the agent that owns it, or null, plus `windowId` and `index` (position in
+ * of the agent that owns it, or null, plus `windowId`, `windowActive` (the
+ * window's foreground tab) and `index` (position in
  * its window). `hello` also carries `profile` (same value as `label`, the
  * popup's "Profile name") and `brandVersion`; the daemon mints tab ids
  * `<alias>:<tabId>` from them (docs/design/plan/11-multi-browser.md).
@@ -518,6 +520,10 @@ class BridgeConnection {
         // name tab identity uses (docs/design/plan/11-multi-browser.md).
         // Daemons predating it read `label`; newer ones prefer `profile`.
         profile: identity.label,
+        // Lets the daemon find this profile's storage dir on disk and read the
+        // browser's own name for the profile when no label is set
+        // (src/browser-profiles.ts). Same for every profile of one unpacked dir.
+        extensionId: chrome.runtime.id,
         brandVersion: identity.brandVersion,
         // New per browser session (chrome.storage.session dies with the
         // browser, survives a service-worker respawn). Tab ids restart with
@@ -717,6 +723,15 @@ class BridgeConnection {
     }
     this.attached = true;
     this.detachedReason = null;
+    // Focus emulation lives and dies with the debugger session. The daemon
+    // turns it on when it learns of a tab, but every re-attach here (after
+    // navigation, an interstitial, a SW restart, a refused command) is a new
+    // session where it is off again, and a background tab then stops
+    // rendering: rAF never fires and each input event waits ~1.8 s for a
+    // frame. So every successful attach re-applies it. Best effort: an old
+    // browser without the method still drives fine in the foreground.
+    await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true })
+      .catch(() => undefined);
   }
 
   /**
@@ -1044,6 +1059,9 @@ class BridgeConnection {
               title: tab.title ?? '',
               url: tab.url ?? '',
               active: tab.id === this.controlledTabId,
+              // The browser's own foreground tab in its window. `active` above
+              // stays "this connection's controlled tab" for older daemons.
+              windowActive: tab.active === true,
               // Which agent owns this tab, so `ghax tabs` can show the other
               // sessions' territory instead of offering a tab that will refuse.
               controlledBy: owner ? owner.port : null,
@@ -1055,11 +1073,21 @@ class BridgeConnection {
         });
         return;
       }
-      if (msg.action === 'new-window') {
-        const win = await chrome.windows.create({ url: msg.url || 'about:blank', focused: false });
-        const candidates = win.tabs?.length ? win.tabs : await chrome.tabs.query({ windowId: win.id });
-        let tab = candidates.find((candidate) => typeof candidate.id === 'number');
-        if (!tab?.id) throw new Error('new window did not create a controllable tab');
+      if (msg.action === 'new-window' || msg.action === 'new-tab') {
+        // Both open in the background: a new unfocused window, or an inactive
+        // tab in an existing window. Neither raises a window or moves the
+        // user's active tab.
+        let tab;
+        if (msg.action === 'new-window') {
+          const win = await chrome.windows.create({ url: msg.url || 'about:blank', focused: false });
+          const candidates = win.tabs?.length ? win.tabs : await chrome.tabs.query({ windowId: win.id });
+          tab = candidates.find((candidate) => typeof candidate.id === 'number');
+        } else {
+          const props = { url: msg.url || 'about:blank', active: false };
+          if (typeof msg.windowId === 'number') props.windowId = msg.windowId;
+          tab = await chrome.tabs.create(props);
+        }
+        if (!tab?.id) throw new Error(`${msg.action} did not create a controllable tab`);
         await this.switchControlTo(tab.id);
         const deadline = Date.now() + 5000;
         while (tab.status !== 'complete' && Date.now() < deadline) {
@@ -1090,7 +1118,10 @@ class BridgeConnection {
         // the user's window for nothing.
         const owner = ownerOf(tabId);
         if (owner && owner !== this) throw conflictError(tabId, owner);
-        if (!msg.quiet) {
+        // Background by default: only an explicit `focus: true` (`ghax tab
+        // --focus`) raises the tab and its window. Driving a tab never needs
+        // focus, and several agents share one browser with the user.
+        if (msg.focus === true) {
           const tab = await chrome.tabs.update(tabId, { active: true });
           if (typeof tab.windowId === 'number') await chrome.windows.update(tab.windowId, { focused: true });
         }

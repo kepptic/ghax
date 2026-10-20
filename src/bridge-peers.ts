@@ -6,7 +6,20 @@
  * bound/degraded state machine; those stay in Bridge.
  */
 import { WebSocket } from 'ws';
+import { cachedProfileName, lookupProfileName } from './browser-profiles';
 import { mintAliases, sanitizeLabel } from './tab-identity';
+
+/**
+ * Browser profile name for an instance with no popup label: (instanceId,
+ * brand, chrome.runtime.id) → name, '' when unknown. A string is an answer
+ * now (cache); a promise is a disk scan the hello does NOT wait for: the name
+ * is applied when it lands. Default reads the browser's own profile data
+ * (src/browser-profiles.ts).
+ */
+export type ProfileLookup = (instanceId: string, brand: string, extensionId: string) => string | Promise<string>;
+
+const defaultProfileLookup: ProfileLookup = (instanceId, brand, extensionId) =>
+  cachedProfileName(instanceId, { brand, extensionId }) ?? lookupProfileName(instanceId, { brand, extensionId });
 
 export type PeerRole = 'bound' | 'parked';
 
@@ -53,8 +66,13 @@ export interface BridgeInstance {
   instanceId: string;
   browser: string;
   label: string;
-  /** Popup "Profile name" (hello.profile, else hello.label). */
+  /**
+   * Popup "Profile name" (hello.profile, else hello.label), else the
+   * browser's own name for the profile (`profileSource: 'browser'`).
+   */
   profile: string;
+  /** Where `profile` came from: the popup label, the browser's profile data, or nowhere. */
+  profileSource: ProfileSource;
   /** Tab-id prefix for this instance: `<alias>:<chromeTabId>`. */
   alias: string;
   /** Browser major version from the extension, '' if it did not say. */
@@ -70,11 +88,16 @@ export interface BridgeInstance {
   replacedCount: number;
 }
 
+export type ProfileSource = 'label' | 'browser' | 'none';
+
 export interface Peer {
   instanceId: string;
   browser: string;
   label: string;
   profile: string;
+  profileSource: ProfileSource;
+  /** chrome.runtime.id from hello; '' from extensions predating it. */
+  extensionId: string;
   brandVersion: string;
   version: string;
   gitSha: string;
@@ -104,8 +127,12 @@ export class PeerRegistry {
   private peers = new Map<string, Peer>();
   private socketPeer = new WeakMap<WebSocket, Peer>();
   private legacySeq = 0;
+  private pendingLookups = new Set<Promise<void>>();
 
-  constructor(private readonly log: (msg: string) => void) {}
+  constructor(
+    private readonly log: (msg: string) => void,
+    private readonly lookupProfile: ProfileLookup = defaultProfileLookup,
+  ) {}
 
   get(instanceId: string): Peer | undefined {
     return this.peers.get(instanceId);
@@ -134,7 +161,8 @@ export class PeerRegistry {
     return !filter
       || filter === BIND_ALL
       || p.browser.toLowerCase() === filter
-      || p.label.toLowerCase() === filter;
+      || p.label.toLowerCase() === filter
+      || (p.profile !== '' && p.profile.toLowerCase() === filter);
   }
 
   /**
@@ -190,6 +218,7 @@ export class PeerRegistry {
       (p) => p.instanceId.toLowerCase().startsWith(want)
         || p.browser.toLowerCase() === want
         || p.label.toLowerCase() === want
+        || (p.profile !== '' && p.profile.toLowerCase() === want)
         // The tab-id prefix, so a refusal's `ghax bridge use <alias>` works.
         || this.aliasOf(p.instanceId) === want,
     );
@@ -202,6 +231,7 @@ export class PeerRegistry {
       browser: p.browser,
       label: p.label,
       profile: p.profile,
+      profileSource: p.profileSource,
       alias: this.aliasOf(p.instanceId),
       brandVersion: p.brandVersion,
       version: p.version,
@@ -242,6 +272,31 @@ export class PeerRegistry {
     return alias;
   }
 
+  private trackLookup(instanceId: string, lookup: Promise<string>): void {
+    const done: Promise<void> = lookup
+      .then((name) => this.applyAutoProfile(instanceId, name), () => undefined)
+      .finally(() => this.pendingLookups.delete(done));
+    this.pendingLookups.add(done);
+  }
+
+  /**
+   * A profile scan finished. A popup label that arrived meanwhile wins. An
+   * alias already handed out in a listing stays (ids the agent holds must not
+   * flip); one not minted yet is minted from the new name.
+   */
+  private applyAutoProfile(instanceId: string, raw: string): void {
+    const peer = this.peers.get(instanceId);
+    const name = sanitizeLabel(raw);
+    if (!peer || !name || peer.profileSource === 'label' || peer.profile === name) return;
+    peer.profile = name;
+    peer.profileSource = 'browser';
+  }
+
+  /** Resolves once every profile scan started so far has been applied. Tests. */
+  async profileLookupsSettled(): Promise<void> {
+    while (this.pendingLookups.size > 0) await Promise.all([...this.pendingLookups]);
+  }
+
   /** browser / profile / alias of one instance, for tab listings. */
   identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string; nonce: string } | null {
     const p = this.peers.get(instanceId);
@@ -272,7 +327,19 @@ export class PeerRegistry {
     const label = typeof msg.label === 'string' ? sanitizeLabel(msg.label) : '';
     // `profile` is the tab-identity name for the same popup field; extensions
     // predating it send only `label`, which carries the same value.
-    const profile = typeof msg.profile === 'string' ? sanitizeLabel(msg.profile) : label;
+    const extensionId = typeof msg.extensionId === 'string' && /^[a-p]{32}$/.test(msg.extensionId) ? msg.extensionId : '';
+    const labelled = typeof msg.profile === 'string' ? sanitizeLabel(msg.profile) : label;
+    // No popup label: the browser's own name for the profile, when exactly
+    // one profile on disk holds this instance's storage. A label always wins.
+    // Only a cached answer is used here; a scan runs off the hello path.
+    let auto = '';
+    if (!labelled && !legacy && extensionId) {
+      const found = this.lookupProfile(instanceId, browser, extensionId);
+      if (typeof found === 'string') auto = sanitizeLabel(found);
+      else this.trackLookup(instanceId, found);
+    }
+    const profile = labelled || auto;
+    const profileSource: ProfileSource = labelled ? 'label' : auto ? 'browser' : 'none';
     const sessionNonce = typeof msg.sessionNonce === 'string' ? msg.sessionNonce.slice(0, 64) : '';
     const brandVersion = typeof msg.brandVersion === 'string' ? msg.brandVersion : '';
     const version = typeof msg.version === 'string' ? msg.version : '?';
@@ -284,7 +351,7 @@ export class PeerRegistry {
     let peer = this.peers.get(instanceId);
     if (!peer) {
       peer = {
-        instanceId, browser, label, profile, brandVersion, version, gitSha, buildDate,
+        instanceId, browser, label, profile, profileSource, extensionId, brandVersion, version, gitSha, buildDate,
         ws: null, role: 'parked',
         lastHelloAt: 0, lastFrameAt: Date.now(),
         helloCount: 0, replacedCount: 0, controlledTabId: null,
@@ -310,6 +377,8 @@ export class PeerRegistry {
     peer.browser = browser || peer.browser;
     peer.label = label || peer.label;
     peer.profile = profile || peer.profile;
+    if (profile) peer.profileSource = profileSource;
+    peer.extensionId = extensionId || peer.extensionId;
     peer.brandVersion = brandVersion || peer.brandVersion;
     peer.version = version;
     peer.gitSha = gitSha;

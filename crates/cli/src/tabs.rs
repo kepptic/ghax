@@ -2,7 +2,7 @@
 //! full identity (index, id, browser, profile, ...); `--json` prints that
 //! as-is, and the default text form is one aligned-by-separator line per tab:
 //!
-//!     #3  work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=:9224
+//!     #3  edge-dag-tech:42  "Bank feeds"  Edge · DAG Tech · win 2  active  controlledBy=you
 //!
 //! Must match `formatTabLine` in src/tab-identity.ts. With `--fields` the rows
 //! lack the identity keys, so they fall back to the generic printer.
@@ -63,22 +63,54 @@ fn format_tab_line(t: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("Browser");
     let profile = t.get("profile").and_then(Value::as_str).unwrap_or("—");
+    let mut place = format!("{browser} · {profile}");
+    if let Some(w) = t.get("window").and_then(Value::as_u64) {
+        place.push_str(&format!(" · win {w}"));
+    }
     let mut parts = vec![
         format!("#{index}"),
         id.to_string(),
         serde_json::to_string(title).unwrap_or_default(),
-        format!("{browser} · {profile}"),
+        place,
     ];
-    if let Some(c) = t.get("controlledBy") {
-        parts.push(match c.as_u64() {
-            Some(p) => format!("controlledBy=:{p}"),
-            None => "controlledBy=none".to_string(),
-        });
-    }
     if t.get("active").and_then(Value::as_bool) == Some(true) {
         parts.push("active".to_string());
     }
+    if let Some(c) = t.get("controlledBy") {
+        parts.push(format!("controlledBy={}", owner_label(c)));
+    }
     Some(parts.join("  "))
+}
+
+/// `you`, the agent's name, `<cwd basename>/<pid>`, else `:<port>`; `none`
+/// for a free tab. A bare number is an older daemon's port-only owner. The
+/// daemon already sends another agent's cwd as a cleaned basename
+/// (`cwdLabel`); taking the basename again keeps older daemons' full paths
+/// readable. Must match `ownerLabel` in src/tab-identity.ts.
+fn owner_label(c: &Value) -> String {
+    if c.is_null() {
+        return "none".to_string();
+    }
+    if let Some(p) = c.as_u64() {
+        return format!(":{p}");
+    }
+    if c.get("self").and_then(Value::as_bool) == Some(true) {
+        return "you".to_string();
+    }
+    if let Some(name) = c.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+        return name.to_string();
+    }
+    let cwd = c.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let pid = c.get("pid").and_then(Value::as_u64);
+    if let (Some(cwd), Some(pid)) = (cwd, pid) {
+        let trimmed = cwd.trim_end_matches(['/', '\\']);
+        let base = trimmed.rsplit(['/', '\\']).next().filter(|b| !b.is_empty()).unwrap_or(cwd);
+        return format!("{base}/{pid}");
+    }
+    match c.get("port").and_then(Value::as_u64) {
+        Some(p) => format!(":{p}"),
+        None => "?".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -89,30 +121,48 @@ mod tests {
     #[test]
     fn bridge_row_has_full_identity() {
         let row = json!({
-            "index": 3, "id": "work:42", "chromeTabId": 42, "browser": "Edge", "profile": "Work",
-            "windowId": 7, "title": "Bank feeds - QuickBooks", "url": "https://x", "active": false,
-            "controlledBy": 9224
+            "index": 3, "id": "edge-dag-tech:42", "chromeTabId": 42, "browser": "Edge", "profile": "DAG Tech",
+            "windowId": 1016942846u64, "window": 2, "title": "Bank feeds - QuickBooks", "url": "https://x",
+            "active": true,
+            "controlledBy": {"port": 9224, "pid": 4589, "name": null, "cwd": "/tmp/ghax-sub", "self": false}
         });
         assert_eq!(
             format_tab_line(&row).unwrap(),
-            "#3  work:42  \"Bank feeds - QuickBooks\"  Edge · Work  controlledBy=:9224"
+            "#3  edge-dag-tech:42  \"Bank feeds - QuickBooks\"  Edge · DAG Tech · win 2  active  controlledBy=ghax-sub/4589"
         );
     }
 
     #[test]
-    fn free_active_and_cdp_rows() {
+    fn owner_labels() {
+        assert_eq!(owner_label(&Value::Null), "none");
+        assert_eq!(owner_label(&json!(9223)), ":9223");
+        assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "x", "cwd": "/a", "self": true})), "you");
+        assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "claude-a", "cwd": "/a", "self": false})), "claude-a");
+        assert_eq!(owner_label(&json!({"port": 9225, "pid": null, "name": null, "cwd": null, "self": false})), ":9225");
+        // Current daemons send the basename already (cwdLabel); an older one
+        // sends the full path. Both print `<basename>/<pid>`.
+        assert_eq!(owner_label(&json!({"port": 9224, "pid": 7, "name": null, "cwd": "ghax", "self": false})), "ghax/7");
+        assert_eq!(
+            owner_label(&json!({"port": 9224, "pid": 7, "name": null,
+                "cwd": "/Users/someone/Documents/a/very/long/path/that/exceeds/forty/chars/ghax/", "self": false})),
+            "ghax/7"
+        );
+    }
+
+    #[test]
+    fn free_and_cdp_rows() {
         let free = json!({"index": 1, "id": "edge-1a2b3c:5", "title": "a", "browser": "Edge",
-            "profile": "—", "controlledBy": null, "active": true});
+            "profile": "—", "window": 1, "controlledBy": null, "active": false});
         assert_eq!(
             format_tab_line(&free).unwrap(),
-            "#1  edge-1a2b3c:5  \"a\"  Edge · —  controlledBy=none  active"
+            "#1  edge-1a2b3c:5  \"a\"  Edge · — · win 1  controlledBy=none"
         );
         // CDP rows carry no controlledBy at all.
         let cdp =
-            json!({"index": 2, "id": "ABCD", "title": "t", "browser": "Chrome", "profile": "—"});
+            json!({"index": 2, "id": "ABCD", "title": "t", "browser": "Chrome", "profile": "—", "active": true});
         assert_eq!(
             format_tab_line(&cdp).unwrap(),
-            "#2  ABCD  \"t\"  Chrome · —"
+            "#2  ABCD  \"t\"  Chrome · —  active"
         );
     }
 

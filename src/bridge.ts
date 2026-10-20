@@ -75,9 +75,13 @@ export interface BridgeExtensionInfo {
  */
 export type ControlTarget =
   | { action: 'control-active' }
-  | { action: 'control-tab'; tabId: number; quiet?: boolean }
+  // `focus: true` raises the tab and its window; anything else drives it in
+  // the background. `quiet` is the pre-v0.11 spelling, still sent so an
+  // older extension (which focused unless `quiet`) stays in the background.
+  | { action: 'control-tab'; tabId: number; focus?: boolean; quiet?: boolean }
   | { action: 'list-tabs' }
   | { action: 'new-window'; url: string }
+  | { action: 'new-tab'; url: string; windowId?: number }
   | { action: 'reload' }
   | { action: 'stop' };
 
@@ -95,6 +99,8 @@ export interface BridgeTab {
   url: string;
   /** True for THIS daemon's controlled tab — never another agent's. */
   active: boolean;
+  /** The browser's foreground tab in its window; absent from older extensions. */
+  windowActive?: boolean;
   /**
    * Bridge port of the agent driving this tab, or null when it's free. Two
    * agents on one browser each see the other's territory here, which is the
@@ -621,6 +627,31 @@ export class Bridge extends EventEmitter {
   /** Snapshot of every known instance — backs `ghax bridge instances`. */
   instances(): BridgeInstance[] {
     return this.registry.instances();
+  }
+
+  /**
+   * Every instance with an open socket, bound or parked: the active one
+   * first, then the other bound ones, then parked ones. Backs `ghax tabs`,
+   * which lists every connected browser (list-tabs needs no attachment).
+   */
+  get connectedIds(): string[] {
+    const open = new Set(
+      this.registry.all().filter((p) => p.ws?.readyState === WebSocket.OPEN).map((p) => p.instanceId),
+    );
+    const bound = this.boundIds.filter((id) => open.has(id));
+    return [...bound, ...[...open].filter((id) => !bound.includes(id))];
+  }
+
+  /**
+   * `list-tabs` to one connected instance, bound or parked, by exact id.
+   * Read-only by construction: it never records a desired control target.
+   */
+  listTabsOf(instanceId: string, timeoutMs = CONTROL_TIMEOUT_MS): Promise<ControlAck> {
+    const peer = this.registry.get(instanceId);
+    if (!peer?.ws || peer.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`bridge: instance ${this.registry.describePeer(peer ?? null)} is not connected`));
+    }
+    return this.dispatchControl(peer.ws, instanceId, { action: 'list-tabs' }, timeoutMs);
   }
 
   /** Tab-id alias for an instance (see PeerRegistry.aliasOf). */
@@ -1384,7 +1415,7 @@ export class Bridge extends EventEmitter {
     let next: ControlTarget | null | undefined;
     if (target.action === 'stop') next = null;
     else if (target.action === 'control-active') next = target;
-    else if (target.action === 'control-tab') next = { ...target, quiet: true };
+    else if (target.action === 'control-tab') next = { ...target, focus: false, quiet: true };
     if (next === undefined) return;
     if (session) session.desiredControl = next;
     else this.initialDesiredControl = next;

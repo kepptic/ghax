@@ -24,15 +24,28 @@ export interface TabIdentity {
   chromeTabId: number | null;
   /** Display brand: "Edge", "Chrome", "Chromium". */
   browser: string;
-  /** Popup "Profile name", or "—" when unset / unknowable (CDP). */
+  /**
+   * Popup "Profile name", else the browser's own name for the profile
+   * (src/browser-profiles.ts), else "—".
+   */
   profile: string;
+  /** The browser's window id; null when unknown. */
   windowId: number | null;
+  /**
+   * Per-browser window ordinal (1 = lowest windowId among that browser's
+   * listed windows), what `win N` shows. Null when windowId is.
+   */
+  window?: number | null;
   title: string;
   url: string;
-  /** True for THIS daemon's controlled / active tab. */
+  /**
+   * Bridge: the browser's foreground tab in its window (one per window).
+   * CDP: this daemon's active page. Which agent drives a tab is
+   * `controlledBy`, never this.
+   */
   active: boolean;
-  /** Bridge port of the agent driving the tab, null if free. Bridge only. */
-  controlledBy?: number | null;
+  /** The agent driving the tab, null if free. Bridge only. */
+  controlledBy?: TabOwner | null;
   /**
    * Per-browser-session nonce of the extension that answered (bridge only).
    * Chrome tab ids restart with the browser, so a `#n` row from before a
@@ -40,6 +53,35 @@ export interface TabIdentity {
    * Undefined for extensions predating it.
    */
   nonce?: string;
+}
+
+/**
+ * Who drives a tab: its bridge port, plus the daemon registered on that port
+ * (`~/.ghax/daemons/*.json`) when there is exactly one live one.
+ */
+export interface TabOwner {
+  port: number;
+  pid: number | null;
+  /** `ghax attach --name` / GHAX_AGENT; null when unset. */
+  name: string | null;
+  /**
+   * The owning daemon's working directory: the full path for this daemon's
+   * own tab, the cleaned basename (`cwdLabel`) for another agent's.
+   */
+  cwd: string | null;
+  /** This daemon's own tab. */
+  self: boolean;
+}
+
+/** `you`, the agent name, `<cwd basename>/<pid>`, else `:<port>`. */
+export function ownerLabel(o: TabOwner): string {
+  if (o.self) return 'you';
+  if (o.name) return o.name;
+  if (o.cwd && o.pid !== null) {
+    const base = o.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || o.cwd;
+    return `${base}/${o.pid}`;
+  }
+  return `:${o.port}`;
 }
 
 /** What the alias is minted from. */
@@ -72,6 +114,17 @@ function short6(instanceId: string): string {
  * (zero-width, bidi override) and line-separator characters are dropped so a
  * name can never forge a line of output, then capped at 40 code points.
  */
+/**
+ * Another agent's cwd as shown in `controlledBy`: basename FIRST, then
+ * sanitizeLabel. The other order truncates a long path to its first 40
+ * characters and the "basename" becomes a random middle segment. Must match
+ * owner_label in crates/cli/src/tabs.rs.
+ */
+export function cwdLabel(raw: string): string {
+  const trimmed = raw.replace(/[\\/]+$/, '');
+  return sanitizeLabel(trimmed.split(/[\\/]/).pop() || trimmed);
+}
+
 export function sanitizeLabel(raw: string): string {
   return Array.from(raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim()).slice(0, 40).join('').trim();
 }
@@ -159,6 +212,12 @@ export interface RawBridgeTab {
   active?: unknown;
   controlledBy?: unknown;
   windowId?: unknown;
+  windowActive?: unknown;
+}
+
+/** An owner known only by port. */
+export function portOwner(port: number): TabOwner {
+  return { port, pid: null, name: null, cwd: null, self: false };
 }
 
 /**
@@ -168,6 +227,7 @@ export interface RawBridgeTab {
 export function bridgeRowsToIdentities(
   rows: unknown[],
   who: { alias: string; browser: string; profile: string; nonce?: string },
+  ownerOf: (port: number) => TabOwner = portOwner,
 ): TabIdentity[] {
   return rows
     .filter((v): v is RawBridgeTab & { id: number } => typeof (v as RawBridgeTab)?.id === 'number')
@@ -181,9 +241,11 @@ export function bridgeRowsToIdentities(
       windowId: typeof tab.windowId === 'number' ? tab.windowId : null,
       title: typeof tab.title === 'string' ? tab.title : '',
       url: typeof tab.url === 'string' ? tab.url : '',
-      active: Boolean(tab.active),
+      // The window's foreground tab. Extensions predating `windowActive` only
+      // send `active` = "the asking connection's tab", which is not this.
+      active: tab.windowActive === true,
       // Absent from pre-v0.3 extensions, which knew of only one agent.
-      controlledBy: typeof tab.controlledBy === 'number' ? tab.controlledBy : null,
+      controlledBy: typeof tab.controlledBy === 'number' ? ownerOf(tab.controlledBy) : null,
       ...(who.nonce ? { nonce: who.nonce } : {}),
     }));
 }
@@ -194,13 +256,41 @@ export function describeTab(t: TabIdentity): string {
   return `#${t.index} ${t.id} ${title} (${t.browser} · ${t.profile})`;
 }
 
-/** One `ghax tabs` text line. */
-export function formatTabLine(t: TabIdentity): string {
-  const parts = [`#${t.index}`, t.id, JSON.stringify(t.title || ''), `${t.browser} · ${t.profile}`];
-  if (t.controlledBy !== undefined) {
-    parts.push(`controlledBy=${t.controlledBy === null ? 'none' : `:${t.controlledBy}`}`);
+/**
+ * Fill `window`: each browser's windows numbered 1..n by ascending windowId.
+ * Rows are grouped by tab-id alias (bridge) or browser (CDP).
+ */
+export function withWindowOrdinals(rows: TabIdentity[]): TabIdentity[] {
+  const byBrowser = new Map<string, Set<number>>();
+  const keyOf = (t: TabIdentity) => aliasOfId(t.id) ?? t.browser;
+  for (const t of rows) {
+    if (t.windowId === null) continue;
+    const k = keyOf(t);
+    if (!byBrowser.has(k)) byBrowser.set(k, new Set());
+    byBrowser.get(k)!.add(t.windowId);
   }
+  const ordinal = new Map<string, Map<number, number>>();
+  for (const [k, ids] of byBrowser) {
+    ordinal.set(k, new Map([...ids].sort((a, b) => a - b).map((id, i) => [id, i + 1])));
+  }
+  return rows.map((t) => ({
+    ...t,
+    window: t.windowId === null ? null : ordinal.get(keyOf(t))?.get(t.windowId) ?? null,
+  }));
+}
+
+/**
+ * One `ghax tabs` text line:
+ * `#3  edge-dag-tech:42  "Title"  Edge · DAG Tech · win 2  active  controlledBy=you`.
+ * Must match crates/cli/src/tabs.rs.
+ */
+export function formatTabLine(t: TabIdentity): string {
+  const where = [t.browser, t.profile, ...(typeof t.window === 'number' ? [`win ${t.window}`] : [])].join(' · ');
+  const parts = [`#${t.index}`, t.id, JSON.stringify(t.title || ''), where];
   if (t.active) parts.push('active');
+  if (t.controlledBy !== undefined) {
+    parts.push(`controlledBy=${t.controlledBy === null ? 'none' : ownerLabel(t.controlledBy)}`);
+  }
   return parts.join('  ');
 }
 

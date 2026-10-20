@@ -16,7 +16,7 @@ Connection:
                                   #   BRIDGE_NO_CANDIDATE at the attach timeout.
                                   #   Both list each browser seen.
          [--headless] [--load-extension <path>] [--data-dir <path>]
-         [--capture-bodies[=<url-glob>]] [--verbose]
+         [--capture-bodies[=<url-glob>]] [--verbose] [--name <label>]
          # Without --port, scans :9222-9230. Multiple running → picker.
          # With --launch and no --port, auto-picks first free port in range.
          # --capture-bodies records JSON/text response bodies (opt-in,
@@ -25,6 +25,12 @@ Connection:
          #   on network entries under the same glob + content-type +
          #   32KB-cap rules.
          # --verbose prints pid/port/browser on success (default: silent).
+         # --name (or GHAX_AGENT) names this agent as a tab owner in other
+         #   agents' 'tabs' (default: <cwd basename>/<pid>).
+         # No daemon here and exactly one elsewhere: ghax borrows it READ-ONLY
+         #   (status, tabs, version, bridge instances, console, network;
+         #   no --har or --source-maps);
+         #   anything else needs 'ghax attach' here or GHAX_STATE_FILE.
   status [--json]
   detach
   restart
@@ -42,19 +48,32 @@ Bridge (after attach --extension):
 Tab:
   tabs [--browser <id|edge|chrome|label>]
                                   # one line per tab:
-                                  #   #n  id  "title"  Browser · Profile  controlledBy=…
+                                  #   #n  id  "title"  Browser · Profile · win N  active  controlledBy=…
                                   # bridge ids are <brand>-<profile>:<chrome tab id>,
-                                  #   e.g. edge-work:42 (profile = popup "Profile name")
-                                  # bridge: --browser lists another connected
-                                  #   browser's tabs without taking it over
-                                  # --browser all daemon: every bound browser,
-                                  #   numbered #1..N; a silent one is a `note:` row
-  tab <'#n' | id | n> [--quiet]   # '#n' = row n of the last 'tabs' (quote the #);
+                                  #   e.g. edge-dag-tech:42 (profile = popup "Profile
+                                  #   name", else the browser's own profile name)
+                                  # win N: window ordinal within that browser;
+                                  #   active: bridge = the window's foreground tab
+                                  #   (the user's); CDP = this daemon's tab
+                                  #   controlledBy (bridge): you | agent name |
+                                  #   dir/pid | none; your tab is controlledBy=you
+                                  # bridge: every CONNECTED browser, parked too,
+                                  #   numbered #1..N; one with no windows or that
+                                  #   doesn't answer is a `note:` row
+                                  # --browser lists one connected browser only
+  tab <'#n' | id | n> [--focus]   # '#n' = row n of the last 'tabs' (quote the #);
                                   #   n alone only if exactly one tab has that
-                                  #   chrome tab id. --quiet = don't bringToFront
+                                  #   chrome tab id. Drives the tab in the
+                                  #   background; --focus also raises it
+                                  #   (--quiet is accepted, a no-op)
                                   #   a tab in another bound browser makes it active
   find <url-substring>            # list tabs matching (pipe into 'tab')
   new-window [url]                # new background window, same profile
+  new-tab [url] [--window <windowId>]
+                                  # new background tab in an existing window
+                                  #   (windowId from 'tabs --json'; bridge only),
+                                  #   never focused; becomes the tab this
+                                  #   daemon drives
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js> [--timeout <ms>] [--no-wait]
