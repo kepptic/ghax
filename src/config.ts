@@ -152,6 +152,8 @@ export interface DaemonRegistryEntry {
   browserKind: string;
   bridgePort: number | null;
   startedAt: string;
+  /** `ghax attach --name` / GHAX_AGENT: how other agents' `ghax tabs` name this one. */
+  name?: string | null;
 }
 
 export function daemonRegistryDir(env: Record<string, string | undefined> = process.env): string {
@@ -177,6 +179,29 @@ export function registerDaemon(
     throw err;
   }
   return file;
+}
+
+/**
+ * Live registry entries (pid alive), unreadable or dead ones skipped. Read-only:
+ * pruning stays with the CLI (crates/cli/src/state.rs).
+ */
+export function readDaemonRegistry(dir: string = daemonRegistryDir()): DaemonRegistryEntry[] {
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out: DaemonRegistryEntry[] = [];
+  for (const f of files) {
+    try {
+      const e = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as DaemonRegistryEntry;
+      if (typeof e?.pid === 'number' && isProcessAlive(e.pid)) out.push(e);
+    } catch {
+      // Half-written or foreign file: not an owner we can name.
+    }
+  }
+  return out;
 }
 
 export function unregisterDaemon(file: string): void {

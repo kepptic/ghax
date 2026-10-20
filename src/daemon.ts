@@ -40,7 +40,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
 import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
-import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon } from './config';
+import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon, readDaemonRegistry } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
 import {
   newPeerPageState, peerState, capBody, CAPTURABLE_CONTENT_TYPE_RE, pickMainFrameContext, wireBridgePageEvents, type PeerPageState,
@@ -93,8 +93,14 @@ import * as crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import {
   aliasOfId, bridgeRowsToIdentities, composeTabId, describeTab, displayBrand, resolveTabSelector, NO_PROFILE,
-  type TabIdentity,
+  sanitizeLabel, withWindowOrdinals, type TabIdentity, type TabOwner,
 } from './tab-identity';
+
+/**
+ * This agent's name (`ghax attach --name`, which the CLI passes as GHAX_AGENT),
+ * shown as the owner of its tabs in other agents' `ghax tabs`. Null when unset.
+ */
+const AGENT_NAME: string | null = sanitizeLabel(process.env.GHAX_AGENT ?? '') || null;
 
 const IDLE_MS = 30 * 60 * 1000;
 const BUFFER_CAP = 5000;
@@ -328,6 +334,19 @@ async function pageTargetId(page: Page): Promise<string | null> {
     const id = (info as any)?.targetInfo?.targetId ?? null;
     if (id) pageTargetIds.set(page, id);
     return id;
+  } catch {
+    return null;
+  }
+}
+
+/** The browser window a CDP page sits in; null when the browser won't say. */
+async function pageWindowId(page: Page): Promise<number | null> {
+  try {
+    const session = traceSend(await page.context().newCDPSession(page));
+    const r = await session.send('Browser.getWindowForTarget' as any);
+    await session.detach().catch(() => undefined);
+    const id = (r as { windowId?: unknown })?.windowId;
+    return typeof id === 'number' ? id : null;
   } catch {
     return null;
   }
@@ -912,53 +931,85 @@ async function readFreshnessMarker(ctx: Ctx): Promise<string | null> {
   }
 }
 
-async function listBridgeTabs(ctx: Ctx, instanceSelector: string | null = null): Promise<TabIdentity[]> {
-  const bridge = verbBridge(ctx);
-  const ack = instanceSelector
-    ? await bridge.bridge.sendControlToInstance(instanceSelector, { action: 'list-tabs' })
-    : await bridge.sendControl({ action: 'list-tabs' });
-  if (!Array.isArray(ack.result)) throw new Error('tabs: extension returned an invalid tab list');
-  // Mint ids with the alias of the instance that ANSWERED — with --browser
-  // that is a parked browser, whose tab 42 is not the bound browser's.
-  const answered = ack.instanceId ?? bridge.instanceId;
-  const who = bridgeIdentity(ctx, answered);
-  return onlyActiveBrowserActive(bridgeRowsToIdentities(ack.result as unknown[], who), answered, bridge.bridge.boundInstanceId);
+/**
+ * Who owns a bridge port: this daemon (`self`), else the one live daemon in
+ * `~/.ghax/daemons/` registered on that port. Read once per listing.
+ */
+function tabOwnerResolver(ctx: Ctx): (port: number) => TabOwner {
+  const own = ctx.bridge?.port ?? null;
+  const registry = readDaemonRegistry();
+  return (port) => {
+    if (port === own) {
+      return { port, pid: process.pid, name: AGENT_NAME, cwd: process.cwd(), self: true };
+    }
+    const hits = registry.filter((e) => e.bridgePort === port);
+    // Two live entries on one port can't both hold it: name neither.
+    const e = hits.length === 1 ? hits[0] : null;
+    return {
+      port,
+      pid: e?.pid ?? null,
+      // Free text from another process's file: cleaned like a hello label.
+      name: e && typeof e.name === 'string' ? sanitizeLabel(e.name) || null : null,
+      cwd: e && typeof e.cwd === 'string' ? sanitizeLabel(e.cwd) || null : null,
+      self: false,
+    };
+  };
 }
 
-/** `active` is the daemon's active tab, so only the daemon-active browser's rows may carry it. */
-function onlyActiveBrowserActive(rows: TabIdentity[], rowsOf: string | null, activeId: string | null): TabIdentity[] {
-  return rowsOf !== null && rowsOf === activeId ? rows : rows.map((t) => ({ ...t, active: false }));
+/** One instance's tabs, ids minted with ITS alias. */
+function bridgeAckToRows(ctx: Ctx, ack: ControlAck, instanceId: string | null, ownerOf: (port: number) => TabOwner): TabIdentity[] {
+  if (!Array.isArray(ack.result)) throw new Error('extension returned an invalid tab list');
+  return bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, instanceId), ownerOf);
 }
 
-/** Per-peer wait for `list-tabs` under multi-bind: a hung browser costs this, no more. */
+/** `Chrome · —: no open windows (chrome-09b393)` for a browser that listed no tabs. */
+function noWindowsNote(ctx: Ctx, instanceId: string | null): string {
+  const who = bridgeIdentity(ctx, instanceId);
+  return `${who.browser} · ${who.profile}: no open windows (${who.alias})`;
+}
+
+/** `ghax tabs --browser <x>`: one instance's tabs, bound or parked. */
+async function listBridgeTabs(ctx: Ctx, instanceSelector: string): Promise<{ rows: TabIdentity[]; notes: string[] }> {
+  const bridge = requireBridge(ctx);
+  const ack = await bridge.sendControlToInstance(instanceSelector, { action: 'list-tabs' });
+  // Mint ids with the alias of the instance that ANSWERED — a parked
+  // browser's tab 42 is not the bound browser's.
+  const answered = ack.instanceId ?? null;
+  const rows = withWindowOrdinals(bridgeAckToRows(ctx, ack, answered, tabOwnerResolver(ctx)));
+  return { rows, notes: rows.length === 0 ? [noWindowsNote(ctx, answered)] : [] };
+}
+
+/** Per-peer wait for `list-tabs` with several browsers: a hung one costs this, no more. */
 const LIST_TABS_TIMEOUT_MS = 10_000;
 
 /**
- * Every bound browser's tabs, numbered #1..N across all of them. One bound
- * peer is the plain single-browser listing (its failure throws, as before).
- * Several: `list-tabs` goes to each in parallel and a peer that fails or
- * hangs becomes a note, never a hang or a silent gap.
+ * Every CONNECTED browser's tabs (bound and parked: list-tabs needs no
+ * attachment), numbered #1..N across all of them, the active browser first.
+ * One browser: its failure throws. Several: each is asked in parallel and one
+ * that fails or hangs becomes a note, never a hang or a silent gap. A browser
+ * with no windows is a note too, so it is visibly there.
  */
 async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Promise<{ rows: TabIdentity[]; notes: string[] }> {
   const bridge = requireBridge(ctx);
-  const ids = bridge.boundIds;
-  if (ids.length <= 1) return { rows: await listBridgeTabs(ctx), notes: [] };
-  const activeId = bridge.boundInstanceId;
-  const settled = await Promise.allSettled(ids.map(async (id) => {
-    const ack = await bridge.sendControl({ action: 'list-tabs' }, timeoutMs, { peer: id });
-    if (!Array.isArray(ack.result)) throw new Error('extension returned an invalid tab list');
-    return onlyActiveBrowserActive(bridgeRowsToIdentities(ack.result as unknown[], bridgeIdentity(ctx, id)), id, activeId);
-  }));
+  const ids = bridge.connectedIds;
+  if (ids.length === 0) {
+    throw new Error('ghax bridge: no extension connected. Load extension/ unpacked (the ghax bridge extension) and make sure the browser is running.');
+  }
+  const ownerOf = tabOwnerResolver(ctx);
+  const settled = await Promise.allSettled(ids.map(async (id) => bridgeAckToRows(ctx, await bridge.listTabsOf(id, timeoutMs), id, ownerOf)));
+  if (ids.length === 1 && settled[0].status === 'rejected') throw settled[0].reason;
   const rows: TabIdentity[] = [];
   const notes: string[] = [];
   settled.forEach((r, i) => {
-    if (r.status === 'fulfilled') rows.push(...r.value);
-    else {
+    if (r.status === 'fulfilled') {
+      if (r.value.length === 0) notes.push(noWindowsNote(ctx, ids[i]));
+      rows.push(...r.value);
+    } else {
       const who = bridgeIdentity(ctx, ids[i]);
       notes.push(`${who.alias} (${who.browser} · ${who.profile}): tabs unavailable — ${(r.reason as { message?: string } | null)?.message ?? String(r.reason)}`);
     }
   });
-  return { rows: rows.map((t, i) => ({ ...t, index: i + 1 })), notes };
+  return { rows: withWindowOrdinals(rows.map((t, i) => ({ ...t, index: i + 1 }))), notes };
 }
 
 /**
@@ -1036,11 +1087,11 @@ function bridgeTabId(ctx: Ctx, chromeTabId: number, instanceId?: string | null):
 async function listCdpTabs(ctx: Ctx): Promise<TabIdentity[]> {
   const pages = await allPages(ctx);
   return Promise.all(pages.map(async (p, i) => {
-    const [tid, title] = await Promise.all([pageTargetId(p), p.title().catch(() => '')]);
+    const [tid, title, windowId] = await Promise.all([pageTargetId(p), p.title().catch(() => ''), pageWindowId(p)]);
     const id = tid ?? '';
     return {
       index: i + 1, id, chromeTabId: null, browser: displayBrand(ctx.browserKind), profile: NO_PROFILE,
-      windowId: null, title, url: p.url(), active: id === ctx.activePageId,
+      windowId, title, url: p.url(), active: id === ctx.activePageId,
     };
   }));
 }
@@ -1224,9 +1275,11 @@ register('batch', async (ctx, args, opts) => {
 
 register('status', async (ctx) => {
   if (ctx.bridgeMode) {
-    const tabs = await listBridgeTabs(ctx);
+    const bridge = requireBridge(ctx);
     const pinned = verbBridge(ctx).instanceId;
-    const controlled = pinned ? requireBridge(ctx).controlledTabOf(pinned) : null;
+    // Nothing bound (parked, or waiting on `bridge use`): status still answers.
+    const tabs = pinned ? bridgeAckToRows(ctx, await bridge.listTabsOf(pinned), pinned, tabOwnerResolver(ctx)) : [];
+    const controlled = pinned ? bridge.controlledTabOf(pinned) : null;
     const active = tabs.find((tab) => tab.chromeTabId === controlled) ?? null;
     return {
       pid: process.pid,
@@ -1241,6 +1294,7 @@ register('status', async (ctx) => {
       activeTabUrl: active?.url ?? '',
       activeTabBrowser: active?.browser ?? null,
       activeTabProfile: active?.profile ?? null,
+      agentName: AGENT_NAME,
     };
   }
   const pages = await allPages(ctx);
@@ -1287,7 +1341,7 @@ register('tabs', async (ctx, _args, opts) => {
     }
   }
   // --fields accepts a csv list of keys to keep. Valid keys: index, id,
-  // chromeTabId, browser, profile, windowId, title, url, active (plus
+  // chromeTabId, browser, profile, windowId, window, title, url, active (plus
   // controlledBy in bridge mode). Invalid keys are ignored
   // silently so a typo can't kill the whole command mid-session. Omitted →
   // return every field.
@@ -1305,10 +1359,10 @@ register('tabs', async (ctx, _args, opts) => {
   // UNFILTERED list, and that list is what a later `tab #n` resolves against.
   let notes: string[] = [];
   let all: TabIdentity[];
-  if (ctx.bridgeMode && browserSel === null) {
-    ({ rows: all, notes } = await listBridgeTabsAll(ctx));
+  if (ctx.bridgeMode) {
+    ({ rows: all, notes } = browserSel === null ? await listBridgeTabsAll(ctx) : await listBridgeTabs(ctx, browserSel));
   } else {
-    all = ctx.bridgeMode ? await listBridgeTabs(ctx, browserSel) : await listCdpTabs(ctx);
+    all = withWindowOrdinals(await listCdpTabs(ctx));
   }
   ctx.lastTabListing = all;
   const noteRows = notes.map((note) => ({ note }));
@@ -1366,7 +1420,7 @@ register('tab', async (ctx, args, opts) => {
 function tabResult(t: TabIdentity): Record<string, unknown> {
   return {
     id: t.id, index: t.index, chromeTabId: t.chromeTabId, browser: t.browser, profile: t.profile,
-    windowId: t.windowId, url: t.url, title: t.title,
+    windowId: t.windowId, ...(t.window !== undefined ? { window: t.window } : {}), url: t.url, title: t.title,
   };
 }
 
@@ -5194,6 +5248,7 @@ async function main() {
     browserKind,
     bridgePort: bridgeMode ? bridgePort : null,
     startedAt: new Date(ctx.startedAt).toISOString(),
+    name: AGENT_NAME,
   });
   process.on('exit', () => unregisterDaemon(registryFile));
   log(`listening on 127.0.0.1:${port}`);

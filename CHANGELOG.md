@@ -13,6 +13,29 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   over CDP the tab opens in the last active window.
 
 ### Changed
+- **Breaking: `active` in `ghax tabs` now means the window's foreground tab.**
+  It used to mean "the tab this daemon drives". Every window of every listed
+  browser has one `active` row, whichever daemon drives it, and a background
+  tab you drive with `new-tab` is not `active`. Needs an extension that sends
+  `windowActive` (run `ghax bridge reload`); an older extension's rows show no
+  `active` at all. Scripts that read `active` to find their own tab should read
+  `controlledBy.self` instead.
+- **Breaking: `controlledBy` in `ghax tabs --json` is an object, not a port.**
+  It is `{port, pid, name, cwd, self}`, or `null` for a free tab. The text form
+  prints `you`, the agent name, `<cwd>/<pid>`, or `:<port>` as a last resort.
+  `ghax attach --name <agent>` (same as `GHAX_AGENT`) sets the name.
+- **Profile names come from the browser.** With no "Profile name" in the
+  extension popup, the daemon finds the profile whose extension storage holds
+  this install's id and reads its display name from `Local State` (only
+  `.name`; exactly one profile dir must match, else no name). A popup label
+  always wins. `GHAX_BROWSER_PROFILE_ROOTS` overrides the User Data roots; an
+  empty value turns the lookup off.
+- **`ghax tabs` text layout:** `#3  edge-dag-tech:42  "Title"  Edge · DAG Tech
+  · win 2  active  controlledBy=<owner>`. `--json` rows gain `window` (the
+  browser's windows numbered 1..n).
+- **`ghax tabs` covers parked browsers** and prints a "no open windows" note for
+  a browser with none. A daemon borrowed from another directory (the
+  "no daemon here" fallback) is read-only.
 - **`ghax tab` no longer takes focus.** Switching tabs used to activate the tab
   and focus its window (bridge) or `bringToFront` it (CDP). It now drives the
   tab in the background. Pass `--focus` for the old behaviour. `--quiet` is

@@ -85,6 +85,9 @@ pub struct RegistryEntry {
     pub bridge_port: Option<u16>,
     #[serde(default)]
     pub started_at: String,
+    /// `ghax attach --name` / GHAX_AGENT; absent from older daemons.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl RegistryEntry {
@@ -100,8 +103,14 @@ impl RegistryEntry {
         } else {
             &self.browser_kind
         };
+        let name = self
+            .name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .map(|n| format!("{n} · "))
+            .unwrap_or_default();
         format!(
-            "cwd {} · {kind} · pid {} · :{}{bridge}",
+            "{name}cwd {} · {kind} · pid {} · :{}{bridge}",
             self.cwd, self.pid, self.port
         )
     }
@@ -260,23 +269,42 @@ fn config_for_state_file(state_file: PathBuf) -> Config {
 /// existing daemon. `attach`/`detach`/`restart` must keep using plain
 /// `resolve_config`: attach never adopts another directory's daemon.
 pub fn resolve_config_for_use() -> Result<Config> {
+    let (cfg, borrowed) = resolve_config_with_origin()?;
+    if let Some(entry) = &borrowed {
+        note_adoption(entry);
+    }
+    Ok(cfg)
+}
+
+/// `resolve_config_for_use` without the stderr note, plus the registry entry
+/// when the daemon is BORROWED from another directory (discovery fallback),
+/// so the caller can restrict what a borrowed daemon may be asked to do.
+pub fn resolve_config_with_origin() -> Result<(Config, Option<RegistryEntry>)> {
     let cfg = resolve_config();
     let explicit = std::env::var_os("GHAX_STATE_FILE").is_some()
         || std::env::var("GHAX_GLOBAL").as_deref() == Ok("1");
     match discover(&cfg, registry_dir().as_deref(), explicit) {
-        Discovery::Own | Discovery::NoneLive => Ok(cfg),
-        Discovery::Adopt(entry) => {
-            note_adoption(&entry);
-            Ok(config_for_state_file(entry.state_file))
-        }
+        Discovery::Own | Discovery::NoneLive => Ok((cfg, None)),
+        Discovery::Adopt(entry) => Ok((config_for_state_file(entry.state_file.clone()), Some(entry))),
         Discovery::Ambiguous(live) => Err(anyhow!(ambiguous_message(&cfg, &live))),
         Discovery::Unreadable(files) => Err(anyhow!(unreadable_message(&files))),
     }
 }
 
+/// The refusal for a verb that may not run on a borrowed daemon.
+pub fn borrowed_refusal(verb: &str, entry: &RegistryEntry) -> String {
+    format!(
+        "{verb}: refused. There is no daemon for this directory; the only one running belongs to another session ({}). \
+A borrowed daemon is read-only: status, tabs, version, bridge instances, console, network. \
+Run 'ghax attach' here for your own daemon, or set GHAX_STATE_FILE={} to drive that one on purpose.",
+        entry.describe(),
+        entry.state_file.display()
+    )
+}
+
 /// One stderr line per adopted daemon per process — `ghax shell` and the
 /// multi-RPC verbs resolve more than once.
-fn note_adoption(entry: &RegistryEntry) {
+pub fn note_adoption(entry: &RegistryEntry) {
     static NOTED: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
     let mut noted = NOTED.lock().unwrap_or_else(|p| p.into_inner());
     if *noted == Some(entry.pid) {

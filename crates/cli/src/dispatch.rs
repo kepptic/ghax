@@ -126,7 +126,28 @@ fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
             eprintln!("ghax: {err}");
             state::resolve_config()
         })),
-        _ => state::resolve_config_for_use(),
+        _ => {
+            let (cfg, borrowed) = state::resolve_config_with_origin()?;
+            if let Some(entry) = borrowed {
+                if !borrow_allowed(verb, rest) {
+                    return Err(anyhow::anyhow!(state::borrowed_refusal(verb, &entry)));
+                }
+                state::note_adoption(&entry);
+            }
+            Ok(cfg)
+        }
+    }
+}
+
+/// What a daemon borrowed from another directory (discovery fallback) may be
+/// asked: reads that change nothing in the browser or in the daemon's
+/// session. Everything else belongs to whoever attached it, so it needs an
+/// explicit `ghax attach` here or GHAX_STATE_FILE.
+fn borrow_allowed(verb: &str, rest: &[String]) -> bool {
+    match verb {
+        "status" | "tabs" | "version" | "console" | "network" => true,
+        "bridge" => rest.first().map(String::as_str) == Some("instances"),
+        _ => false,
     }
 }
 
@@ -146,6 +167,19 @@ mod local_only_tests {
         assert!(!is_local_only("version", &v(&["--full"])));
         assert!(!is_local_only("tabs", &v(&[])));
         assert!(!is_local_only("status", &v(&[])));
+    }
+
+    #[test]
+    fn borrowed_daemons_are_read_only() {
+        for verb in ["status", "tabs", "version", "console", "network"] {
+            assert!(borrow_allowed(verb, &v(&[])), "{verb}");
+        }
+        assert!(borrow_allowed("bridge", &v(&["instances"])));
+        assert!(!borrow_allowed("bridge", &v(&["use", "edge"])));
+        assert!(!borrow_allowed("bridge", &v(&["reload"])));
+        for verb in ["goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot"] {
+            assert!(!borrow_allowed(verb, &v(&[])), "{verb}");
+        }
     }
 }
 

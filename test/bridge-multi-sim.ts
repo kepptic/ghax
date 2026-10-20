@@ -19,6 +19,8 @@
  * Exit 0 on success, non-zero if any check failed.
  */
 
+// Never read the real machine's browser profiles: names come from hello only.
+process.env.GHAX_BROWSER_PROFILE_ROOTS = '';
 import { WebSocket, WebSocketServer } from 'ws';
 import { readFileSync, mkdtempSync, rmSync } from 'fs';
 import { spawn, type ChildProcess } from 'child_process';
@@ -85,6 +87,8 @@ class FakeExtension {
    * stamped with another daemon's id must not be restored.
    */
   readonly controlledTabs = new Map<number, { daemonId: string | null; tabId: number }>();
+  /** Tab id shown in the (single) fake window; null = the first tab. */
+  foregroundTabId: number | null = null;
   tabs: FakeTab[] = [
     { id: 1, title: 'tab one', url: 'https://one.example' },
     { id: 2, title: 'tab two', url: 'https://two.example' },
@@ -404,6 +408,8 @@ class FakeConnection {
               title: tab.title,
               url: tab.url,
               active: tab.id === this.controlledTabId,
+              // The window's foreground tab; the first tab unless a test moves it.
+              windowActive: tab.id === (this.ext.foregroundTabId ?? this.ext.tabs[0]?.id),
               controlledBy: owner ? owner.port : null,
               // Only extensions with tab identity report placement.
               ...(this.ext.profile !== null ? { windowId: 1, index: i } : {}),
@@ -1195,6 +1201,9 @@ async function main(): Promise<void> {
         line === '#2  edge-work:42  "Bank feeds - QuickBooks"  Edge · Work  controlledBy=none',
         `tabs text line: ${line}`,
       );
+      // The window's foreground tab (first tab of the fake) gets the `active` word.
+      const fg = formatTabLine(work.find((t) => t.chromeTabId === 7)!);
+      assert(/^#1  edge-work:7  "Inbox"  Edge · Work( · win \d+)?  active  controlledBy=none$/.test(fg), `foreground line: ${fg}`);
     });
   });
 
@@ -2027,14 +2036,20 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('daemon, all: tabs marks only the daemon-active browser\'s tab active', async () => {
+  await test('daemon, all: tabs `active` is each browser\'s foreground tab, not the daemon-active one', async () => {
     await withDaemon(async (h) => {
-      const { rpc, chrome, alias } = h;
+      const { rpc, chrome, edgeExt, alias } = h;
       await driveEdgeTab1(h);
-      chrome.controlledTabId = 2; // the other browser drives a tab of its own
+      chrome.controlledTabId = 2; // the other browser drives a background tab of its own
+      edgeExt.foregroundTabId = 3;
       const tabs = await rpc('tabs');
-      const act = tabs.data.filter((t: any) => t.active);
-      assert(act.length === 1 && act[0].id === `${await alias('inst-edge')}:1`, `active rows: ${JSON.stringify(act)}`);
+      const ea = await alias('inst-edge');
+      const ca = await alias('inst-chrome');
+      const act = tabs.data.filter((t: any) => t.active).map((t: any) => t.id).sort();
+      const want = [`${ea}:3`, `${ca}:1`].sort();
+      assert(JSON.stringify(act) === JSON.stringify(want), `foreground rows ${JSON.stringify(want)}, got ${JSON.stringify(act)}`);
+      const driven = tabs.data.find((t: any) => t.id === `${ea}:1`);
+      assert(driven && !driven.active, 'the tab the daemon drives is not active when it is in the background');
     });
   });
 
@@ -2089,16 +2104,17 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('daemon, all: tabs --browser on a non-active browser marks nothing active', async () => {
+  await test('daemon, all: tabs --browser on a non-active browser still marks its foreground tab active', async () => {
     await withDaemon(async (h) => {
-      const { rpc, chrome } = h;
+      const { rpc, chrome, alias } = h;
       await driveEdgeTab1(h);
       chrome.controlledTabId = 2;
       const r = await rpc('tabs', [], { browser: 'inst-chrome' });
       assert(r.ok && r.data.length > 0, `tabs --browser: ${JSON.stringify(r)}`);
-      assert(r.data.every((t: any) => !t.active), `a parked browser's own active flag leaked: ${JSON.stringify(r.data.filter((t: any) => t.active))}`);
+      const act = r.data.filter((t: any) => t.active).map((t: any) => t.id);
+      assert(act.length === 1 && act[0] === `${await alias('inst-chrome')}:1`, `chrome's foreground tab, not the one it drives: ${JSON.stringify(act)}`);
       const own = await rpc('tabs', [], { browser: 'inst-edge' });
-      assert(own.ok && own.data.filter((t: any) => t.active).length === 1, `the active browser keeps its flag: ${JSON.stringify(own)}`);
+      assert(own.ok && own.data.filter((t: any) => t.active).length === 1, `one foreground tab per window: ${JSON.stringify(own)}`);
     });
   });
 

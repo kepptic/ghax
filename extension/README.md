@@ -126,8 +126,8 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension   # takes :9224
 The popup shows one row per daemon, each with its own **Control this tab** /
 **Stop**. A tab may be driven by exactly one agent: pointing a second one at
 it is refused, naming the bridge port to go stop it on. `ghax tabs` reports
-`controlledBy` (the owning agent's port, or `null`) so an agent can pick a
-free tab up front. Design notes:
+`controlledBy` (`{port, pid, name, cwd, self}`, or `null`) so an agent can pick a
+free tab up front. `active` is the window's foreground tab. Design notes:
 `docs/design/plan/09-bridge-multi-agent.md`.
 
 ## Multiple browsers (or multiple profiles)

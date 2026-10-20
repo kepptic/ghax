@@ -213,8 +213,9 @@ ghax bridge reload                       # reload the extension, no edge://exten
 ghax bridge reload --force               # also proceed if another agent has a tab claimed
 
 # Tab work
-ghax tabs                                # #n  id  "title"  Browser · Profile  controlledBy=…
-ghax tabs --json                         # + index, chromeTabId, browser, profile, windowId
+ghax tabs                                # #n  id  "title"  Browser · Profile · win N  [active]  controlledBy=you|<name>|none
+ghax tabs --json                         # + index, chromeTabId, browser, profile, window, windowId; controlledBy is {port,pid,name,cwd,self}|null
+                                         # `active` = the window's foreground tab (not "my tab"); mine is controlledBy=you
 ghax tab '#2'                            # row 2 of the last `tabs` (refused if it closed)
 ghax tab edge-work:42                    # full id: <brand>-<profile>:<chrome tab id> on the bridge
 ghax tab 42                              # only if exactly one tab has id 42, else refused
@@ -327,6 +328,19 @@ there but the SW messaging port is dead). Hot-reload reads the manifest,
 reloads, waits for the SW to restart, then re-injects each declared
 `content_scripts` entry (JS + CSS, respecting `all_frames`) into every
 matching tab. User's tabs + sidepanel + scroll position stay intact.
+
+### Several sessions in one browser
+
+Every session gets its own daemon and its own tab; nobody takes focus.
+
+```bash
+export GHAX_STATE_FILE=/tmp/ghax-mysession.json   # never share a state file
+ghax attach --extension --browser edge --name mysession   # --name shows in others' `tabs`
+ghax tabs                                # pick by '#n'; read controlledBy first, never take a tab that is not `none`
+ghax new-tab https://target.example      # background tab, now yours, window not raised
+# ... work; `active` rows are the user's foreground tabs, leave them alone ...
+ghax detach
+```
 
 ### Click by intent, not by selector
 

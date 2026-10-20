@@ -185,7 +185,13 @@ fn cmd_bridge_reload(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     // the whole MV3 service worker dies, not just this daemon's connection to
     // it — so warn (and require --force) whenever another agent currently has
     // a tab claimed.
-    let tabs = rpc::call(port, "tabs", Value::Array(vec![]), json!({}))?;
+    // Only the bound browser's tabs: `tabs` lists every connected browser,
+    // and reloading this one's extension leaves the others' agents alone.
+    let tabs_opts = match instances.get("boundInstanceId").and_then(|v| v.as_str()) {
+        Some(id) => json!({ "browser": id }),
+        None => json!({}),
+    };
+    let tabs = rpc::call(port, "tabs", Value::Array(vec![]), tabs_opts)?;
     let other_agent_tabs = tabs
         .as_array()
         .map(|arr| count_other_agent_tabs(arr, own_port))
@@ -291,15 +297,21 @@ fn format_extension_identity(info: &Value) -> String {
     format!("{agent} v{version}{provenance}")
 }
 
-/// Count tabs `controlledBy` some bridge port OTHER than `own_port`. A tab
-/// with `controlledBy: null` is free; one with no field at all (non-bridge
-/// `tabs` output) never counts. Pulled out as a pure function so the
+/// Count tabs `controlledBy` some agent other than this daemon. `controlledBy`
+/// is `{port,pid,name,cwd,self}` (or a bare port from older daemons); `self`
+/// wins when present, else the port is compared with `own_port`. A tab with
+/// `controlledBy: null` is free; one with no field at all (non-bridge `tabs`
+/// output) never counts. Pulled out as a pure function so the
 /// multi-agent guard above — which the TS bridge simulators can't reach,
 /// since it's Rust-CLI-only logic — has a `cargo test`.
 fn count_other_agent_tabs(tabs: &[Value], own_port: Option<u64>) -> usize {
     tabs.iter()
         .filter(|t| {
-            let controlled_by = t.get("controlledBy").and_then(|v| v.as_u64());
+            let owner = t.get("controlledBy");
+            if let Some(is_self) = owner.and_then(|o| o.get("self")).and_then(|v| v.as_bool()) {
+                return !is_self;
+            }
+            let controlled_by = owner.and_then(|o| o.get("port").unwrap_or(o).as_u64());
             match (controlled_by, own_port) {
                 (Some(cb), Some(op)) => cb != op,
                 (Some(_), None) => true,
@@ -347,6 +359,16 @@ mod tests {
             json!({ "id": "3", "controlledBy": 9225 }),
         ];
         assert_eq!(count_other_agent_tabs(&tabs, Some(9223)), 2);
+    }
+
+    #[test]
+    fn owner_objects_use_self() {
+        let tabs = vec![
+            json!({ "id": "1", "controlledBy": { "port": 9223, "pid": 1, "name": null, "cwd": "/a", "self": true } }),
+            json!({ "id": "2", "controlledBy": { "port": 9224, "pid": 2, "name": "b", "cwd": "/b", "self": false } }),
+            json!({ "id": "3", "controlledBy": Value::Null }),
+        ];
+        assert_eq!(count_other_agent_tabs(&tabs, Some(9223)), 1);
     }
 
     #[test]

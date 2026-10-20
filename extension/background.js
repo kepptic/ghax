@@ -37,7 +37,8 @@
  *      attachment, so a parked connection can still ask for it.
  *   -> daemon, control note: {"type":"controlled","tabId":N|null}   (pushed on any change)
  * `list-tabs` acks additionally carry `controlledBy` per tab: the bridge port
- * of the agent that owns it, or null, plus `windowId` and `index` (position in
+ * of the agent that owns it, or null, plus `windowId`, `windowActive` (the
+ * window's foreground tab) and `index` (position in
  * its window). `hello` also carries `profile` (same value as `label`, the
  * popup's "Profile name") and `brandVersion`; the daemon mints tab ids
  * `<alias>:<tabId>` from them (docs/design/plan/11-multi-browser.md).
@@ -519,6 +520,10 @@ class BridgeConnection {
         // name tab identity uses (docs/design/plan/11-multi-browser.md).
         // Daemons predating it read `label`; newer ones prefer `profile`.
         profile: identity.label,
+        // Lets the daemon find this profile's storage dir on disk and read the
+        // browser's own name for the profile when no label is set
+        // (src/browser-profiles.ts). Same for every profile of one unpacked dir.
+        extensionId: chrome.runtime.id,
         brandVersion: identity.brandVersion,
         // New per browser session (chrome.storage.session dies with the
         // browser, survives a service-worker respawn). Tab ids restart with
@@ -1045,6 +1050,9 @@ class BridgeConnection {
               title: tab.title ?? '',
               url: tab.url ?? '',
               active: tab.id === this.controlledTabId,
+              // The browser's own foreground tab in its window. `active` above
+              // stays "this connection's controlled tab" for older daemons.
+              windowActive: tab.active === true,
               // Which agent owns this tab, so `ghax tabs` can show the other
               // sessions' territory instead of offering a tab that will refuse.
               controlledBy: owner ? owner.port : null,

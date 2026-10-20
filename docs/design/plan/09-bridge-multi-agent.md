@@ -91,7 +91,7 @@ reverse) still speak the same language.
 | Change | Direction | Notes |
 |---|---|---|
 | CDP frames (`{id,method,params}` / `{id,result}` / `{id,error}`) | both | **unchanged**. Each connection is a complete, independent instance of the existing protocol. |
-| `list-tabs` ack entries gain `controlledBy: <port>\|null` | ext → daemon | New field. `active` keeps its old meaning — "the requesting connection's controlled tab" — so a second agent's tab never reads as active. Absent from pre-v0.3 extensions; the daemon defaults it to `null`. |
+| `list-tabs` ack entries gain `controlledBy: <port>\|null` and `windowActive: bool` | ext → daemon | `controlledBy` is absent from pre-v0.3 extensions (daemon defaults `null`); the daemon expands the port into `{port,pid,name,cwd,self}` from its daemon registry. The ack's `active` is still "the requesting connection's controlled tab", but the daemon's `ghax tabs` `active` is now `windowActive`, the window's foreground tab (breaking). Extensions predating `windowActive` yield no `active` rows. |
 | `hello.instanceId` | ext → daemon | **unchanged and deliberately install-wide.** The same browser talks to every daemon, and each daemon keeps its own peer registry, so one id per browser is the truth they each need. |
 | Pairing token | ext → daemon | Global, one code for all daemons of one user. Accepted for v1; per-daemon codes would need a per-port field in the popup for no security gain against the localhost threat model. |
 | `hello-ack.daemonId` | daemon → ext | New. Identifies the daemon **process**, minted per `Bridge`. The extension keys its persisted control target on it, and hands the tab back when a port's daemon id changes — a port is a pool slot, so the next agent on it is a different agent. |
