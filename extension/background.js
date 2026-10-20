@@ -723,6 +723,15 @@ class BridgeConnection {
     }
     this.attached = true;
     this.detachedReason = null;
+    // Focus emulation lives and dies with the debugger session. The daemon
+    // turns it on when it learns of a tab, but every re-attach here (after
+    // navigation, an interstitial, a SW restart, a refused command) is a new
+    // session where it is off again, and a background tab then stops
+    // rendering: rAF never fires and each input event waits ~1.8 s for a
+    // frame. So every successful attach re-applies it. Best effort: an old
+    // browser without the method still drives fine in the foreground.
+    await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true })
+      .catch(() => undefined);
   }
 
   /**

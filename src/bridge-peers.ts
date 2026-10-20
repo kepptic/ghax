@@ -6,18 +6,20 @@
  * bound/degraded state machine; those stay in Bridge.
  */
 import { WebSocket } from 'ws';
-import { lookupProfileName } from './browser-profiles';
+import { cachedProfileName, lookupProfileName } from './browser-profiles';
 import { mintAliases, sanitizeLabel } from './tab-identity';
 
 /**
  * Browser profile name for an instance with no popup label: (instanceId,
- * brand, chrome.runtime.id) → name, '' when unknown. Default reads the
- * browser's own profile data (src/browser-profiles.ts).
+ * brand, chrome.runtime.id) → name, '' when unknown. A string is an answer
+ * now (cache); a promise is a disk scan the hello does NOT wait for: the name
+ * is applied when it lands. Default reads the browser's own profile data
+ * (src/browser-profiles.ts).
  */
-export type ProfileLookup = (instanceId: string, brand: string, extensionId: string) => string;
+export type ProfileLookup = (instanceId: string, brand: string, extensionId: string) => string | Promise<string>;
 
 const defaultProfileLookup: ProfileLookup = (instanceId, brand, extensionId) =>
-  lookupProfileName(instanceId, { brand, extensionId });
+  cachedProfileName(instanceId, { brand, extensionId }) ?? lookupProfileName(instanceId, { brand, extensionId });
 
 export type PeerRole = 'bound' | 'parked';
 
@@ -125,6 +127,7 @@ export class PeerRegistry {
   private peers = new Map<string, Peer>();
   private socketPeer = new WeakMap<WebSocket, Peer>();
   private legacySeq = 0;
+  private pendingLookups = new Set<Promise<void>>();
 
   constructor(
     private readonly log: (msg: string) => void,
@@ -269,6 +272,31 @@ export class PeerRegistry {
     return alias;
   }
 
+  private trackLookup(instanceId: string, lookup: Promise<string>): void {
+    const done: Promise<void> = lookup
+      .then((name) => this.applyAutoProfile(instanceId, name), () => undefined)
+      .finally(() => this.pendingLookups.delete(done));
+    this.pendingLookups.add(done);
+  }
+
+  /**
+   * A profile scan finished. A popup label that arrived meanwhile wins. An
+   * alias already handed out in a listing stays (ids the agent holds must not
+   * flip); one not minted yet is minted from the new name.
+   */
+  private applyAutoProfile(instanceId: string, raw: string): void {
+    const peer = this.peers.get(instanceId);
+    const name = sanitizeLabel(raw);
+    if (!peer || !name || peer.profileSource === 'label' || peer.profile === name) return;
+    peer.profile = name;
+    peer.profileSource = 'browser';
+  }
+
+  /** Resolves once every profile scan started so far has been applied. Tests. */
+  async profileLookupsSettled(): Promise<void> {
+    while (this.pendingLookups.size > 0) await Promise.all([...this.pendingLookups]);
+  }
+
   /** browser / profile / alias of one instance, for tab listings. */
   identityOf(instanceId: string): { instanceId: string; browser: string; profile: string; alias: string; nonce: string } | null {
     const p = this.peers.get(instanceId);
@@ -303,7 +331,13 @@ export class PeerRegistry {
     const labelled = typeof msg.profile === 'string' ? sanitizeLabel(msg.profile) : label;
     // No popup label: the browser's own name for the profile, when exactly
     // one profile on disk holds this instance's storage. A label always wins.
-    const auto = labelled || legacy ? '' : sanitizeLabel(this.lookupProfile(instanceId, browser, extensionId));
+    // Only a cached answer is used here; a scan runs off the hello path.
+    let auto = '';
+    if (!labelled && !legacy && extensionId) {
+      const found = this.lookupProfile(instanceId, browser, extensionId);
+      if (typeof found === 'string') auto = sanitizeLabel(found);
+      else this.trackLookup(instanceId, found);
+    }
     const profile = labelled || auto;
     const profileSource: ProfileSource = labelled ? 'label' : auto ? 'browser' : 'none';
     const sessionNonce = typeof msg.sessionNonce === 'string' ? msg.sessionNonce.slice(0, 64) : '';

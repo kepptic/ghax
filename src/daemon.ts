@@ -39,6 +39,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type CDPSession } from 'playwright';
+import { waitForTargetPage } from './target-match';
 import { CdpPool, type CdpTarget, type CdpTargetInfo } from './cdp-client';
 import { resolveConfig, type DaemonState, writeState, readState, registerDaemon, unregisterDaemon, readDaemonRegistry } from './config';
 import { CircularBuffer, parseStack, type ConsoleEntry, type NetworkEntry } from './buffers';
@@ -93,7 +94,7 @@ import * as crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import {
   aliasOfId, bridgeRowsToIdentities, composeTabId, describeTab, displayBrand, resolveTabSelector, NO_PROFILE,
-  sanitizeLabel, withWindowOrdinals, type TabIdentity, type TabOwner,
+  cwdLabel, sanitizeLabel, withWindowOrdinals, type TabIdentity, type TabOwner,
 } from './tab-identity';
 
 /**
@@ -251,6 +252,27 @@ const BRIDGE_RETRY_SAFE = new Set([
  * step is a verb of its own and captures afresh.
  */
 const verbPeer = new AsyncLocalStorage<{ peer: string | null; inherit?: boolean }>();
+
+/**
+ * What a BORROWED call (`opts.borrowed`, set by a CLI that found this daemon
+ * through discovery from another directory) may run: reads only. Mirrors
+ * borrow_allowed in crates/cli/src/dispatch.rs.
+ */
+const BORROW_ALLOWED_CMDS = new Set(['status', 'tabs', 'bridge.instances', 'console', 'network']);
+/** Options that write a file or change daemon state. Mirrors BORROW_DENIED_FLAGS in dispatch.rs. */
+const BORROW_DENIED_OPTS = ['har', 'source-maps', 'clear', 'export'];
+
+function assertBorrowAllowed(cmd: string, opts: Record<string, unknown>): void {
+  const bad = BORROW_ALLOWED_CMDS.has(cmd)
+    ? BORROW_DENIED_OPTS.find((k) => opts[k] !== undefined && opts[k] !== false)
+    : null;
+  if (!BORROW_ALLOWED_CMDS.has(cmd) || bad) {
+    throw new DaemonError(
+      `${cmd}${bad ? ` --${bad}` : ''}: refused on a borrowed daemon (read-only). Run 'ghax attach' in your own directory, or set GHAX_STATE_FILE to drive this one on purpose.`,
+      1,
+    );
+  }
+}
 
 function register(name: string, fn: Handler) {
   handlers.set(name, async (ctx, args, opts) => {
@@ -475,7 +497,11 @@ async function instrumentPage(ctx: Ctx, page: Page): Promise<void> {
   // --focus). Chromium stops rendering hidden tabs, so rAF never fires and
   // input waits for a frame that never comes. Focus emulation marks the page
   // visible and focused for as long as this session lives, without raising
-  // anything. Kept attached on purpose: detaching ends the emulation.
+  // anything. Kept attached on purpose: detaching ends the emulation. NOT
+  // redundant with Playwright's own focus emulation: crPage skips it on the
+  // default context when connectOverCDP got `noDefaults: true`
+  // (`skipDefaultOverrides`, playwright-core coreBundle.js ~37634), which is
+  // how this daemon attaches. The session ends with the page.
   void page.context().newCDPSession(page)
     .then((session) => session.send('Emulation.setFocusEmulationEnabled', { enabled: true }))
     .catch(() => undefined);
@@ -950,7 +976,7 @@ function tabOwnerResolver(ctx: Ctx): (port: number) => TabOwner {
       pid: e?.pid ?? null,
       // Free text from another process's file: cleaned like a hello label.
       name: e && typeof e.name === 'string' ? sanitizeLabel(e.name) || null : null,
-      cwd: e && typeof e.cwd === 'string' ? sanitizeLabel(e.cwd) || null : null,
+      cwd: e && typeof e.cwd === 'string' ? cwdLabel(e.cwd) || null : null,
       self: false,
     };
   };
@@ -1354,8 +1380,10 @@ register('tabs', async (ctx, _args, opts) => {
   // instance. Safe because chrome.tabs.query needs no debugger attachment.
   const browserSel = (opts.browser as string | undefined) ?? null;
   // Each row carries its full identity (index, id, chromeTabId, browser,
-  // profile, windowId). `controlledBy` (bridge only) says which agent owns
-  // a tab: `active` only ever means "mine". `index` is the row number in the
+  // profile, windowId). `active` depends on the transport: on the bridge it
+  // is the window's foreground tab (the user's, one per window), over CDP it
+  // is this daemon's active page. Which agent drives a tab is `controlledBy`
+  // (bridge only), never `active`. `index` is the row number in the
   // UNFILTERED list, and that list is what a later `tab #n` resolves against.
   let notes: string[] = [];
   let all: TabIdentity[];
@@ -1364,7 +1392,9 @@ register('tabs', async (ctx, _args, opts) => {
   } else {
     all = withWindowOrdinals(await listCdpTabs(ctx));
   }
-  ctx.lastTabListing = all;
+  // A borrowed call (another directory's CLI reading this daemon) must not
+  // replace the owner's listing: their next `tab #n` resolves against it.
+  if (opts.borrowed !== true) ctx.lastTabListing = all;
   const noteRows = notes.map((note) => ({ note }));
   const matched = filterRe
     ? all.filter((t) => filterRe!.test(t.url) || filterRe!.test(t.title))
@@ -1463,13 +1493,21 @@ register('newTab', async (ctx, args, opts) => {
   const url = args[0] ? String(args[0]) : 'about:blank';
   let windowId: number | null = null;
   if (opts.window !== undefined) {
-    windowId = Number(opts.window);
+    // `--window` with no value parses as `true` (and Number(true) is 1, a
+    // real-looking id); a boolean or a blank is a usage error, not window 1.
+    const raw = opts.window;
+    if (typeof raw === 'boolean' || String(raw).trim() === '') {
+      throw new DaemonError("new-tab --window requires a window id. Read windowId from 'ghax tabs --json'.", 1);
+    }
+    windowId = Number(raw);
     if (!Number.isInteger(windowId)) {
-      throw new Error(`new-tab --window: '${String(opts.window)}' is not a window id. Read windowId from 'ghax tabs --json'.`);
+      throw new DaemonError(`new-tab --window: '${String(raw)}' is not a window id. Read windowId from 'ghax tabs --json'.`, 1);
     }
   }
   return openBackgroundTab(ctx, 'newTab', url, windowId);
 });
+
+const NEW_TARGET_TIMEOUT_MS = 10_000;
 
 /**
  * Open a background tab (`newTab`, in an existing window) or a background
@@ -1511,19 +1549,20 @@ async function openBackgroundTab(
   if (!context) throw new Error(`${verb}: no browser context available`);
   const cdpSession = traceSend(await browser.newBrowserCDPSession());
   try {
-    // Race-free: subscribe to the "page" event BEFORE firing createTarget.
-    // Playwright surfaces the new page as soon as the target becomes
-    // attachable, so waitForEvent resolves right after CDP confirms.
-    // `background: true` keeps the new tab inactive (and, with newWindow,
-    // the new window unfocused).
-    const [newPage] = await Promise.all([
-      context.waitForEvent('page', { timeout: 10_000 }),
-      cdpSession.send('Target.createTarget', {
-        url,
-        newWindow: verb === 'newWindow',
-        background: true,
-      }),
-    ]);
+    // Match the page by the targetId createTarget returns, never "the next
+    // page event": a tab another agent, the user or a popup opens in the same
+    // moment would otherwise become this daemon's tab. `background: true`
+    // keeps the new tab inactive (and, with newWindow, the window unfocused).
+    const { targetId } = await cdpSession.send('Target.createTarget', {
+      url,
+      newWindow: verb === 'newWindow',
+      background: true,
+    }) as { targetId: string };
+    const newPage = await waitForTargetPage({
+      pages: () => context.pages(),
+      targetIdOf: pageTargetId,
+      nextPage: (ms) => context.waitForEvent('page', { timeout: ms }),
+    }, targetId, NEW_TARGET_TIMEOUT_MS);
     // Let the initial nav settle so the caller sees the real URL, not
     // about:blank, when they read the returned object.
     await newPage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
@@ -1947,7 +1986,9 @@ register('bridge.control', async (ctx, _args, opts) => {
     }
     // Same resolution as `ghax tab`: #n, full id, or an unambiguous number.
     const tab = await resolveBridgeTab(ctx, String(raw));
-    const ack = await controlResolvedTab(ctx, tab);
+    // Background, like `ghax tab`: never raise a window or move the user's
+    // active tab. `quiet` is for extensions that predate `focus`.
+    const ack = await controlResolvedTab(ctx, tab, { focus: false, quiet: true });
     setActiveTab(ctx, tab.id);
     return { ok: ack.ok, tabId: tab.id, chromeTabId: tab.chromeTabId, browser: tab.browser, profile: tab.profile, title: tab.title };
   } else {
@@ -4996,6 +5037,15 @@ async function main() {
   const dispatch = async (cmd: string, args: unknown[], opts: Record<string, unknown>) => {
     const handler = handlers.get(cmd);
     if (!handler) throw new Error(`Unknown command: ${cmd}`);
+    // A CLI that borrowed this daemon from another directory marks every
+    // call. Enforce the read-only allowlist here too (an older or other
+    // client could skip the CLI check), and leave the owner's session alone:
+    // no idle-timer bump, no recorded step, no `tab #n` listing overwrite.
+    const borrowed = opts.borrowed === true;
+    if (borrowed) {
+      assertBorrowAllowed(cmd, opts);
+      return handler(ctx, args, opts);
+    }
     lastActivity = Date.now();
     const result = await handler(ctx, args, opts);
     if (ctx.recording) {

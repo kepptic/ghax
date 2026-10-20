@@ -18,10 +18,18 @@
  *   several is no name ('—' upstream): never a guess.
  * - Only `.name` is read from `Local State`. Never `user_name`, email, or any
  *   other account field.
- * - Results (hits and misses) are cached per instanceId for the daemon's life.
+ * - Only regular files are read (`lstat`, opened O_NOFOLLOW|O_NONBLOCK and
+ *   re-checked with `fstat`): a symlink or FIFO planted in a profile dir is
+ *   skipped, never followed or blocked on. Every read is size-bounded.
+ * - No scan without the extension's own id ([a-p]{32} from hello): walking
+ *   every extension's storage of every profile is not worth a name.
+ * - Async and off the hello path: the hello binds at once, the name lands
+ *   when the scan does. Hits are cached for the daemon's life, misses for
+ *   MISS_TTL_MS, keyed on instanceId+brand+extensionId, at most CACHE_MAX.
  */
 
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -43,8 +51,19 @@ export interface ProfileLookupOptions {
   roots?: string[];
 }
 
-/** Files bigger than this are skipped: a ghax storage file is a few KB. */
-const MAX_FILE_BYTES = 64 * 1024 * 1024;
+/**
+ * LevelDB files bigger than this are skipped. A ghax storage file is a few KB;
+ * LevelDB rolls `.log` at its 4 MB write buffer and `.ldb` tables are ~2 MB.
+ */
+export const MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** `Local State` is a few hundred KB even with many profiles. */
+export const MAX_LOCAL_STATE_BYTES = 8 * 1024 * 1024;
+/** How long "no profile found" is remembered before a hello may scan again. */
+export const MISS_TTL_MS = 60_000;
+/** Cache entries kept; the oldest goes first. */
+export const CACHE_MAX = 64;
+
+const EXTENSION_ID = /^[a-p]{32}$/;
 
 const UUIDISH = /^[0-9a-zA-Z-]{16,64}$/;
 
@@ -128,46 +147,66 @@ export function profileRoots(
   return roots;
 }
 
-function listDir(p: string): string[] {
+async function listDir(p: string): Promise<string[]> {
   try {
-    return fs.readdirSync(p);
+    return await fsp.readdir(p);
   } catch {
     return [];
   }
 }
 
-/** True when any `.log`/`.ldb` file directly in `dir` contains `needle`. */
-function dirContains(dir: string, needle: Buffer): boolean {
-  for (const f of listDir(dir)) {
-    if (!f.endsWith('.log') && !f.endsWith('.ldb')) continue;
-    const file = path.join(dir, f);
+const OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+
+/**
+ * The whole file, or null when it is not a regular file (symlink, FIFO,
+ * device, dir), is bigger than `max`, or can't be read. `lstat` first so a
+ * symlink is never followed; O_NOFOLLOW + `fstat` close the swap race.
+ */
+export async function readRegularFile(file: string, max: number): Promise<Buffer | null> {
+  try {
+    const st = await fsp.lstat(file);
+    if (!st.isFile() || st.size > max) return null;
+    const fh = await fsp.open(file, OPEN_FLAGS);
     try {
-      const st = fs.statSync(file);
-      if (!st.isFile() || st.size > MAX_FILE_BYTES) continue;
-      if (fs.readFileSync(file).indexOf(needle) !== -1) return true;
-    } catch {
-      // Unreadable or vanished mid-scan (LevelDB compaction): not a match.
+      const fst = await fh.stat();
+      if (!fst.isFile() || fst.size > max) return null;
+      const buf = Buffer.alloc(fst.size);
+      const { bytesRead } = await fh.read(buf, 0, fst.size, 0);
+      return buf.subarray(0, bytesRead);
+    } finally {
+      await fh.close();
     }
+  } catch {
+    // Unreadable or vanished mid-scan (LevelDB compaction): no data.
+    return null;
+  }
+}
+
+/** True when any `.log`/`.ldb` file directly in `dir` contains `needle`. */
+async function dirContains(dir: string, needle: Buffer): Promise<boolean> {
+  for (const f of await listDir(dir)) {
+    if (!f.endsWith('.log') && !f.endsWith('.ldb')) continue;
+    const data = await readRegularFile(path.join(dir, f), MAX_FILE_BYTES);
+    if (data && data.indexOf(needle) !== -1) return true;
   }
   return false;
 }
 
-/** The profile dirs under `root` whose extension storage holds `needle`. */
-function matchingDirs(root: string, needle: Buffer, extensionId: string): string[] {
+/** The profile dirs under `root` whose storage for `extensionId` holds `needle`. */
+async function matchingDirs(root: string, needle: Buffer, extensionId: string): Promise<string[]> {
   const hits: string[] = [];
-  for (const dir of listDir(root)) {
-    const settings = path.join(root, dir, 'Local Extension Settings');
-    const exts = extensionId ? [extensionId] : listDir(settings);
-    if (exts.some((ext) => dirContains(path.join(settings, ext), needle))) hits.push(dir);
+  for (const dir of await listDir(root)) {
+    if (await dirContains(path.join(root, dir, 'Local Extension Settings', extensionId), needle)) hits.push(dir);
   }
   return hits;
 }
 
 /** `Local State` `.profile.info_cache[dir].name`, '' when absent. Reads nothing else. */
-export function readProfileName(root: string, dir: string): string {
+export async function readProfileName(root: string, dir: string): Promise<string> {
+  const raw = await readRegularFile(path.join(root, 'Local State'), MAX_LOCAL_STATE_BYTES);
+  if (!raw) return '';
   try {
-    const state = JSON.parse(fs.readFileSync(path.join(root, 'Local State'), 'utf8'));
-    const name = state?.profile?.info_cache?.[dir]?.name;
+    const name = JSON.parse(raw.toString('utf8'))?.profile?.info_cache?.[dir]?.name;
     return typeof name === 'string' ? name : '';
   } catch {
     return '';
@@ -176,45 +215,93 @@ export function readProfileName(root: string, dir: string): string {
 
 /**
  * The single profile whose ghax storage holds `instanceId`, or null when none
- * or more than one does. Uncached; see `lookupProfileName`.
+ * or more than one does, or when there is no valid `extensionId` to narrow
+ * the scan to. Uncached; see `lookupProfileName`.
  */
-export function findProfile(instanceId: string, opts: ProfileLookupOptions = {}): ProfileMatch | null {
+export async function findProfile(instanceId: string, opts: ProfileLookupOptions = {}): Promise<ProfileMatch | null> {
   if (!UUIDISH.test(instanceId)) return null;
-  const extensionId = opts.extensionId && /^[a-p]{32}$/.test(opts.extensionId) ? opts.extensionId : '';
+  const extensionId = opts.extensionId ?? '';
+  if (!EXTENSION_ID.test(extensionId)) return null;
   const roots = opts.roots ?? profileRoots(opts.brand ?? '');
   const needle = Buffer.from(instanceId, 'latin1');
   const found: Array<{ root: string; dir: string }> = [];
   for (const root of roots) {
-    if (!fs.existsSync(path.join(root, 'Local State'))) continue;
-    for (const dir of matchingDirs(root, needle, extensionId)) found.push({ root, dir });
+    const st = await fsp.lstat(path.join(root, 'Local State')).catch(() => null);
+    if (!st?.isFile()) continue;
+    for (const dir of await matchingDirs(root, needle, extensionId)) found.push({ root, dir });
     if (found.length > 1) return null;
   }
   if (found.length !== 1) return null;
   const [{ root, dir }] = found;
-  return { root, dir, name: readProfileName(root, dir) };
+  return { root, dir, name: await readProfileName(root, dir) };
 }
 
-const cache = new Map<string, ProfileMatch | null>();
+interface CacheEntry {
+  name: string;
+  /** 0 for a hit (kept for the daemon's life), else when the miss expires. */
+  expiresAt: number;
+}
+
+const cache = new Map<string, CacheEntry>();
+const inFlight = new Map<string, Promise<string>>();
+
+function cacheKey(instanceId: string, opts: ProfileLookupOptions): string {
+  return `${instanceId}\u0000${(opts.brand ?? '').toLowerCase()}\u0000${opts.extensionId ?? ''}`;
+}
+
+function cacheSet(key: string, entry: CacheEntry): void {
+  cache.delete(key);
+  while (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value as string);
+  cache.set(key, entry);
+}
 
 /**
- * Cached `findProfile(...).name` for one instance; '' when it can't be pinned
- * to exactly one named profile. Synchronous on purpose: it runs at hello, and
- * the tab-id alias minted from it must not flip a moment later.
+ * The cached name for one instance without scanning: a string ('' for a
+ * remembered miss) when the cache can answer, undefined when a scan is due.
  */
-export function lookupProfileName(instanceId: string, opts: ProfileLookupOptions = {}): string {
-  if (!cache.has(instanceId)) {
-    let hit: ProfileMatch | null = null;
-    try {
-      hit = findProfile(instanceId, opts);
-    } catch {
-      hit = null;
-    }
-    cache.set(instanceId, hit);
+export function cachedProfileName(instanceId: string, opts: ProfileLookupOptions = {}, now = Date.now()): string | undefined {
+  const key = cacheKey(instanceId, opts);
+  const hit = cache.get(key);
+  if (!hit) return undefined;
+  if (hit.expiresAt !== 0 && hit.expiresAt <= now) {
+    cache.delete(key);
+    return undefined;
   }
-  return cache.get(instanceId)?.name ?? '';
+  return hit.name;
+}
+
+/**
+ * `findProfile(...).name` for one instance, cached; '' when it can't be
+ * pinned to exactly one named profile. Concurrent calls for the same key share
+ * one scan.
+ */
+export function lookupProfileName(instanceId: string, opts: ProfileLookupOptions = {}): Promise<string> {
+  const cached = cachedProfileName(instanceId, opts);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const key = cacheKey(instanceId, opts);
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  const run = (async () => {
+    let name = '';
+    try {
+      name = (await findProfile(instanceId, opts))?.name ?? '';
+    } catch {
+      name = '';
+    }
+    cacheSet(key, { name, expiresAt: name ? 0 : Date.now() + MISS_TTL_MS });
+    return name;
+  })().finally(() => inFlight.delete(key));
+  inFlight.set(key, run);
+  return run;
 }
 
 /** Tests only. */
 export function clearProfileCache(): void {
   cache.clear();
+  inFlight.clear();
+}
+
+/** Tests only. */
+export function profileCacheSize(): number {
+  return cache.size;
 }

@@ -17,6 +17,31 @@ pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
 }
 
+/// Set when the daemon was BORROWED from another directory (discovery
+/// fallback). Every RPC then carries `opts.borrowed = true`, so the daemon
+/// refuses anything outside its read-only allowlist and leaves the owner's
+/// session state alone.
+static BORROWED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_borrowed(on: bool) {
+    BORROWED.store(on, Ordering::Relaxed);
+}
+
+/// `opts` plus the process-wide markers (`trace`, `borrowed`) that are set.
+fn marked_opts(opts: &Value, trace: bool, borrowed: bool) -> Option<Value> {
+    if !trace && !borrowed {
+        return None;
+    }
+    let mut m = opts.as_object().cloned().unwrap_or_default();
+    if trace {
+        m.insert("trace".into(), Value::Bool(true));
+    }
+    if borrowed {
+        m.insert("borrowed".into(), Value::Bool(true));
+    }
+    Some(Value::Object(m))
+}
+
 #[derive(Serialize)]
 struct Request<'a> {
     cmd: &'a str,
@@ -218,15 +243,8 @@ fn call_once(
     opts: &Value,
 ) -> Result<Value> {
     let url = format!("http://127.0.0.1:{port}/rpc");
-    let traced_opts;
-    let opts = if TRACE.load(Ordering::Relaxed) {
-        let mut m = opts.as_object().cloned().unwrap_or_default();
-        m.insert("trace".into(), Value::Bool(true));
-        traced_opts = Value::Object(m);
-        &traced_opts
-    } else {
-        opts
-    };
+    let marked = marked_opts(opts, TRACE.load(Ordering::Relaxed), BORROWED.load(Ordering::Relaxed));
+    let opts = marked.as_ref().unwrap_or(opts);
     let body = Request { cmd, args, opts };
     let resp = client.post(&url).json(&body).send()?;
     let envelope: Value = resp.json()?;
@@ -315,6 +333,19 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    #[test]
+    fn borrowed_marker_rides_in_opts() {
+        assert_eq!(marked_opts(&json!({"last": 5}), false, false), None);
+        assert_eq!(
+            marked_opts(&json!({"last": 5}), false, true),
+            Some(json!({"last": 5, "borrowed": true}))
+        );
+        assert_eq!(
+            marked_opts(&Value::Null, true, true),
+            Some(json!({"trace": true, "borrowed": true}))
+        );
+    }
 
     #[test]
     fn retry_classes() {

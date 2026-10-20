@@ -83,8 +83,10 @@ fn format_tab_line(t: &Value) -> Option<String> {
 }
 
 /// `you`, the agent's name, `<cwd basename>/<pid>`, else `:<port>`; `none`
-/// for a free tab. A bare number is an older daemon's port-only owner. Must
-/// match `ownerLabel` in src/tab-identity.ts.
+/// for a free tab. A bare number is an older daemon's port-only owner. The
+/// daemon already sends another agent's cwd as a cleaned basename
+/// (`cwdLabel`); taking the basename again keeps older daemons' full paths
+/// readable. Must match `ownerLabel` in src/tab-identity.ts.
 fn owner_label(c: &Value) -> String {
     if c.is_null() {
         return "none".to_string();
@@ -137,6 +139,14 @@ mod tests {
         assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "x", "cwd": "/a", "self": true})), "you");
         assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "claude-a", "cwd": "/a", "self": false})), "claude-a");
         assert_eq!(owner_label(&json!({"port": 9225, "pid": null, "name": null, "cwd": null, "self": false})), ":9225");
+        // Current daemons send the basename already (cwdLabel); an older one
+        // sends the full path. Both print `<basename>/<pid>`.
+        assert_eq!(owner_label(&json!({"port": 9224, "pid": 7, "name": null, "cwd": "ghax", "self": false})), "ghax/7");
+        assert_eq!(
+            owner_label(&json!({"port": 9224, "pid": 7, "name": null,
+                "cwd": "/Users/someone/Documents/a/very/long/path/that/exceeds/forty/chars/ghax/", "self": false})),
+            "ghax/7"
+        );
     }
 
     #[test]

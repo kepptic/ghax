@@ -28,7 +28,8 @@ Connection:
          # --name (or GHAX_AGENT) names this agent as a tab owner in other
          #   agents' 'tabs' (default: <cwd basename>/<pid>).
          # No daemon here and exactly one elsewhere: ghax borrows it READ-ONLY
-         #   (status, tabs, version, bridge instances, console, network);
+         #   (status, tabs, version, bridge instances, console, network;
+         #   no --har or --source-maps);
          #   anything else needs 'ghax attach' here or GHAX_STATE_FILE.
   status [--json]
   detach
@@ -52,8 +53,10 @@ Tab:
                                   #   e.g. edge-dag-tech:42 (profile = popup "Profile
                                   #   name", else the browser's own profile name)
                                   # win N: window ordinal within that browser;
-                                  #   active: the window's foreground tab;
-                                  #   controlledBy: you | agent name | dir/pid | none
+                                  #   active: bridge = the window's foreground tab
+                                  #   (the user's); CDP = this daemon's tab
+                                  #   controlledBy (bridge): you | agent name |
+                                  #   dir/pid | none; your tab is controlledBy=you
                                   # bridge: every CONNECTED browser, parked too,
                                   #   numbered #1..N; one with no windows or that
                                   #   doesn't answer is a `note:` row
@@ -69,7 +72,8 @@ Tab:
   new-tab [url] [--window <windowId>]
                                   # new background tab in an existing window
                                   #   (windowId from 'tabs --json'; bridge only),
-                                  #   never focused; becomes the active tab
+                                  #   never focused; becomes the tab this
+                                  #   daemon drives
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js> [--timeout <ms>] [--no-wait]

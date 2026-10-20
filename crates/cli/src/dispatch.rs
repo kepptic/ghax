@@ -133,6 +133,9 @@ fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
                     return Err(anyhow::anyhow!(state::borrowed_refusal(verb, &entry)));
                 }
                 state::note_adoption(&entry);
+                // The daemon enforces the same allowlist and keeps its session
+                // state (the `tab #n` listing) untouched for marked calls.
+                crate::rpc::set_borrowed(true);
             }
             Ok(cfg)
         }
@@ -145,11 +148,22 @@ fn resolve_for_verb(verb: &str, rest: &[String]) -> Result<Config> {
 /// explicit `ghax attach` here or GHAX_STATE_FILE.
 fn borrow_allowed(verb: &str, rest: &[String]) -> bool {
     match verb {
-        "status" | "tabs" | "version" | "console" | "network" => true,
+        "status" | "tabs" | "version" => true,
+        // `network --har` writes a file; `--source-maps` fetches scripts and
+        // fills the daemon's map cache. `--clear`/`--export` are refused up
+        // front so a future flag of that kind can't slip through.
+        "console" | "network" => !rest.iter().any(|a| {
+            let flag = a.split('=').next().unwrap_or(a);
+            BORROW_DENIED_FLAGS.contains(&flag)
+        }),
         "bridge" => rest.first().map(String::as_str) == Some("instances"),
         _ => false,
     }
 }
+
+/// console/network flags that write a file or change daemon state. Must
+/// match BORROW_DENIED_OPTS in src/daemon.ts.
+const BORROW_DENIED_FLAGS: &[&str] = &["--har", "--source-maps", "--clear", "--export"];
 
 #[cfg(test)]
 mod local_only_tests {
@@ -180,6 +194,19 @@ mod local_only_tests {
         for verb in ["goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot"] {
             assert!(!borrow_allowed(verb, &v(&[])), "{verb}");
         }
+    }
+
+    #[test]
+    fn borrowed_console_and_network_refuse_writing_flags() {
+        assert!(!borrow_allowed("network", &v(&["--har", "/tmp/x.har"])));
+        assert!(!borrow_allowed("network", &v(&["--har=/tmp/x.har"])));
+        assert!(!borrow_allowed("network", &v(&["--pattern", "api", "--export", "x"])));
+        assert!(!borrow_allowed("console", &v(&["--clear"])));
+        assert!(!borrow_allowed("console", &v(&["--source-maps"])));
+        assert!(borrow_allowed("network", &v(&["--pattern", "api", "--last", "5"])));
+        assert!(borrow_allowed("console", &v(&["--errors", "--follow"])));
+        // A value that merely mentions a flag is not that flag.
+        assert!(borrow_allowed("network", &v(&["--pattern", "x--har"])));
     }
 }
 

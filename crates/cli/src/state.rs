@@ -295,7 +295,7 @@ pub fn resolve_config_with_origin() -> Result<(Config, Option<RegistryEntry>)> {
 pub fn borrowed_refusal(verb: &str, entry: &RegistryEntry) -> String {
     format!(
         "{verb}: refused. There is no daemon for this directory; the only one running belongs to another session ({}). \
-A borrowed daemon is read-only: status, tabs, version, bridge instances, console, network. \
+A borrowed daemon is read-only: status, tabs, version, bridge instances, console, network (no --har or --source-maps). \
 Run 'ghax attach' here for your own daemon, or set GHAX_STATE_FILE={} to drive that one on purpose.",
         entry.describe(),
         entry.state_file.display()

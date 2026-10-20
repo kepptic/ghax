@@ -29,12 +29,13 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { Bridge, BridgeInterrupted, BRIDGE_PORT_RANGE } from '../src/bridge';
 import { PeerRegistry } from '../src/bridge-peers';
+import { waitForTargetPage } from '../src/target-match';
 import { CircularBuffer, type ConsoleEntry, type NetworkEntry } from '../src/buffers';
 import {
   activePeerState, pickMainFrameContext, wireBridgePageEvents, type BridgePageSink,
 } from '../src/bridge-page-state';
 import {
-  bridgeRowsToIdentities, displayBrand, formatTabLine, mintAliases, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity,
+  bridgeRowsToIdentities, cwdLabel, displayBrand, formatTabLine, mintAliases, ownerLabel, resolveTabSelector, sanitizeLabel, TabResolveError, type TabIdentity, type TabOwner,
 } from '../src/tab-identity';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -197,6 +198,8 @@ class FakeConnection {
   attachFailure: Error | null = null;
   /** The id of the last control request seen — lets a test forge an ack for it. */
   lastControlId: number | null = null;
+  /** The last control message received, whole (focus/quiet flags included). */
+  lastControl: any = null;
   /**
    * Answer (or hold) a CDP command instead of the default echo. Return true
    * when handled; `reply` may be called later to release a held command.
@@ -384,6 +387,7 @@ class FakeConnection {
   private onControl(msg: any): void {
     const id = msg.id ?? null;
     if (typeof msg.id === 'number') this.lastControlId = msg.id;
+    this.lastControl = msg;
     if (this.swallowControl) return; // never answered — the request stays pending
     try {
       if (msg.action === 'reload') {
@@ -1311,6 +1315,37 @@ async function main(): Promise<void> {
     assert(sanitizeLabel('Zoë') === 'Zoë', 'letters survive');
   });
 
+  await test('cwdLabel takes the basename before capping, so a long path keeps its last segment', async () => {
+    const long = '/Users/someone/Documents/DevOps/kepptic/products/open-source/kepptic/ghax/';
+    assert(sanitizeLabel(long).split('/').pop() !== 'ghax', 'premise: capping first loses the basename');
+    assert(cwdLabel(long) === 'ghax', `cwdLabel: ${cwdLabel(long)}`);
+    assert(cwdLabel('C:\\work\\repo') === 'repo', 'windows separators');
+    assert(cwdLabel('/a/b\nc\u202e') === 'bc', `controls stripped after the split: ${JSON.stringify(cwdLabel('/a/b\nc\u202e'))}`);
+    const owner: TabOwner = { port: 9224, pid: 7, name: null, cwd: cwdLabel(long), self: false };
+    assert(ownerLabel(owner) === 'ghax/7', `ownerLabel: ${ownerLabel(owner)}`);
+  });
+
+  await test('CDP new-tab takes the page whose target id createTarget returned, not the first new page', async () => {
+    // Another agent's tab lands first; ours arrives 30 ms later.
+    const pages: string[] = ['existing'];
+    let wake: (() => void) | null = null;
+    const add = (id: string) => { pages.push(id); wake?.(); };
+    setTimeout(() => add('rival'), 5);
+    setTimeout(() => add('mine'), 30);
+    const got = await waitForTargetPage({
+      pages: () => [...pages],
+      targetIdOf: async (p) => p,
+      nextPage: (ms) => new Promise<void>((r) => { wake = r; setTimeout(r, ms); }),
+    }, 'mine', 2000, 20);
+    assert(got === 'mine', `matched ${got}`);
+    const t0 = Date.now();
+    let err = '';
+    try {
+      await waitForTargetPage({ pages: () => ['rival'], targetIdOf: async (p) => p, nextPage: (ms) => sleep(ms) }, 'never', 120, 20);
+    } catch (e) { err = String((e as Error).message); }
+    assert(/did not appear within 120 ms/.test(err) && Date.now() - t0 < 1000, `timeout: ${err}`);
+  });
+
   await test('PeerRegistry.decide refuses two candidates (pure)', async () => {
     const reg = new PeerRegistry(() => {});
     const fakeWs = () => ({ readyState: WebSocket.OPEN, close() {} }) as unknown as WebSocket;
@@ -2125,6 +2160,51 @@ async function main(): Promise<void> {
         assert(!r.ok && /no active tab/.test(String(r.error)) && /--all/.test(String(r.error)), `${verb}: ${JSON.stringify(r)}`);
       }
       assert((await rpc('console', [], { all: true })).ok, '--all still works');
+    });
+  });
+
+  await test('daemon, borrowed: tabs leaves the owner\'s #n listing alone; writes and non-read verbs are refused', async () => {
+    await withDaemon(async ({ rpc, alias }) => {
+      const ca = await alias('inst-chrome');
+      const own = await rpc('tabs');
+      assert(own.ok && own.data.length === 6, `owner listing: ${JSON.stringify(own)}`);
+      const row5 = own.data.find((t: any) => t.index === 5);
+      // A borrowed listing of one browser only: 3 rows. Were it stored, the
+      // owner's `#5` would resolve against it and fail.
+      const peek = await rpc('tabs', [], { borrowed: true, browser: 'inst-chrome' });
+      assert(peek.ok && peek.data.length === 3, `borrowed tabs: ${JSON.stringify(peek)}`);
+      const sw = await rpc('tab', ['#5']);
+      assert(sw.ok && sw.data.id === row5.id && row5.id.startsWith(`${ca}:`), `owner's #5 after a borrowed listing: ${JSON.stringify(sw)}`);
+      for (const [cmd, opts] of [
+        ['goto', {}], ['tab', {}], ['eval', {}], ['batch', {}],
+        ['network', { har: '/tmp/ghax-borrowed.har' }], ['console', { 'source-maps': true }],
+      ] as const) {
+        const r = await rpc(cmd, cmd === 'goto' ? ['https://example.com'] : [], { ...opts, borrowed: true });
+        assert(!r.ok && /borrowed daemon \(read-only\)/.test(String(r.error)), `${cmd} ${JSON.stringify(opts)}: ${JSON.stringify(r)}`);
+      }
+      assert((await rpc('network', [], { borrowed: true, all: true })).ok, 'plain network still reads');
+      assert((await rpc('bridge.instances', [], { borrowed: true })).ok, 'bridge instances still reads');
+    });
+  });
+
+  await test('daemon: bridge control --tab-id drives the tab in the background (focus:false, quiet:true)', async () => {
+    await withDaemon(async ({ rpc, edge, alias }) => {
+      const ea = await alias('inst-edge');
+      const r = await rpc('bridge.control', [], { mode: 'tab', tabId: `${ea}:2` });
+      assert(r.ok, JSON.stringify(r));
+      assert(edge.lastControl?.action === 'control-tab' && edge.lastControl.focus === false && edge.lastControl.quiet === true,
+        `control message: ${JSON.stringify(edge.lastControl)}`);
+    });
+  });
+
+  await test('daemon: new-tab --window with no value or a boolean is a usage error', async () => {
+    await withDaemon(async ({ rpc }) => {
+      for (const w of [true, false, '', ' ']) {
+        const r: any = await rpc('newTab', ['https://example.com'], { window: w });
+        assert(!r.ok && r.exitCode === 1 && /requires a window id/.test(String(r.error)), `--window ${JSON.stringify(w)}: ${JSON.stringify(r)}`);
+      }
+      const bad: any = await rpc('newTab', [], { window: 'abc' });
+      assert(!bad.ok && bad.exitCode === 1 && /not a window id/.test(String(bad.error)), JSON.stringify(bad));
     });
   });
 

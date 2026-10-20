@@ -29,13 +29,20 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   this install's id and reads its display name from `Local State` (only
   `.name`; exactly one profile dir must match, else no name). A popup label
   always wins. `GHAX_BROWSER_PROFILE_ROOTS` overrides the User Data roots; an
-  empty value turns the lookup off.
+  empty value turns the lookup off. The scan runs only when the hello carries
+  the extension's own id, reads only regular files (a symlink or FIFO is
+  skipped), caps every read at 8 MB, and runs off the hello path: the browser
+  binds at once and the name lands when the scan does. Hits are cached for the
+  daemon's life, misses for 60 s, 64 entries at most.
 - **`ghax tabs` text layout:** `#3  edge-dag-tech:42  "Title"  Edge · DAG Tech
   · win 2  active  controlledBy=<owner>`. `--json` rows gain `window` (the
   browser's windows numbered 1..n).
 - **`ghax tabs` covers parked browsers** and prints a "no open windows" note for
   a browser with none. A daemon borrowed from another directory (the
-  "no daemon here" fallback) is read-only.
+  "no daemon here" fallback) is read-only: `network --har` and
+  `--source-maps` are refused too, the daemon enforces the same list, and a
+  borrowed `tabs` no longer replaces the owner's listing that `tab '#n'`
+  resolves against.
 - **`ghax tab` no longer takes focus.** Switching tabs used to activate the tab
   and focus its window (bridge) or `bringToFront` it (CDP). It now drives the
   tab in the background. Pass `--focus` for the old behaviour. `--quiet` is
@@ -49,7 +56,23 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Emulation.setFocusEmulationEnabled` on the tab it drives, which marks the
   page visible and focused for that debugger session only and raises nothing.
   Measured on Edge 150 over the bridge, before and after: `click` 5.9 s to
-  0.8 s, `wait --stable` timeout to 0.7 s, `new-tab` 5.1 s to 0.5 s.
+  0.8 s, `wait --stable` timeout to 0.7 s, `new-tab` 5.1 s to 0.5 s. The
+  extension re-applies it after every debugger re-attach (navigation,
+  interstitial, service-worker restart), since each attach is a new session
+  where it is off again.
+
+### Fixed
+- **`new-tab`/`new-window` over CDP take the tab they created.** They used to
+  adopt the first new page the browser reported, so a tab another agent or the
+  user opened in the same moment could become this daemon's tab. They now wait
+  for the page whose target id `Target.createTarget` returned (10 s timeout).
+- **`new-tab --window` with no value is a usage error** (exit 1). It used to
+  read as window 1.
+- **`ghax bridge control --tab-id` drives the tab in the background**, like
+  `ghax tab`. It still raised the tab.
+- **`controlledBy` names a long working directory by its last segment.** The
+  path was capped at 40 characters before the basename was taken, so a deep
+  directory showed a random middle segment.
 
 ## [0.10.1] - 2026-10-14
 ### Fixed

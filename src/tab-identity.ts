@@ -64,6 +64,10 @@ export interface TabOwner {
   pid: number | null;
   /** `ghax attach --name` / GHAX_AGENT; null when unset. */
   name: string | null;
+  /**
+   * The owning daemon's working directory: the full path for this daemon's
+   * own tab, the cleaned basename (`cwdLabel`) for another agent's.
+   */
   cwd: string | null;
   /** This daemon's own tab. */
   self: boolean;
@@ -110,6 +114,17 @@ function short6(instanceId: string): string {
  * (zero-width, bidi override) and line-separator characters are dropped so a
  * name can never forge a line of output, then capped at 40 code points.
  */
+/**
+ * Another agent's cwd as shown in `controlledBy`: basename FIRST, then
+ * sanitizeLabel. The other order truncates a long path to its first 40
+ * characters and the "basename" becomes a random middle segment. Must match
+ * owner_label in crates/cli/src/tabs.rs.
+ */
+export function cwdLabel(raw: string): string {
+  const trimmed = raw.replace(/[\\/]+$/, '');
+  return sanitizeLabel(trimmed.split(/[\\/]/).pop() || trimmed);
+}
+
 export function sanitizeLabel(raw: string): string {
   return Array.from(raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim()).slice(0, 40).join('').trim();
 }
