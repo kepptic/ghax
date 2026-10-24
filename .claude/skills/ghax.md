@@ -1,6 +1,6 @@
 ---
 name: ghax
-description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP directly, so ghax drives the user's REAL session through its own bridge extension (`ghax attach --extension`, full verb parity) and drives fresh user-approved scratch instances via `--launch`. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
+description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP directly, so ghax drives the user's REAL session through its own bridge extension (`ghax attach --extension`, full verb parity) and drives fresh user-approved scratch instances via `--launch`. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use playwright-cli for that.
 ---
 
 # Skill: ghax
@@ -38,12 +38,12 @@ instances via `ghax attach --launch`.
 
 ## When NOT to reach for ghax
 
-- Quick one-off headless testing → use **gstack browse** (`$B`).
+- Quick one-off headless testing → `ghax attach --launch` (scratch profile) or **playwright-cli**.
 - Programmatic test suites, tracing, video → **playwright-cli**.
 - The task needs the user's real session but the **ghax bridge extension
   isn't installed** and can't be → fall back to the **Claude-in-Chrome
-  extension** (`mcp__claude-in-chrome__*`) or gstack browse with saved
-  `.auth/` cookies. (With the bridge installed, real-session work is a
+  extension** (`mcp__claude-in-chrome__*`) or playwright-cli with the saved
+  `.auth/` storageState cookies. (With the bridge installed, real-session work is a
   ghax job — see Lane 1 below.)
 
 ## Prerequisites
@@ -451,7 +451,7 @@ Typed errors print `ghax: <message>` then `hint: <next step>` on stderr
   checks. Raised on both transports; the CDP path only pre-checks inherited
   `aria-disabled` and `inert` (Playwright handles the rest itself).
 
-## Design principles (inherited from gstack, adapted)
+## Design principles (inherited from gstack, which is no longer installed; adapted)
 
 1. **Real over sandbox.** Attach to what the dev already has.
 2. **Daemon over one-shot.** Persistent background server, ~60-200ms
