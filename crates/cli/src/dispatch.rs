@@ -32,26 +32,44 @@ fn empty_target(verb: &str, parsed: &Parsed) -> Option<i32> {
     }
 }
 
-/// `--no-wait` and `--path-only` are switches, but `args::parse` hands them
-/// the next bare token as a value (`eval --no-wait 'js'`). Give that token
-/// back to the positionals and make the flag a plain true.
-fn take_switch(parsed: &mut Parsed, name: &str) -> bool {
-    match parsed.flags.get(name).cloned() {
-        // `--no-wait=true` / `--no-wait=false` is the flag's own value, not a
-        // token to hand back.
-        Some(Value::String(v)) if v == "true" || v == "false" => {
-            let on = v == "true";
-            parsed.flags.insert(name.to_string(), Value::Bool(on));
-            on
+/// Parse argv where `names` are switches (`--force`, `--no-wait`, ...).
+/// `args::parse` hands a flag the next bare token as its value, so
+/// `drag '#src' --force '#dst'` would eat `#dst`. A bare `--name` is pulled
+/// out of argv before parsing, so every other token keeps its position, and
+/// the flag becomes a plain true. `--name=true` / `--name=false` is the
+/// flag's own value and becomes that bool. Tokens after a `--` terminator
+/// are values and are never read as switches.
+fn parse_switches(rest: &[String], names: &[&str]) -> Parsed {
+    let end = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
+    let mut seen: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::with_capacity(rest.len());
+    for (i, tok) in rest.iter().enumerate() {
+        let bare = tok.strip_prefix("--").filter(|n| i < end && names.contains(n));
+        match bare {
+            Some(n) => seen.push(n),
+            None => kept.push(tok.clone()),
         }
-        Some(Value::String(swallowed)) => {
-            parsed.positional.insert(0, swallowed);
-            parsed.flags.insert(name.to_string(), Value::Bool(true));
-            true
-        }
-        Some(Value::Bool(true)) => true,
-        _ => false,
     }
+    let mut parsed = args::parse(&kept);
+    for name in names {
+        match parsed.flags.get(*name).cloned() {
+            Some(Value::String(v)) if v == "true" || v == "false" => {
+                parsed.flags.insert((*name).to_string(), Value::Bool(v == "true"));
+            }
+            // `--name=x` with any other value, or a duplicate: leave it be.
+            Some(_) => {}
+            None if seen.contains(name) => {
+                parsed.flags.insert((*name).to_string(), Value::Bool(true));
+            }
+            None => {}
+        }
+    }
+    parsed
+}
+
+/// A switch the user turned on (bare, or `=true`).
+fn switch_on(parsed: &Parsed, name: &str) -> bool {
+    matches!(parsed.flags.get(name), Some(Value::Bool(true)))
 }
 
 pub fn run(verb: &str, rest: &[String]) -> i32 {
@@ -255,9 +273,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "tab" => {
             // `--focus` / `--quiet` are switches: `tab --focus '#2'` must not
             // swallow the selector as the flag's value.
-            let mut parsed = args::parse(rest);
-            take_switch(&mut parsed, "focus");
-            take_switch(&mut parsed, "quiet");
+            let parsed = parse_switches(rest, &["focus", "quiet"]);
             simple(cfg, "tab", parsed)
         }
 
@@ -268,15 +284,20 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, verb, parsed)
         }
 
+        // `--force` is a switch: `hover --force @e3` must not swallow the target.
+        "hover" | "drag" => {
+            let parsed = parse_switches(rest, &["force"]);
+            simple(cfg, verb, parsed)
+        }
+
         "eval" => {
-            let mut parsed = args::parse(rest);
-            take_switch(&mut parsed, "no-wait");
+            let parsed = parse_switches(rest, &["no-wait"]);
             simple(cfg, "eval", parsed)
         }
 
         "screenshot" => {
-            let mut parsed = args::parse(rest);
-            let path_only = take_switch(&mut parsed, "path-only");
+            let mut parsed = parse_switches(rest, &["path-only"]);
+            let path_only = switch_on(&parsed, "path-only");
             parsed.flags.remove("path-only");
             if !path_only || parsed.json() {
                 return simple(cfg, "screenshot", parsed);
@@ -482,13 +503,16 @@ fn dispatch_ext_inner(cfg: &Config, surface: &str, rest: &[String]) -> Result<i3
 
 fn dispatch_gesture(cfg: &Config, rest: &[String]) -> Result<i32> {
     let Some(sub) = rest.first() else {
-        eprintln!("Usage: ghax gesture <click|dblclick|scroll|key> [args...]");
+        eprintln!("Usage: ghax gesture <click|dblclick|tripleclick|rightclick|hover|scroll|key> [args...]");
         return Ok(EXIT_USAGE);
     };
     let parsed = args::parse(&rest[1..]);
     let cmd = match sub.as_str() {
         "click" => "gesture.click",
         "dblclick" => "gesture.dblclick",
+        "tripleclick" => "gesture.tripleclick",
+        "rightclick" => "gesture.rightclick",
+        "hover" => "gesture.hover",
         "scroll" => "gesture.scroll",
         "key" => "gesture.key",
         other => {
@@ -545,27 +569,60 @@ mod tests {
         args::parse(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
 
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn switch_gives_a_swallowed_token_back() {
-        let mut a = p(&["--no-wait", "window.x = 1"]);
-        assert!(take_switch(&mut a, "no-wait"));
-        assert_eq!(a.positional, vec!["window.x = 1".to_string()]);
+        let a = parse_switches(&v(&["--no-wait", "window.x = 1"]), &["no-wait"]);
+        assert!(switch_on(&a, "no-wait"));
+        assert_eq!(a.positional, v(&["window.x = 1"]));
         assert_eq!(a.flags.get("no-wait"), Some(&Value::Bool(true)));
-        let mut b = p(&["window.x = 1", "--no-wait"]);
-        assert!(take_switch(&mut b, "no-wait"));
+        let b = parse_switches(&v(&["window.x = 1", "--no-wait"]), &["no-wait"]);
+        assert!(switch_on(&b, "no-wait"));
         assert_eq!(b.positional.len(), 1);
-        let mut c = p(&["window.x = 1"]);
-        assert!(!take_switch(&mut c, "no-wait"));
+        let c = parse_switches(&v(&["window.x = 1"]), &["no-wait"]);
+        assert!(!switch_on(&c, "no-wait"));
+        assert_eq!(c.flags.get("no-wait"), None);
+    }
+
+    #[test]
+    fn switch_keeps_positional_order_wherever_it_sits() {
+        for argv in [
+            v(&["#src", "--force", "#dst"]),
+            v(&["--force", "#src", "#dst"]),
+            v(&["#src", "#dst", "--force"]),
+        ] {
+            let p = parse_switches(&argv, &["force"]);
+            assert_eq!(p.positional, v(&["#src", "#dst"]), "argv {argv:?}");
+            assert_eq!(p.flags.get("force"), Some(&Value::Bool(true)));
+        }
+    }
+
+    #[test]
+    fn switch_does_not_disturb_valued_flags() {
+        let p = parse_switches(&v(&["#src", "--force", "#dst", "--steps", "5", "--mode=html5"]), &["force"]);
+        assert_eq!(p.positional, v(&["#src", "#dst"]));
+        assert_eq!(p.flags.get("steps"), Some(&Value::String("5".into())));
+        assert_eq!(p.flags.get("mode"), Some(&Value::String("html5".into())));
+    }
+
+    #[test]
+    fn switch_after_terminator_is_a_value() {
+        let p = parse_switches(&v(&["--no-wait", "--", "--no-wait"]), &["no-wait"]);
+        assert!(switch_on(&p, "no-wait"));
+        assert_eq!(p.positional, v(&["--no-wait"]));
     }
 
     #[test]
     fn switch_reads_literal_true_false_as_the_value() {
-        let mut a = p(&["window.x=1", "--no-wait=true"]);
-        assert!(take_switch(&mut a, "no-wait"));
-        assert_eq!(a.positional, vec!["window.x=1".to_string()]);
-        let mut b = p(&["window.x=1", "--no-wait=false"]);
-        assert!(!take_switch(&mut b, "no-wait"));
-        assert_eq!(b.positional, vec!["window.x=1".to_string()]);
+        let a = parse_switches(&v(&["window.x=1", "--no-wait=true"]), &["no-wait"]);
+        assert!(switch_on(&a, "no-wait"));
+        assert_eq!(a.positional, v(&["window.x=1"]));
+        let b = parse_switches(&v(&["window.x=1", "--no-wait=false"]), &["no-wait"]);
+        assert!(!switch_on(&b, "no-wait"));
+        assert_eq!(b.positional, v(&["window.x=1"]));
         assert_eq!(b.flags.get("no-wait"), Some(&Value::Bool(false)));
     }
 

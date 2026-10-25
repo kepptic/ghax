@@ -99,8 +99,18 @@ Snapshot & interact:
                                   # prints at most 250 refs / 32 KB by default and
                                   #   ends with "… N more refs omitted"; every ref
                                   #   stays clickable. --max-refs 0 = --no-cap.
-  click <@ref|selector> [--force]           # refuses covered, disabled, inert,
-                                             #   hidden targets; --force skips that
+  click <@ref|selector> [--force] [--button left|right|middle] [--count 1|2|3]
+                                             # refuses covered, disabled, inert,
+                                             #   hidden targets; --force skips that.
+                                             #   --count 2 = double, 3 = triple click
+  hover <@ref|selector|x,y> [--force]       # moves the mouse there and leaves it,
+                                             #   so :hover menus stay open for a
+                                             #   following snapshot or screenshot
+  drag <from> <to> [--steps 10] [--mode auto|mouse|html5|synthetic] [--force]
+                                             # from/to: @ref, selector or x,y.
+                                             #   auto: HTML5 drag-and-drop when the
+                                             #   page starts one, else a plain mouse
+                                             #   drag. synthetic: in-page DragEvents.
   fill <@ref|selector> <value> [--force]    # Monaco-aware: routes into
                                              #   monaco.editor.getEditors() when
                                              #   the target is inside a Monaco editor.
@@ -184,6 +194,9 @@ Extensions (MV3):
 Real user gestures:
   gesture click <x,y>
   gesture dblclick <x,y>
+  gesture tripleclick <x,y>       # selects a paragraph / line
+  gesture rightclick <x,y>        # fires contextmenu
+  gesture hover <x,y>             # mouseMoved only, no button
   gesture scroll <up|down|left|right> [amount] [--on <@ref|selector>]
                                   # --on aims the wheel at that element (scrolled into view)
   gesture key <key>

@@ -41,6 +41,7 @@ import {
 import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
 import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
 import { recordableStep } from '../src/record-filter';
+import { bridgeInputIO, dragPath, registerInput, type InputDeps, type InputOn, type InputSend, type Point } from '../src/input';
 import { spawnSync } from 'child_process';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
@@ -1115,6 +1116,266 @@ async function main(): Promise<void> {
       assert(call.params.arguments[0].value === 'click', `kind arg: ${JSON.stringify(call.params.arguments)}`);
       assert(call.params.arguments[1].value === true, 'force must reach the page');
       assert(/function actionability\(/.test(call.params.functionDeclaration), 'guard source must be inlined');
+    });
+  });
+
+  // ─── Input verbs (src/input.ts) over the bridge ───────────────
+  /**
+   * The real input.ts handlers, wired to a FakeExt the way daemon.ts wires
+   * them: every send goes through the pinned peer, refs resolve to one fake
+   * backend node.
+   */
+  const inputHandlers = (bridge: Bridge) => {
+    const handlers = new Map<string, (ctx: { bridgeMode: boolean }, args: unknown[], opts: Record<string, unknown>) => Promise<unknown>>();
+    const deps: InputDeps<{ bridgeMode: boolean }> = {
+      register: (name, fn) => { handlers.set(name, fn); },
+      withInput: (_ctx, fn) => { const io = bridgeInputIO(bridge.pinned()); return fn(io.send, io.on); },
+      verbBridge: () => bridge.pinned(),
+      resolveBridgeTarget: async () => ({ backendNodeId: 5, role: 'button', name: 'Go' }),
+      resolveRef: async () => { throw new Error('CDP path not under test'); },
+      activePage: async () => { throw new Error('CDP path not under test'); },
+      requireTarget: (verb, target) => { if (!target) throw new Error(`${verb}: target is empty`); },
+      parseGesturePoint: (spec) => { const [x, y] = spec.split(',').map(Number); return { x, y }; },
+    };
+    registerInput(deps);
+    const run = (name: string, args: unknown[], opts: Record<string, unknown> = {}) => {
+      const fn = handlers.get(name);
+      if (!fn) throw new Error(`input.ts registered no ${name}`);
+      return fn({ bridgeMode: true }, args, opts);
+    };
+    return { run };
+  };
+  const mouseEvents = (ext: FakeExt) => ext.sent.filter((c) => c.method === 'Input.dispatchMouseEvent').map((c) => c.params);
+
+  await test('input: hover ends in exactly one mouseMoved at the guard point', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = await guardedExt(port, { ok: true, x: 40, y: 20, width: 80, height: 40 });
+      await until(() => bridge.connected, 'bind');
+      const out = await inputHandlers(bridge).run('hover', ['@e1']) as { ok: boolean; x: number; y: number };
+      assert(out.ok && out.x === 40 && out.y === 20, `hover result: ${JSON.stringify(out)}`);
+      const guard = ext.sent.find((c) => c.method === 'Runtime.callFunctionOn');
+      assert(guard?.params.arguments[0].value === 'click', 'hover aims through the click guard');
+      const ev = mouseEvents(ext);
+      assert(ev.length === 1 && ev[0].type === 'mouseMoved' && ev[0].x === 40 && ev[0].y === 20,
+        `one mouseMoved at 40,20, got ${JSON.stringify(ev)}`);
+      assert(ev[0].button === undefined, 'hover presses no button');
+      assert(ext.received.at(-1) === 'Input.dispatchMouseEvent', `nothing after the move: ${ext.received.join(',')}`);
+    });
+  });
+
+  await test('input: gesture rightclick sends button right, tripleclick clickCount 1..3', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-input');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const { run } = inputHandlers(bridge);
+      await run('gesture.rightclick', ['10,20']);
+      let ev = mouseEvents(ext);
+      assert(ev.map((e) => e.type).join(',') === 'mouseMoved,mousePressed,mouseReleased', `rightclick: ${JSON.stringify(ev)}`);
+      assert(ev[1].button === 'right' && ev[1].buttons === 2 && ev[2].button === 'right', `right button: ${JSON.stringify(ev)}`);
+      ext.sent.length = 0;
+      await run('gesture.tripleclick', ['10,20']);
+      ev = mouseEvents(ext);
+      const pressed = ev.filter((e) => e.type === 'mousePressed').map((e) => e.clickCount);
+      const released = ev.filter((e) => e.type === 'mouseReleased').map((e) => e.clickCount);
+      assert(pressed.join(',') === '1,2,3' && released.join(',') === '1,2,3', `clickCount 1..3: ${JSON.stringify(ev)}`);
+      assert(ev.every((e) => e.type === 'mouseMoved' || e.button === 'left'), 'tripleclick is a left click');
+      ext.sent.length = 0;
+      // dblclick keeps its old sequence: move, then pressed/released with 1 then 2.
+      await run('gesture.dblclick', ['10,20']);
+      ev = mouseEvents(ext);
+      assert(ev.map((e) => `${e.type}:${e.clickCount ?? ''}`).join(',') === 'mouseMoved:,mousePressed:1,mouseReleased:1,mousePressed:2,mouseReleased:2',
+        `dblclick: ${JSON.stringify(ev)}`);
+      let caught: any = null;
+      await run('gesture.click', ['10,20'], { button: 'back' }).catch((e) => { caught = e; });
+      assert(caught?.exitCode === 2 && /--button/.test(caught.message), `bad --button is a usage error: ${caught?.message}`);
+    });
+  });
+
+  await test('input: drag finishes an intercepted HTML5 drag with drag events, then disables interception', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-drag');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
+      let pressed = false;
+      let emitted = false;
+      ext.replies.set('Input.dispatchMouseEvent', (p) => {
+        if (p.type === 'mousePressed') pressed = true;
+        // Chromium starts the drag on the first move after the press. The
+        // event goes out before the reply, as a real relay can order it.
+        if (p.type === 'mouseMoved' && pressed && !emitted) {
+          emitted = true;
+          ext.send({ type: 'event', method: 'Input.dragIntercepted', params: { data: { items: [{ mimeType: 'text/plain', data: 'card-1' }], dragOperationsMask: 1 } } });
+        }
+        return {};
+      });
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const out = await inputHandlers(bridge).run('drag', ['0,0', '100,50'], { steps: '4' }) as Record<string, any>;
+      assert(out.ok && out.html5 === true && out.mode === 'auto', `drag result: ${JSON.stringify(out)}`);
+      assert(out.to.x === 100 && out.to.y === 50, `to point: ${JSON.stringify(out.to)}`);
+      const seq = ext.sent.filter((c) => c.method.startsWith('Input.')).map((c) =>
+        c.method === 'Input.dispatchMouseEvent' ? c.params.type
+          : c.method === 'Input.dispatchDragEvent' ? c.params.type
+            : `intercept:${c.params.enabled}`);
+      assert(seq.join(',') === 'intercept:true,mouseMoved,mousePressed,mouseMoved,dragEnter,dragOver,drop,intercept:false',
+        `drag order: ${seq.join(',')}`);
+      const drops = ext.sent.filter((c) => c.method === 'Input.dispatchDragEvent');
+      assert(drops.every((c) => c.params.x === 100 && c.params.y === 50 && c.params.data?.items?.[0]?.data === 'card-1'),
+        `drag events carry the intercepted data at 'to': ${JSON.stringify(drops.map((c) => c.params))}`);
+    });
+  });
+
+  await test('input: drag with no intercept is a plain mouse drag; --mode html5 fails but still disables', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-drag2');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const { run } = inputHandlers(bridge);
+      const out = await run('drag', ['0,0', '30,0'], { steps: '3' }) as Record<string, any>;
+      assert(out.html5 === false, `no intercept = mouse drag: ${JSON.stringify(out)}`);
+      const ev = mouseEvents(ext);
+      assert(ev.map((e) => e.type).join(',') === 'mouseMoved,mousePressed,mouseMoved,mouseMoved,mouseMoved,mouseReleased', `mouse drag: ${JSON.stringify(ev)}`);
+      assert(ev.slice(2, 5).every((e) => e.buttons === 1), 'moves carry the held button');
+      assert(ev[5].x === 30 && ev[5].y === 0, 'release at to');
+      assert(ext.received.at(-1) === 'Input.setInterceptDrags', `interception off last: ${ext.received.join(',')}`);
+      ext.sent.length = 0;
+      let caught: any = null;
+      await run('drag', ['0,0', '30,0'], { mode: 'html5', steps: '1' }).catch((e) => { caught = e; });
+      assert(caught && /no HTML5 drag/.test(caught.message), `html5 without intercept fails: ${caught?.message}`);
+      const last = ext.sent.at(-1);
+      assert(last?.method === 'Input.setInterceptDrags' && last.params.enabled === false, 'finally disables interception');
+      assert(mouseEvents(ext).at(-1)?.type === 'mouseReleased', 'the button is released before failing');
+      ext.sent.length = 0;
+      await run('drag', ['0,0', '30,0'], { mode: 'mouse', steps: '1' });
+      assert(!ext.sent.some((c) => c.method === 'Input.setInterceptDrags'), '--mode mouse never touches interception');
+      caught = null;
+      await run('drag', ['0,0', '30,0'], { mode: 'fling' }).catch((e) => { caught = e; });
+      assert(caught?.exitCode === 2, `bad --mode is a usage error: ${caught?.message}`);
+    });
+  });
+
+  await test('input: a send that throws after the press still releases the button, and the original error wins', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-drag-err');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
+      let pressed = false;
+      let failed = false;
+      ext.replies.set('Input.dispatchMouseEvent', (p) => {
+        if (p.type === 'mousePressed') pressed = true;
+        // The first move after the press dies (a dropped relay, a closed tab).
+        if (p.type === 'mouseMoved' && pressed && !failed) { failed = true; throw new Error('relay dropped mid-drag'); }
+        return {};
+      });
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: any = null;
+      await inputHandlers(bridge).run('drag', ['0,0', '100,50'], { steps: '4', mode: 'mouse' }).catch((e) => { caught = e; });
+      assert(caught && /relay dropped mid-drag/.test(caught.message), `the original error is rethrown: ${caught?.message}`);
+      const ev = mouseEvents(ext);
+      const rel = ev.at(-1);
+      assert(rel?.type === 'mouseReleased' && rel.buttons === 0, `button released after the failure: ${JSON.stringify(ev.map((e) => e.type))}`);
+    });
+  });
+
+  /** An in-memory sender for dragPath, logging every call in order. `page` is the scroll/viewport state it reports. */
+  const dragRig = (page = { w: 800, h: 600, sx: 0, sy: 0 }, failOn: (method: string, params: any) => boolean = () => false) => {
+    const log: string[] = [];
+    const calls: Array<{ method: string; params: any }> = [];
+    let emit: ((params: Record<string, unknown>) => void) | null = null;
+    const send: InputSend = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'Runtime.evaluate') return { result: { value: { ...page } } };
+      log.push(method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchDragEvent' ? String(params.type) : method);
+      if (failOn(method, params)) throw new Error(`boom on ${String(params.type ?? method)}`);
+      return {};
+    };
+    const on: InputOn = (method, listener) => {
+      if (method === 'Input.dragIntercepted') emit = listener;
+      return () => undefined;
+    };
+    return { send, on, log, calls, page, intercept: () => emit?.({ data: { items: [{ mimeType: 'text/plain', data: 'card-1' }] } }) };
+  };
+
+  await test('input: drag resolves both ends before the press, so the press point is post-scroll', async () => {
+    const rig = dragRig();
+    const order: string[] = [];
+    // to's guard "scrolls" the page: from moves from y=400 to y=20.
+    let scrolled = false;
+    const from = async (): Promise<Point> => { order.push('from'); return scrolled ? { x: 10, y: 20 } : { x: 10, y: 400 }; };
+    const to = async (): Promise<Point> => { order.push('to'); scrolled = true; rig.page.sy = 200; return { x: 200, y: 100 }; };
+    const out = await dragPath(rig.send, rig.on, from, to, { steps: 2, mode: 'mouse' });
+    const press = rig.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed');
+    assert(order.join(',') === 'to,from', `to, then from, before any input: ${order.join(',')}`);
+    assert(press?.params.x === 10 && press.params.y === 20, `press lands on the post-scroll from point: ${JSON.stringify(press?.params)}`);
+    assert(out.from.y === 20 && out.to.x === 200 && out.to.y === 100, `result carries the resolved points: ${JSON.stringify(out)}`);
+    assert(rig.log.at(-1) === 'mouseReleased', `release at the end: ${rig.log.join(',')}`);
+  });
+
+  await test('input: drag whose ends cannot share a viewport fails before pressing anything', async () => {
+    const rig = dragRig();
+    // Resolving to scrolls down; resolving from scrolls back up.
+    const to = async (): Promise<Point> => { rig.page.sy = 1800; return { x: 100, y: 500 }; };
+    const from = async (): Promise<Point> => { rig.page.sy = 0; return { x: 5, y: 5 }; };
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, from, to, { mode: 'mouse' }).catch((e) => { caught = e; });
+    assert(caught && /cannot be scrolled into view together/.test(caught.message), `clear error: ${caught?.message}`);
+    assert(!rig.log.includes('mousePressed'), `nothing pressed: ${rig.log.join(',')}`);
+  });
+
+  await test('input: drag to an off-screen point fails clearly before pressing', async () => {
+    const rig = dragRig({ w: 800, h: 600, sx: 0, sy: 0 });
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, async () => ({ x: 10, y: 10 }), async () => ({ x: 100, y: 900 }), { mode: 'mouse' })
+      .catch((e) => { caught = e; });
+    assert(caught && /to point 100,900 is outside the 800x600 viewport/.test(caught.message), `clear viewport error: ${caught?.message}`);
+    assert(!rig.log.includes('mousePressed') && !rig.log.includes('drop'), `no silent drag, nothing pressed: ${rig.log.join(',')}`);
+    const rig2 = dragRig();
+    caught = null;
+    await dragPath(rig2.send, rig2.on, async () => ({ x: -5, y: 10 }), async () => ({ x: 1, y: 1 }), { mode: 'mouse' })
+      .catch((e) => { caught = e; });
+    assert(caught && /from point -5,10 is outside/.test(caught.message), `off-screen from is refused: ${caught?.message}`);
+    assert(!rig2.log.includes('mousePressed'), `nothing pressed for an off-screen from: ${rig2.log.join(',')}`);
+  });
+
+  await test('input: an intercepted drag that fails mid-drop is cancelled, not left half-run', async () => {
+    const rig = dragRig({ w: 800, h: 600, sx: 0, sy: 0 }, (_m, p) => p.type === 'dragOver');
+    const sendWithIntercept: InputSend = async (m, p) => {
+      const r = await rig.send(m, p);
+      if (m === 'Input.dispatchMouseEvent' && p.type === 'mouseMoved' && p.buttons === 1) rig.intercept();
+      return r;
+    };
+    let caught: any = null;
+    await dragPath(sendWithIntercept, rig.on, async () => ({ x: 0, y: 0 }), async () => ({ x: 100, y: 50 }), { steps: 3 })
+      .catch((e) => { caught = e; });
+    assert(caught && /boom on dragOver/.test(caught.message), `original error rethrown: ${caught?.message}`);
+    const cancel = rig.calls.find((c) => c.method === 'Input.dispatchDragEvent' && c.params.type === 'dragCancel');
+    assert(cancel && cancel.params.data?.items?.[0]?.data === 'card-1', `dragCancel carries the data: ${JSON.stringify(cancel)}`);
+    assert(!rig.log.includes('mouseReleased') && !rig.log.includes('drop'), `no release or drop after an intercept: ${rig.log.join(',')}`);
+    assert(rig.log.at(-1) === 'Input.setInterceptDrags', 'interception is still switched off');
+  });
+
+  await test('input: synthetic drag refuses a pair that cannot share one viewport', async () => {
+    const rig = dragRig();
+    const to = async (): Promise<Point> => { rig.page.sy = 1800; return { x: 100, y: 500 }; };
+    const from = async (): Promise<Point> => { rig.page.sy = 0; return { x: 5, y: 5 }; };
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, from, to, { mode: 'synthetic' }).catch((e) => { caught = e; });
+    assert(caught && /cannot be scrolled into view together/.test(caught.message), `clear error: ${caught?.message}`);
+    assert(!rig.calls.some((c) => c.method === 'Runtime.evaluate' && String(c.params.expression).includes('dragstart')), 'no drag events dispatched');
+  });
+
+  await test('input: another peer\'s dragIntercepted does not finish our drag', async () => {
+    await withBridge(async (bridge) => {
+      // No ext needed: the filter is pure. Emit on the bridge as a relay would.
+      const io = bridgeInputIO({ ...bridge.pinned('inst-a'), bridge } as any);
+      let seen = 0;
+      const off = io.on('Input.dragIntercepted', () => { seen++; });
+      bridge.emit('event', { method: 'Input.dragIntercepted', params: {}, instanceId: 'inst-b' });
+      bridge.emit('event', { method: 'Input.dragIntercepted', params: {}, instanceId: 'inst-a' });
+      off();
+      bridge.emit('event', { method: 'Input.dragIntercepted', params: {}, instanceId: 'inst-a' });
+      assert(seen === 1, `only inst-a's event, once, before unsubscribe: ${seen}`);
     });
   });
 
