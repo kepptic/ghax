@@ -53,6 +53,7 @@ import { actionability } from './actionability';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, grepFromOpts, type BudgetedText } from './snapshot-budget';
 import { RefRegistry, docIdOfMarker } from './ref-registry';
 import { parseExpect, runExpect, type ExpectProbes, type VisState } from './expect';
+import { registerFindEl, VERBS as FIND_EL_VERBS } from './find-el';
 import type { RefEntry } from './snapshot';
 import { snapshot as takeSnapshot, MODAL_SEL } from './snapshot';
 import {
@@ -218,6 +219,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'batch', 'expect', 'record.start', 'record.stop', 'record.status',
   'gesture.scroll', 'gesture.key',
   ...INPUT_VERBS,
+  ...FIND_EL_VERBS,
 ]);
 
 /**
@@ -244,6 +246,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
 const BRIDGE_RETRY_SAFE = new Set([
   'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait', 'cookies',
   ...INPUT_RETRY_SAFE,
+  ...FIND_EL_VERBS,
 ]);
 
 /**
@@ -2355,6 +2358,14 @@ register('snapshot', async (ctx, _args, opts) => {
     ...budgetFields(applySnapshotBudget(applyGrep(result.text.split('\n'), opts), budget)),
     ...(annotatedPath ? { annotatedPath } : {}),
   };
+});
+
+// find-el scores the snapshot verb's own output, so it works on both
+// transports and adds no ariaSnapshot call site (invariant 3).
+registerFindEl({
+  register,
+  snapshot: (ctx, o) => handlers.get('snapshot')!(ctx, [], o),
+  fail: (message, exitCode, hint) => Object.assign(new DaemonError(message, exitCode), hint ? { hint } : {}),
 });
 
 async function annotateBridgeScreenshot(

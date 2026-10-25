@@ -2938,6 +2938,80 @@ c('shortcut run: a missing var exits 1 before any RPC; a failing step exits 4', 
   });
 });
 
+c('find-el: finds elements by description, refs click at once, ordinals, exit 4, --rerank-cmd', async () => {
+  const html = '<title>fe</title><main><h1>Account</h1><label for="em">Email address</label><input id="em" placeholder="you@example.com">'
+    + '<input id="q" placeholder="Search products"><button onclick="document.title=\'saved\'">Save</button><button>Save changes</button>'
+    + '<button disabled>Submit</button><button>Submit</button><ul><li><button onclick="document.title=\'del1\'">Delete</button></li>'
+    + '<li><button onclick="document.title=\'del2\'">Delete</button></li><li><button>Delete</button></li></ul>'
+    + '<a href="#x" onclick="document.title=\'linked\'">Save</a></main>';
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  type M = { ref: string; score: number; role: string; name: string; why: string[]; line: string };
+  type R = { query: string; results: M[]; confidence: string };
+  const find = async (q: string, ...extra: string[]) => parseJson<R>((await run(['find-el', q, '--json', ...extra])).stdout);
+
+  let r = await find('save changes button');
+  assert(r.results[0].name === 'Save changes' && r.results[0].role === 'button' && r.results[0].score === 100, `exact name: ${JSON.stringify(r.results[0])}`);
+  assert(/^@e\d+$/.test(r.results[0].ref) && r.confidence === 'high', `ref shape and confidence: ${JSON.stringify(r)}`);
+
+  // Role hint separates a button from a link with the same name; the ref clicks straight away.
+  r = await find('save link');
+  assert(r.results[0].role === 'link', `link hint: ${JSON.stringify(r.results[0])}`);
+  await run(['click', r.results[0].ref]);
+  assert((await run(['eval', 'document.title'])).stdout.includes('linked'), 'clicked the link by the ref find-el returned');
+  r = await find('save button');
+  assert(r.results[0].role === 'button' && r.results[0].name === 'Save', `button hint: ${JSON.stringify(r.results[0])}`);
+  await run(['click', r.results[0].ref]);
+  assert((await run(['eval', 'document.title'])).stdout.includes('saved'), 'clicked the button by the ref find-el returned');
+
+  // Unnamed-by-label fields: placeholder, and the label text next to the field.
+  r = await find('search products field');
+  assert(r.results[0].role === 'textbox' && r.results[0].why.includes('placeholder'), `placeholder: ${JSON.stringify(r.results[0])}`);
+  r = await find('email address field');
+  assert(r.results[0].role === 'textbox' && r.results[0].ref !== (await find('search products field')).results[0].ref, `label text finds the email field: ${JSON.stringify(r.results[0])}`);
+
+  // Disabled: the enabled Submit first, unless the description asks for disabled.
+  r = await find('submit button');
+  const [first, second] = r.results;
+  assert(first.name === 'Submit' && second.name === 'Submit' && first.ref !== second.ref, 'two Submit buttons');
+  const dis = await find('disabled submit button');
+  assert(dis.results[0].ref === second.ref && first.ref !== second.ref, `disabled hint picks the other one: ${JSON.stringify(dis.results[0])}`);
+
+  // Ordinals: the second Delete button is the one whose click sets title del2.
+  r = await find('second delete button');
+  await run(['click', r.results[0].ref]);
+  assert((await run(['eval', 'document.title'])).stdout.includes('del2'), `ordinal picked the 2nd Delete: ${JSON.stringify(r.results[0])}`);
+
+  // Text output line, --top, and the empty-result exit.
+  const txt = await run(['find-el', 'delete button', '--top', '2']);
+  const lines = txt.stdout.trim().split('\n');
+  assert(lines.length === 2 && /^@e\d+  \d+  button "Delete"  \(/.test(lines[0]), `text lines: ${txt.stdout}`);
+  assert(/confidence: /.test(txt.stderr), `confidence on stderr: ${txt.stderr}`);
+  const none = await run(['find-el', 'zzzz qqqq'], { allowFailure: true });
+  assert(none.exitCode === 4 && /no element matches/.test(none.stderr) && /snapshot -i/.test(none.stderr), `empty result: ${none.exitCode} ${none.stderr}`);
+  const bad = await run(['find-el', 'save', '--top', '0'], { allowFailure: true });
+  assert(bad.exitCode === 1 || bad.exitCode === 2, `bad --top is a usage error: ${bad.exitCode}`);
+
+  // --rerank-cmd: a command that reverses the candidates it is given.
+  const script = path.join(os.tmpdir(), `ghax-rerank-${Date.now()}.mjs`);
+  fs.writeFileSync(script, "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);if(!j.query||!Array.isArray(j.candidates))process.exit(3);console.log(JSON.stringify(j.candidates.map(c=>({ref:c.ref,score:c.score})).reverse()))})");
+  try {
+    const plain = await find('delete button', '--top', '3');
+    const rr = await find('delete button', '--top', '3', '--rerank-cmd', `${process.execPath} ${script}`);
+    assert(plain.results.length === 3 && rr.results.length === 3, 'both return --top results');
+    assert(rr.results[0].ref !== plain.results[0].ref, `reranker reordered: ${plain.results.map((m) => m.ref)} vs ${rr.results.map((m) => m.ref)}`);
+    const failing = await run(['find-el', 'delete button', '--rerank-cmd', 'false'], { allowFailure: true });
+    assert(failing.exitCode !== 0 && /rerank-cmd/.test(failing.stderr), `a failing reranker is an error: ${failing.exitCode} ${failing.stderr}`);
+  } finally {
+    fs.unlinkSync(script);
+  }
+
+  // find-el is read-only: a recording must not keep it.
+  await run(['record', 'start', 'fe-rec']);
+  await run(['find-el', 'save button']);
+  const rec = await run(['record', 'stop']);
+  assert(!/findEl|find-el/.test(rec.stdout), `find-el is not recorded: ${rec.stdout}`);
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

@@ -10,6 +10,7 @@ mod canary;
 mod cookies;
 mod dispatch;
 mod expect;
+mod find_el;
 mod help;
 mod output;
 mod qa;

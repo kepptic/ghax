@@ -71,7 +71,7 @@ export interface SnapshotResult {
   scoped?: boolean;
 }
 
-const INTERACTIVE_ROLES = new Set([
+export const INTERACTIVE_ROLES = new Set([
   'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox',
   'listbox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
   'option', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',

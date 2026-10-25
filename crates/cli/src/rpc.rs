@@ -89,6 +89,7 @@ const IDEMPOTENT: &[&str] = &[
     "status",
     "tabs",
     "find",
+    "findEl",
     "text",
     "html",
     "snapshot",
@@ -349,7 +350,7 @@ mod tests {
 
     #[test]
     fn retry_classes() {
-        for cmd in ["status", "tabs", "snapshot", "text", "bridge.stats", "ext.sw.logs"] {
+        for cmd in ["status", "tabs", "snapshot", "findEl", "text", "bridge.stats", "ext.sw.logs"] {
             assert_eq!(retry_class_for(cmd, &json!({})), RetryClass::Idempotent, "{cmd}");
         }
         for cmd in ["click", "fill", "goto", "eval", "batch", "box", "press", "brand-new-verb"] {

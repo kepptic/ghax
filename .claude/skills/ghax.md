@@ -232,6 +232,9 @@ ghax snapshot -i -a -o /tmp/shot.png     # same, plus annotated screenshot
 ghax snapshot -i -s '#main'              # narrow when the output ends "… N more refs omitted"
 ghax snapshot -i --no-cap                # or lift the 250-ref / 32 KB default budget
 ghax snapshot -i --grep 'Save|Cancel' --context 2   # only matching lines + ancestors + 2 after (before the cap; refs still resolve)
+ghax find-el "save changes button"        # best matches: @e12  87  button "Save changes"  (name, role); refs are clickable at once
+ghax find-el "second delete link" --top 3 --json   # ordinals pick among tied matches; no LLM, works on CDP and the bridge
+ghax find-el "email field" --interactive-only      # exit 4 when nothing scores >= --min-score (20): fall back to snapshot -i
 ghax screenshot --path-only              # prints just the file path
 ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
 ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console

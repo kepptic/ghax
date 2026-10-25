@@ -5,8 +5,20 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`ghax find-el "<description>"`.** Finds an element from a plain
+  description ("save button", "second delete link", "email field") and
+  prints the best matches as `@e12  87  button "Save changes"  (name, role)`.
+  It scores the existing `snapshot` output: name (exact, phrase, token
+  coverage, fuzzy), role hint, placeholder, disabled/checked/selected/expanded
+  state, ordinals, the node's text, ancestor names and the label next to a
+  field. Deterministic, no model call, one `snapshot` call underneath (no new
+  ariaSnapshot site), so it works the same on CDP and the bridge and its refs
+  are clickable at once. Options: `--top N` (5), `--min-score N` (20),
+  `--interactive-only`, `--json`. An empty result exits 4 with a hint.
+  `--rerank-cmd <cmd>` sends the top 20 candidates to your command as
+  `{query, candidates}` on stdin and takes back a reordered `[{ref, score}]`;
+  that CLI-side hook is the only place a model can be involved.
 
 ## [0.12.0] - 2026-10-25
 ### Added
