@@ -114,11 +114,21 @@ export function stripForeignExtensionFrames(ownId) {
  * ORIGINAL error is thrown so the daemon's bridgeError() classification and
  * hint still apply. Any other error from a retry propagates as-is.
  *
+ * The backoff is ~750ms, long enough for the caller to give the tab up
+ * (`bridge control --stop`, a switch to another tab, a demotion to parked,
+ * another agent claiming it). `stillWanted` is asked before every strip and
+ * every retry attach; once it says no, the ORIGINAL error is thrown. A retry
+ * that succeeds after the caller stopped wanting the tab is undone with
+ * `detach` and the original error is thrown, so the caller never records an
+ * attachment to a tab it no longer owns.
+ *
  * Takes its side effects as arguments so test/bridge-sim.ts can drive it.
  */
 export async function attachStrippingForeignFrames({
   attach,
   strip,
+  detach = async () => undefined,
+  stillWanted = () => true,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log = () => undefined,
   maxTries = 4,
@@ -131,17 +141,28 @@ export async function attachStrippingForeignFrames({
     if (!isForeignExtensionFrameError(err)) throw err;
     original = err;
   }
+  if (!stillWanted()) throw original;
   const first = await strip().catch(() => []);
   if (!first?.length) throw original;
   log(first);
   for (let n = 0; n < maxTries; n++) {
     await sleep(baseDelayMs * (n + 1));
+    if (!stillWanted()) throw original;
+    let result;
+    let attached = false;
     try {
-      return await attach();
+      result = await attach();
+      attached = true;
     } catch (err) {
       if (!isForeignExtensionFrameError(err)) throw err;
     }
+    if (attached) {
+      if (stillWanted()) return result;
+      await Promise.resolve(detach()).catch(() => undefined);
+      throw original;
+    }
     if (n + 1 < maxTries) {
+      if (!stillWanted()) throw original;
       const again = await strip().catch(() => []);
       if (again?.length) log(again);
     }

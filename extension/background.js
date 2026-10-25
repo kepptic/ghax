@@ -734,6 +734,18 @@ class BridgeConnection {
         }
       },
       strip: () => this.stripForeignFramesIn(tabId),
+      // The strip/retry backoff spans ~750ms, during which this connection can
+      // lose the tab (--stop, a switch, demotion to parked, another agent).
+      stillWanted: () => this.controlledTabId === tabId
+        && tabOwners.get(tabId) === this
+        && this.bridgeRole === 'bound',
+      // A retry that landed after we lost the tab is undone, but never out from
+      // under another connection that now owns (and may have attached) it.
+      detach: async () => {
+        const owner = tabOwners.get(tabId);
+        if (owner && owner !== this) return;
+        await chrome.debugger.detach({ tabId }).catch(() => undefined);
+      },
       log: (hosts) => console.warn(
         `[ghax] removed ${hosts.length} foreign extension frame(s) from tab ${tabId} to allow chrome.debugger: ${[...new Set(hosts)].join(', ')}`,
       ),

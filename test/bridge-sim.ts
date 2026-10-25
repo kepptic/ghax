@@ -713,6 +713,8 @@ async function main(): Promise<void> {
     attachStrippingForeignFrames: (o: {
       attach: () => Promise<unknown>;
       strip: () => Promise<string[]>;
+      detach?: () => Promise<unknown> | unknown;
+      stillWanted?: () => boolean;
       sleep?: (ms: number) => Promise<void>;
       log?: (hosts: string[]) => void;
       maxTries?: number;
@@ -815,6 +817,113 @@ async function main(): Promise<void> {
       caught = err;
     }
     assert(/No tab with given id/.test(String(caught)), `unrelated error must pass through, got ${String(caught)}`);
+  });
+
+  await test('foreign-frame retry stops when the tab stops being wanted during the backoff', async () => {
+    const e = await loadStrip();
+    const original = new Error(FRAME_ERR);
+    let attaches = 0;
+    let strips = 0;
+    let detaches = 0;
+    let wanted = true;
+    let caught: unknown = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { attaches++; throw attaches === 1 ? original : new Error(FRAME_ERR); },
+        strip: async () => { strips++; return ['hudu-assist-id']; },
+        detach: async () => { detaches++; },
+        // The connection gives the tab up while the first backoff sleeps.
+        sleep: async () => { wanted = false; },
+        stillWanted: () => wanted,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, `the ORIGINAL refusal must surface, got ${String(caught)}`);
+    assert(attaches === 1, `no retry attach once the tab is not wanted, got ${attaches} attaches`);
+    assert(strips === 1, `no strip after the tab is not wanted (only the first), got ${strips} strips`);
+    assert(detaches === 0, `nothing was attached, so nothing to detach, got ${detaches}`);
+
+    // Gives it up between a refused retry and the next strip: no further strip.
+    attaches = 0;
+    strips = 0;
+    wanted = true;
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => {
+          attaches++;
+          if (attaches === 2) wanted = false;
+          throw attaches === 1 ? original : new Error(FRAME_ERR);
+        },
+        strip: async () => { strips++; return ['hudu-assist-id']; },
+        sleep: async () => undefined,
+        stillWanted: () => wanted,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, `the ORIGINAL refusal must surface, got ${String(caught)}`);
+    assert(attaches === 2 && strips === 1, `want 2 attaches / 1 strip, got ${attaches} / ${strips}`);
+
+    // Not wanted before the first strip: the page is not touched at all.
+    strips = 0;
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { throw original; },
+        strip: async () => { strips++; return ['hudu-assist-id']; },
+        stillWanted: () => false,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original && strips === 0, `an unwanted tab must not be stripped, got ${strips} strips`);
+  });
+
+  await test('foreign-frame retry that lands after the tab was given up is detached', async () => {
+    const e = await loadStrip();
+    const original = new Error(FRAME_ERR);
+    let attaches = 0;
+    let detaches = 0;
+    let wanted = true;
+    let caught: unknown = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => {
+          attaches++;
+          if (attaches === 1) throw original;
+          // The retry succeeds, but the connection lost the tab while it ran.
+          wanted = false;
+        },
+        strip: async () => ['hudu-assist-id'],
+        detach: async () => { detaches++; },
+        sleep: async () => undefined,
+        stillWanted: () => wanted,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, `the ORIGINAL refusal must surface, got ${String(caught)}`);
+    assert(attaches === 2, `want 1 attach + 1 successful retry, got ${attaches}`);
+    assert(detaches === 1, `the orphaned session must be detached once, got ${detaches}`);
+
+    // A detach that throws must not mask the original error.
+    attaches = 0;
+    wanted = true;
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { attaches++; if (attaches === 1) throw original; wanted = false; },
+        strip: async () => ['hudu-assist-id'],
+        detach: async () => { throw new Error('No tab with given id'); },
+        sleep: async () => undefined,
+        stillWanted: () => wanted,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, `a failing detach must not replace the original error, got ${String(caught)}`);
   });
 
   await test('frame stripper removes other extensions\' iframes, incl. closed shadow roots', async () => {
