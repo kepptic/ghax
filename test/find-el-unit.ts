@@ -198,6 +198,31 @@ assert(top(r).ref === '@c1' && top(r).score === 25 && top(r).why.includes('curso
 r = findEl(PAGE, 'save button');
 assert(refs(r).indexOf('@c2') === -1 || r.results.find((m) => m.ref === '@c2')!.score < 25, 'a cursor ref never beats a real button');
 
+// Both renderers JSON-quote the cursor text, so quotes and newlines survive.
+const QUOTED = [
+  '── cursor-interactive (not in ARIA tree) ──',
+  '@c1 [cursor:pointer, onclick] ' + JSON.stringify('Open the\nhelp "Billing" panel'),
+  '@c2 [cursor:pointer] ' + JSON.stringify('Save'),
+].join('\n');
+const qn = parseSnapshot(QUOTED);
+assert(qn.length === 2 && qn[0].name === 'Open the\nhelp "Billing" panel' && qn[1].name === 'Save', `a cursor name with quotes and a newline parses whole: ${JSON.stringify(qn.map((x) => x.name))}`);
+assert(qn[0].ref === 'c1' && qn[1].ref === 'c2' && qn[0].kind === 'cursor', 'and keeps its ref and kind');
+r = findEl(QUOTED, 'billing panel');
+assert(top(r).ref === '@c1' && top(r).name === 'Open the\nhelp "Billing" panel' && top(r).score === 25, `find-el reaches a quoted multi-line cursor name: ${JSON.stringify(top(r))}`);
+assert(r.results.every((m) => m.ref !== '@c2'), 'and the other cursor ref does not match "billing panel"');
+
+// ─── prototype keys are words, not hints ────────────────────────
+for (const word of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+  const pq = parseQuery(word);
+  assert(pq.tokens.join() === tokenize(word).join() && pq.roles.size === 0 && pq.states.length === 0 && pq.ordinal === null && !pq.strictRole, `${word}: an ordinary name token: ${JSON.stringify([...pq.tokens])}`);
+  const pr = parseQuery(`${word} button`);
+  assert(pr.tokens.join() === tokenize(word).join() && pr.ordinal === null && pr.roles.has('button'), `${word} button: ordinal null, button role kept`);
+  assert(findEl(PAGE, word).results.length === 0, `${word}: runs and finds nothing on a page without it`);
+}
+const protoPage = '@e1 [button] "Constructor"\n@e2 [button] "Save"';
+r = findEl(protoPage, 'constructor button');
+assert(top(r).ref === '@e1' && top(r).score === 100 && top(r).why.includes('role'), `a button named Constructor is found by "constructor button": ${JSON.stringify(top(r))}`);
+
 // ─── options and result shape ───────────────────────────────────
 r = findEl(PAGE, 'delete', { top: 2 });
 assert(r.results.length === 2 && r.considered === 25, '--top limits, considered counts all refs');

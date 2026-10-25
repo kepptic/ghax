@@ -368,7 +368,8 @@ export async function snapshot(
           const ref = allocator.assign('c', `s${elem.selector}`, 'cursor-interactive', elem.text);
           const locator = target.locator(elem.selector);
           refs.set(ref, { locator, role: 'cursor-interactive', name: elem.text });
-          output.push(`@${ref} [${elem.reason}] "${elem.text}"`);
+          // JSON-quoted like the bridge renderer: innerText carries quotes and newlines.
+          output.push(`@${ref} [${elem.reason}] ${JSON.stringify(elem.text)}`);
         }
       }
     } catch (err: any) {

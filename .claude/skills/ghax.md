@@ -235,6 +235,7 @@ ghax snapshot -i --grep 'Save|Cancel' --context 2   # only matching lines + ance
 ghax find-el "save changes button"        # best matches: @e12  87  button "Save changes"  (name, role); refs are clickable at once
 ghax find-el "second delete link" --top 3 --json   # ordinals pick among tied matches; no LLM, works on CDP and the bridge
 ghax find-el "email field" --interactive-only      # exit 4 when nothing scores >= --min-score (20): fall back to snapshot -i
+ghax find-el "billing tab" --rerank-cmd "<cmd>" --rerank-timeout 30   # optional model step: <cmd> reads {query,candidates} on stdin, prints [{ref,score}]; killed after 30 s (default 60)
 ghax screenshot --path-only              # prints just the file path
 ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
 ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console

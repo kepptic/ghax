@@ -194,7 +194,13 @@ const STOP = new Set([
   'with', 'which', 'this', 'please', 'click', 'find', 'element',
 ]);
 
-const STRONG_ROLES: Record<string, string[]> = {
+/** Query dictionaries are looked up with a user word, so only own keys count:
+ *  `constructor` and `__proto__` must not resolve to Object.prototype members. */
+function dict<T>(o: Record<string, T>): ReadonlyMap<string, T> {
+  return new Map(Object.entries(o));
+}
+
+const STRONG_ROLES = dict<string[]>({
   button: ['button'], btn: ['button'],
   link: ['link'],
   textbox: ['textbox', 'searchbox', 'spinbutton'], input: ['textbox', 'searchbox', 'spinbutton'], field: ['textbox', 'searchbox', 'spinbutton'],
@@ -203,22 +209,22 @@ const STRONG_ROLES: Record<string, string[]> = {
   heading: ['heading'],
   slider: ['slider'],
   menuitem: ['menuitem', 'menuitemcheckbox', 'menuitemradio'],
-};
-const WEAK_ROLES: Record<string, string[]> = {
+});
+const WEAK_ROLES = dict<string[]>({
   tab: ['tab'],
   menu: ['menu', 'menuitem', 'menubar'],
   dropdown: ['combobox', 'listbox'], select: ['combobox', 'listbox'], combobox: ['combobox'],
   search: ['searchbox', 'textbox'],
   option: ['option'],
   toggle: ['switch', 'checkbox'], switch: ['switch', 'checkbox'],
-};
-const STATE_WORDS: Record<string, StateHint> = {
+});
+const STATE_WORDS = dict<StateHint>({
   disabled: 'disabled', enabled: 'enabled', checked: 'checked', unchecked: 'unchecked',
   selected: 'selected', expanded: 'expanded', collapsed: 'collapsed',
-};
-const ORDINALS: Record<string, number> = {
+});
+const ORDINALS = dict<number>({
   first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, last: -1,
-};
+});
 /** Nouns an ordinal may precede ("second result") besides a role word. */
 const ORDINAL_NOUNS = new Set(['one', 'result', 'item', 'match', 'entry', 'row', 'element']);
 /** Words that make a preceding "first"/"last" part of a field name ("first name field"). */
@@ -229,14 +235,15 @@ export function tokenize(s: string): string[] {
 }
 
 function ordinalOf(tok: string): number | null {
-  if (tok in ORDINALS) return ORDINALS[tok];
+  const word = ORDINALS.get(tok);
+  if (word !== undefined) return word;
   const m = /^(\d+)(?:st|nd|rd|th)$/.exec(tok);
   return m ? Number(m[1]) : null;
 }
 
 export function parseQuery(raw: string): Query {
   const all = tokenize(raw);
-  const isRoleWord = (t: string) => t in STRONG_ROLES || t in WEAK_ROLES;
+  const isRoleWord = (t: string) => STRONG_ROLES.has(t) || WEAK_ROLES.has(t);
   // Ordinal: only when it can't be part of a name. "second delete button" and
   // "3rd result" are ordinals; "first name" and "last login" are fields.
   let ordinal: number | null = null;
@@ -265,19 +272,22 @@ export function parseQuery(raw: string): Query {
   const states: StateHint[] = [];
   const strongWords: string[] = [];
   for (const t of toks) {
-    if (t in STRONG_ROLES) { strict = true; strongWords.push(t); }
+    if (STRONG_ROLES.has(t)) { strict = true; strongWords.push(t); }
   }
   const weakWords: string[] = [];
   for (const t of toks) {
-    if (t in STRONG_ROLES) for (const r of STRONG_ROLES[t]) roles.add(r);
+    const strong = STRONG_ROLES.get(t);
+    const weak = WEAK_ROLES.get(t);
+    if (strong) for (const r of strong) roles.add(r);
     // A strong word wins: "search button" asks for a button, not a searchbox.
-    else if (t in WEAK_ROLES && strongWords.length === 0) {
+    else if (weak && strongWords.length === 0) {
       weakWords.push(t);
-      for (const r of WEAK_ROLES[t]) roles.add(r);
+      for (const r of weak) roles.add(r);
     }
-    if (t in STATE_WORDS && !states.includes(STATE_WORDS[t])) states.push(STATE_WORDS[t]);
+    const state = STATE_WORDS.get(t);
+    if (state && !states.includes(state)) states.push(state);
   }
-  const tokens = toks.filter((t) => !STOP.has(t) && !(t in STRONG_ROLES) && !(t in STATE_WORDS));
+  const tokens = toks.filter((t) => !STOP.has(t) && !STRONG_ROLES.has(t) && !STATE_WORDS.has(t));
   const tokensCore = tokens.filter((t) => !weakWords.includes(t));
   return { raw, tokens, tokensCore, roles, strictRole: strict, states, ordinal };
 }

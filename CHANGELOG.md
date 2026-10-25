@@ -18,7 +18,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--interactive-only`, `--json`. An empty result exits 4 with a hint.
   `--rerank-cmd <cmd>` sends the top 20 candidates to your command as
   `{query, candidates}` on stdin and takes back a reordered `[{ref, score}]`;
-  that CLI-side hook is the only place a model can be involved.
+  that CLI-side hook is the only place a model can be involved. The command
+  gets `--rerank-timeout <secs>` (default 60) for the write and the output,
+  then it is killed and `find-el` exits with an error naming it; `--top` above
+  20 returns the rest behind the reranked 20. Cursor-interactive text in the
+  CDP `snapshot` is now JSON-quoted like the bridge's, so a label with quotes
+  or a line break keeps its `@c` ref findable.
 
 ## [0.12.0] - 2026-10-25
 ### Added

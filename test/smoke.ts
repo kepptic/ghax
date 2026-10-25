@@ -3013,6 +3013,23 @@ c('find-el: finds elements by description, refs click at once, ordinals, exit 4,
   await run(['find-el', 'save button']);
   const rec = await run(['record', 'stop']);
   assert(!/findEl|find-el/.test(rec.stdout), `find-el is not recorded: ${rec.stdout}`);
+
+  // A cursor:pointer div (not in the ARIA tree) whose text has a line break and
+  // quotes: the @c line is JSON-quoted on both transports, so it is still found
+  // and its ref clicks.
+  const cursorHtml = '<title>cur</title><main><div onclick="document.title=\'cursor-clicked\'" style="cursor:pointer">Open the<br>help "Billing" panel</div></main>';
+  await run(['goto', `data:text/html,${encodeURIComponent(cursorHtml)}`]);
+  r = await find('billing panel');
+  assert(/^@c\d+$/.test(r.results[0]?.ref ?? '') && r.results[0].name.includes('help "Billing" panel') && r.results[0].name.includes('\n'),
+    `a quoted multi-line cursor name is found: ${JSON.stringify(r.results[0])}`);
+  await run(['click', r.results[0].ref]);
+  assert((await run(['eval', 'document.title'])).stdout.includes('cursor-clicked'), 'clicked the @c ref find-el returned');
+
+  // A hung reranker is killed at --rerank-timeout and named in the error.
+  const hung = await run(['find-el', 'billing panel', '--rerank-cmd', 'sleep 30', '--rerank-timeout', '1'], { allowFailure: true });
+  assert(hung.exitCode !== 0 && /'sleep'.*did not finish within 1s/.test(hung.stderr), `hung reranker: ${hung.exitCode} ${hung.stderr}`);
+  const badTimeout = await run(['find-el', 'billing panel', '--rerank-timeout', '0'], { allowFailure: true });
+  assert(badTimeout.exitCode === 1 || badTimeout.exitCode === 2, `bad --rerank-timeout is a usage error: ${badTimeout.exitCode}`);
 });
 
 c('detach shuts the daemon', async () => {
