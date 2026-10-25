@@ -1176,6 +1176,22 @@ document.getElementById('src').addEventListener('dragstart',(e)=>e.dataTransfer.
 const d=document.getElementById('dst');
 d.addEventListener('dragover',(e)=>e.preventDefault());
 d.addEventListener('drop',(e)=>{e.preventDefault();window.__dropped=e.dataTransfer.getData('text/plain');d.textContent='dropped:'+window.__dropped;});</script>`);
+// dst starts just below the fold but shares a viewport with src once scrolled to.
+const DND_BELOW_FOLD_PAGE = page(`<div id="src" draggable="true" style="margin-top:300px;width:80px;height:40px;background:#9cf">card</div>
+<div id="dst" style="position:absolute;left:0;top:calc(100vh + 20px);width:160px;height:80px;background:#fc9">drop here</div>
+<script>window.__dropped='';
+document.getElementById('src').addEventListener('dragstart',(e)=>e.dataTransfer.setData('text/plain','card-1'));
+const d=document.getElementById('dst');
+d.addEventListener('dragover',(e)=>e.preventDefault());
+d.addEventListener('drop',(e)=>{e.preventDefault();window.__dropped=e.dataTransfer.getData('text/plain');d.textContent='dropped:'+window.__dropped;});</script>`);
+// dst is 2500px down: no viewport holds both ends.
+const DND_FAR_PAGE = page(`<div id="src" draggable="true" style="width:80px;height:40px;background:#9cf">card</div>
+<div id="dst" style="margin-top:2500px;width:160px;height:80px;background:#fc9">drop here</div>
+<script>window.__dropped='';
+document.getElementById('src').addEventListener('dragstart',(e)=>e.dataTransfer.setData('text/plain','card-1'));
+const d=document.getElementById('dst');
+d.addEventListener('dragover',(e)=>e.preventDefault());
+d.addEventListener('drop',(e)=>{e.preventDefault();window.__dropped=e.dataTransfer.getData('text/plain');d.textContent='dropped:'+window.__dropped;});</script>`);
 const MOUSE_DRAG_PAGE = page(`<div id="pad" style="width:300px;height:100px;background:#ddd"></div>
 <script>window.__path=[];const p=document.getElementById('pad');
 p.addEventListener('mousedown',(e)=>window.__path.push('down'));
@@ -1228,6 +1244,58 @@ c('drag finishes an HTML5 drag-and-drop with the drag data', async () => {
   assert(r.ok && r.html5 === true && r.mode === 'auto', `drag result: ${JSON.stringify(r)}`);
   const dropped = await evalJson<string>('window.__dropped');
   assert(dropped === 'card-1', `drop received the dragstart data, got ${JSON.stringify(dropped)}`);
+});
+
+c('drag to a destination below the fold scrolls it in and drops on it', async () => {
+  await run(['goto', DND_BELOW_FOLD_PAGE]);
+  assert(await evalJson<number>('scrollY') === 0, 'page starts at the top');
+  const r = parseJson<{ ok: boolean; html5: boolean; from: { y: number }; to: { y: number } }>((await run(['drag', '#src', '#dst', '--json'])).stdout);
+  assert(r.ok && r.html5 === true, `drag result: ${JSON.stringify(r)}`);
+  const h = await evalJson<number>('innerHeight');
+  assert(r.to.y >= 0 && r.to.y < h && r.from.y >= 0 && r.from.y < h, `both points are in the viewport after the scroll: ${JSON.stringify(r)}`);
+  assert(await evalJson<number>('scrollY') > 0, 'the destination was scrolled into view');
+  assert(await evalJson<string>('window.__dropped') === 'card-1', 'the drop landed on the destination with the drag data');
+  assert(await evalJson<string>("document.getElementById('dst').textContent") === 'dropped:card-1', 'dst, not another element, received the drop');
+});
+
+c('drag --mode synthetic with a below-the-fold destination drops on it', async () => {
+  await run(['goto', DND_BELOW_FOLD_PAGE]);
+  await run(['drag', '#src', '#dst', '--mode', 'synthetic']);
+  assert(await evalJson<string>('window.__dropped') === 'card-1', 'synthetic drop reached the destination');
+});
+
+c('drag between ends that cannot share a viewport fails and presses nothing', async () => {
+  await run(['goto', DND_FAR_PAGE]);
+  await run(['eval', "window.__down=0; document.addEventListener('mousedown',()=>window.__down++,true); 1"]);
+  for (const mode of ['auto', 'synthetic']) {
+    const r = await run(['drag', '#src', '#dst', '--mode', mode], { allowFailure: true });
+    assert(r.exitCode !== 0 && /cannot be scrolled into view together/.test(r.stderr + r.stdout), `${mode}: clear error: ${r.stderr}${r.stdout}`);
+  }
+  assert(await evalJson<string>('window.__dropped') === '', 'nothing dropped');
+  assert(await evalJson<number>('window.__down') === 0, 'no mouse press was sent');
+});
+
+c('drag to an explicit off-screen point fails with a viewport error', async () => {
+  await run(['goto', DND_PAGE]);
+  const box = parseJson<{ x: number; y: number }>((await run(['box', '#src', '--json'])).stdout);
+  const r = await run(['drag', `${Math.round(box.x + 10)},${Math.round(box.y + 10)}`, '10,99999'], { allowFailure: true });
+  assert(r.exitCode !== 0 && /outside the \d+x\d+ viewport/.test(r.stderr + r.stdout), `off-screen point refused: ${r.stderr}${r.stdout}`);
+  assert(await evalJson<string>('window.__dropped') === '', 'no drop happened');
+  // The button was let go: a later plain click still works.
+  await run(['click', '#src', '--no-observe']);
+});
+
+c('drag keeps its arguments in order with --force between them', async () => {
+  await run(['goto', DND_PAGE]);
+  const r = parseJson<{ ok: boolean; mode: string }>((await run(['drag', '#src', '--force', '#dst', '--json'])).stdout);
+  assert(r.ok, `drag result: ${JSON.stringify(r)}`);
+  assert(await evalJson<string>('window.__dropped') === 'card-1', '#src was the source and #dst the destination');
+  await run(['goto', DND_PAGE]);
+  await run(['drag', '--force', '#src', '#dst']);
+  assert(await evalJson<string>('window.__dropped') === 'card-1', '--force first keeps the order too');
+  await run(['goto', DND_PAGE]);
+  await run(['drag', '#src', '#dst', '--force=true']);
+  assert(await evalJson<string>('window.__dropped') === 'card-1', '--force=true still works');
 });
 
 c('drag --mode synthetic reaches DragEvent listeners', async () => {

@@ -20,7 +20,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mouse-event sortables). `--mode html5` fails when no drag started,
   `--mode mouse` never intercepts, `--mode synthetic` dispatches
   `DragEvent`s in the page with one shared `DataTransfer`. Returns
-  `{ok, from, to, mode, html5}`.
+  `{ok, from, to, mode, html5}`. Both ends are scrolled to before the
+  press, so the press point is never stale; an end outside the viewport,
+  or a pair that cannot share one, fails with a clear error instead of
+  dragging blind. A failure after the press releases the button (or sends
+  `dragCancel` for an intercepted drag). `--force` can sit anywhere in the
+  arguments (`drag '#src' --force '#dst'`).
 - **`click --button left|right|middle --count 1|2|3`**, plus
   **`gesture rightclick <x,y>`** and **`gesture tripleclick <x,y>`**.
   `--count 3` selects a paragraph; `--button right` fires `contextmenu`.

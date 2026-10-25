@@ -119,15 +119,72 @@ export async function bridgeTargetPoint(conn: BridgeConn, ref: BridgeRef, label:
   }
 }
 
+/** A drag end point, resolved on demand so it is fresh when it is used. */
+export type PointSource = () => Promise<Point>;
+
+interface ViewportState { w: number; h: number; sx: number; sy: number }
+
+async function readViewport(send: InputSend): Promise<ViewportState> {
+  const res = await send('Runtime.evaluate', {
+    expression: '({ w: innerWidth, h: innerHeight, sx: scrollX, sy: scrollY })',
+    returnByValue: true,
+  }) as { result?: { value?: Partial<ViewportState> } };
+  const v = res.result?.value;
+  if (!v || ![v.w, v.h, v.sx, v.sy].every((n) => typeof n === 'number') || !(v.w! > 0) || !(v.h! > 0)) {
+    throw new Error('drag: could not read the page viewport and scroll position');
+  }
+  return v as ViewportState;
+}
+
+/** Fail with a clear error when `p` is not inside the page's viewport. */
+function assertInViewport(v: ViewportState, p: Point, label: 'from' | 'to'): void {
+  if (p.x < 0 || p.y < 0 || p.x >= v.w || p.y >= v.h) {
+    throw new Error(`drag: the ${label} point ${p.x},${p.y} is outside the ${v.w}x${v.h} viewport. Scroll it into view, or pick a ${label} that shares a viewport with the other end.`);
+  }
+}
+
+/**
+ * Both ends of a drag, current at the same moment. Resolving an end runs the
+ * actionability guard, which can scroll the page and so move the other end.
+ * So: resolve `to` (scrolls to it), note the scroll position, resolve `from`
+ * (scrolls only if it is out of view), and compare. A changed scroll position
+ * means no single viewport holds both ends; otherwise both points are good for
+ * the whole gesture. Scrolling while the button is held is not an option:
+ * Chromium starts no HTML5 drag after a scroll between the press and the
+ * first move (measured on Edge 156).
+ * shortcut: only the window's scroll position is compared, so a guard that
+ * scrolls an inner container is not caught (the viewport check still is).
+ * Upgrade when a real page drags between scrollable panes: compare the
+ * elements' bounding boxes before and after instead.
+ */
+async function resolveDragPair(send: InputSend, from: PointSource, to: PointSource, verb: string): Promise<{ start: Point; end: Point }> {
+  const end = await to();
+  const afterTo = await readViewport(send);
+  const start = await from();
+  const afterFrom = await readViewport(send);
+  if (afterTo.sx !== afterFrom.sx || afterTo.sy !== afterFrom.sy) {
+    throw new Error(`${verb}: from and to cannot be scrolled into view together. Bring both into one viewport first.`);
+  }
+  assertInViewport(afterFrom, start, 'from');
+  assertInViewport(afterFrom, end, 'to');
+  return { start, end };
+}
+
 /**
  * Press at `from`, move to `to` in `steps` moves, release. Playwright's own
  * algorithm (crDragDrop.ts), in raw CDP so the bridge gets it too:
+ *   - Both ends are resolved together before the press (resolveDragPair), so
+ *     the guard on `to` scrolling the page cannot leave the press on a stale
+ *     point. Both are checked against the viewport; an end that is off screen,
+ *     or a pair that cannot share one viewport, fails instead of dragging blind.
  *   - With interception on, a page that starts an HTML5 drag makes Chromium
  *     emit Input.dragIntercepted {data} instead of running a native drag.
  *     We then finish with dragEnter / dragOver / drop at `to`, carrying that
  *     data, and send no mouseReleased (the drop ends the gesture).
  *   - No intercept within DRAG_INTERCEPT_WAIT_MS: it was a plain mouse drag
  *     (slider, canvas, sortable list on mouse events); release at `to`.
+ *   - Any failure after the press releases the button (or cancels the
+ *     intercepted drag) best-effort, then rethrows the original error.
  * `mouse` skips interception, `html5` fails when no drag started,
  * `synthetic` dispatches DragEvents in the page instead (dropzone and
  * react-dnd listeners that never see a trusted drag).
@@ -135,13 +192,14 @@ export async function bridgeTargetPoint(conn: BridgeConn, ref: BridgeRef, label:
 export async function dragPath(
   send: InputSend,
   on: InputOn,
-  from: Point,
-  to: Point,
+  from: PointSource,
+  to: PointSource,
   { steps = 10, mode = 'auto' }: { steps?: number; mode?: DragMode } = {},
-): Promise<{ html5: boolean }> {
+): Promise<{ html5: boolean; from: Point; to: Point }> {
   if (mode === 'synthetic') {
-    await syntheticDrag(send, from, to);
-    return { html5: true };
+    const { start, end } = await resolveDragPair(send, from, to, 'drag --mode synthetic');
+    await syntheticDrag(send, start, end);
+    return { html5: true, from: start, to: end };
   }
   const intercept = mode !== 'mouse';
   // A holder, not a `let`: the listener fills it in, which TS flow analysis can't see.
@@ -153,13 +211,18 @@ export async function dragPath(
       drag.wake?.();
     })
     : () => undefined;
-  let last = from;
+  let last: Point | null = null;
+  // True from the press until the release or the drop has gone out.
+  let held = false;
   try {
     if (intercept) await send('Input.setInterceptDrags', { enabled: true });
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y });
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 });
+    const { start, end } = await resolveDragPair(send, from, to, 'drag');
+    last = start;
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y });
+    held = true;
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1 });
     for (let i = 1; i <= steps && drag.data === null; i++) {
-      last = { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps };
+      last = { x: start.x + ((end.x - start.x) * i) / steps, y: start.y + ((end.y - start.y) * i) / steps };
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: last.x, y: last.y, button: 'left', buttons: 1 });
     }
     if (intercept && drag.data === null) {
@@ -171,15 +234,29 @@ export async function dragPath(
     const data = drag.data;
     if (data !== null) {
       for (const type of ['dragEnter', 'dragOver', 'drop']) {
-        await send('Input.dispatchDragEvent', { type, x: to.x, y: to.y, data, modifiers: 0 });
+        await send('Input.dispatchDragEvent', { type, x: end.x, y: end.y, data, modifiers: 0 });
       }
-      return { html5: true };
+      held = false;
+      return { html5: true, from: start, to: end };
     }
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: last.x, y: last.y, button: 'left', buttons: 0, clickCount: 1 });
+    held = false;
     if (mode === 'html5') {
       throw new Error('drag --mode html5: the page started no HTML5 drag (no Input.dragIntercepted). Try --mode mouse or --mode synthetic.');
     }
-    return { html5: false };
+    return { html5: false, from: start, to: end };
+  } catch (err) {
+    if (held && last !== null) {
+      // A held button or a half-run drag would outlive this verb and leave the
+      // page in a drag the user never asked to keep. Best effort: the original
+      // error is the one worth reporting.
+      if (drag.data !== null) {
+        await send('Input.dispatchDragEvent', { type: 'dragCancel', x: last.x, y: last.y, data: drag.data, modifiers: 0 }).catch(() => undefined);
+      } else {
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: last.x, y: last.y, button: 'left', buttons: 0, clickCount: 1 }).catch(() => undefined);
+      }
+    }
+    throw err;
   } finally {
     off();
     if (intercept) await send('Input.setInterceptDrags', { enabled: false }).catch(() => undefined);
@@ -283,13 +360,18 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
     const steps = opts.steps === undefined ? 10 : Number(opts.steps);
     if (!Number.isInteger(steps) || steps < 1 || steps > 200) throw usage(`drag: --steps must be an integer 1-200 (got ${String(opts.steps)})`);
     const force = opts.force === true;
-    // shortcut: both ends are resolved (and scrolled to) before the press, so
-    // a pair that can't share one viewport drags toward a stale `to` point.
-    // Upgrade when a real page needs a long drag: re-aim `to` after the press
-    // and auto-scroll near the edge the way a user would.
-    const from = await targetPoint(ctx, 'drag', fromSpec, force);
-    const to = await targetPoint(ctx, 'drag', toSpec, force);
-    const { html5 } = await deps.withInput(ctx, (send, on) => dragPath(send, on, from, to, { steps, mode }));
+    // shortcut: no auto-scroll while the button is held. Both ends are scrolled
+    // to before the press, so a pair that cannot share one viewport fails with
+    // a clear error instead of dragging across a scroll the way a user would.
+    // Upgrade when a real page needs a long drag: scroll near the viewport
+    // edge while moving (Chromium drops the HTML5 drag if the page scrolls
+    // between press and first move, so the scroll has to follow the first move).
+    const { html5, from, to } = await deps.withInput(ctx, (send, on) => dragPath(
+      send, on,
+      () => targetPoint(ctx, 'drag', fromSpec, force),
+      () => targetPoint(ctx, 'drag', toSpec, force),
+      { steps, mode },
+    ));
     return { ok: true, from, to, mode, html5 };
   });
 

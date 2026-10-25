@@ -41,7 +41,7 @@ import {
 import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from '../src/cookies';
 import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
 import { recordableStep } from '../src/record-filter';
-import { bridgeInputIO, registerInput, type InputDeps } from '../src/input';
+import { bridgeInputIO, dragPath, registerInput, type InputDeps, type InputOn, type InputSend, type Point } from '../src/input';
 import { spawnSync } from 'child_process';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
@@ -1195,6 +1195,7 @@ async function main(): Promise<void> {
   await test('input: drag finishes an intercepted HTML5 drag with drag events, then disables interception', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-drag');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
       let pressed = false;
       let emitted = false;
       ext.replies.set('Input.dispatchMouseEvent', (p) => {
@@ -1227,6 +1228,7 @@ async function main(): Promise<void> {
   await test('input: drag with no intercept is a plain mouse drag; --mode html5 fails but still disables', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-drag2');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
       await ext.connect();
       await until(() => bridge.connected, 'bind');
       const { run } = inputHandlers(bridge);
@@ -1251,6 +1253,116 @@ async function main(): Promise<void> {
       await run('drag', ['0,0', '30,0'], { mode: 'fling' }).catch((e) => { caught = e; });
       assert(caught?.exitCode === 2, `bad --mode is a usage error: ${caught?.message}`);
     });
+  });
+
+  await test('input: a send that throws after the press still releases the button, and the original error wins', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-drag-err');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { w: 800, h: 600, sx: 0, sy: 0 } } }));
+      let pressed = false;
+      let failed = false;
+      ext.replies.set('Input.dispatchMouseEvent', (p) => {
+        if (p.type === 'mousePressed') pressed = true;
+        // The first move after the press dies (a dropped relay, a closed tab).
+        if (p.type === 'mouseMoved' && pressed && !failed) { failed = true; throw new Error('relay dropped mid-drag'); }
+        return {};
+      });
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: any = null;
+      await inputHandlers(bridge).run('drag', ['0,0', '100,50'], { steps: '4', mode: 'mouse' }).catch((e) => { caught = e; });
+      assert(caught && /relay dropped mid-drag/.test(caught.message), `the original error is rethrown: ${caught?.message}`);
+      const ev = mouseEvents(ext);
+      const rel = ev.at(-1);
+      assert(rel?.type === 'mouseReleased' && rel.buttons === 0, `button released after the failure: ${JSON.stringify(ev.map((e) => e.type))}`);
+    });
+  });
+
+  /** An in-memory sender for dragPath, logging every call in order. `page` is the scroll/viewport state it reports. */
+  const dragRig = (page = { w: 800, h: 600, sx: 0, sy: 0 }, failOn: (method: string, params: any) => boolean = () => false) => {
+    const log: string[] = [];
+    const calls: Array<{ method: string; params: any }> = [];
+    let emit: ((params: Record<string, unknown>) => void) | null = null;
+    const send: InputSend = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'Runtime.evaluate') return { result: { value: { ...page } } };
+      log.push(method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchDragEvent' ? String(params.type) : method);
+      if (failOn(method, params)) throw new Error(`boom on ${String(params.type ?? method)}`);
+      return {};
+    };
+    const on: InputOn = (method, listener) => {
+      if (method === 'Input.dragIntercepted') emit = listener;
+      return () => undefined;
+    };
+    return { send, on, log, calls, page, intercept: () => emit?.({ data: { items: [{ mimeType: 'text/plain', data: 'card-1' }] } }) };
+  };
+
+  await test('input: drag resolves both ends before the press, so the press point is post-scroll', async () => {
+    const rig = dragRig();
+    const order: string[] = [];
+    // to's guard "scrolls" the page: from moves from y=400 to y=20.
+    let scrolled = false;
+    const from = async (): Promise<Point> => { order.push('from'); return scrolled ? { x: 10, y: 20 } : { x: 10, y: 400 }; };
+    const to = async (): Promise<Point> => { order.push('to'); scrolled = true; rig.page.sy = 200; return { x: 200, y: 100 }; };
+    const out = await dragPath(rig.send, rig.on, from, to, { steps: 2, mode: 'mouse' });
+    const press = rig.calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed');
+    assert(order.join(',') === 'to,from', `to, then from, before any input: ${order.join(',')}`);
+    assert(press?.params.x === 10 && press.params.y === 20, `press lands on the post-scroll from point: ${JSON.stringify(press?.params)}`);
+    assert(out.from.y === 20 && out.to.x === 200 && out.to.y === 100, `result carries the resolved points: ${JSON.stringify(out)}`);
+    assert(rig.log.at(-1) === 'mouseReleased', `release at the end: ${rig.log.join(',')}`);
+  });
+
+  await test('input: drag whose ends cannot share a viewport fails before pressing anything', async () => {
+    const rig = dragRig();
+    // Resolving to scrolls down; resolving from scrolls back up.
+    const to = async (): Promise<Point> => { rig.page.sy = 1800; return { x: 100, y: 500 }; };
+    const from = async (): Promise<Point> => { rig.page.sy = 0; return { x: 5, y: 5 }; };
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, from, to, { mode: 'mouse' }).catch((e) => { caught = e; });
+    assert(caught && /cannot be scrolled into view together/.test(caught.message), `clear error: ${caught?.message}`);
+    assert(!rig.log.includes('mousePressed'), `nothing pressed: ${rig.log.join(',')}`);
+  });
+
+  await test('input: drag to an off-screen point fails clearly before pressing', async () => {
+    const rig = dragRig({ w: 800, h: 600, sx: 0, sy: 0 });
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, async () => ({ x: 10, y: 10 }), async () => ({ x: 100, y: 900 }), { mode: 'mouse' })
+      .catch((e) => { caught = e; });
+    assert(caught && /to point 100,900 is outside the 800x600 viewport/.test(caught.message), `clear viewport error: ${caught?.message}`);
+    assert(!rig.log.includes('mousePressed') && !rig.log.includes('drop'), `no silent drag, nothing pressed: ${rig.log.join(',')}`);
+    const rig2 = dragRig();
+    caught = null;
+    await dragPath(rig2.send, rig2.on, async () => ({ x: -5, y: 10 }), async () => ({ x: 1, y: 1 }), { mode: 'mouse' })
+      .catch((e) => { caught = e; });
+    assert(caught && /from point -5,10 is outside/.test(caught.message), `off-screen from is refused: ${caught?.message}`);
+    assert(!rig2.log.includes('mousePressed'), `nothing pressed for an off-screen from: ${rig2.log.join(',')}`);
+  });
+
+  await test('input: an intercepted drag that fails mid-drop is cancelled, not left half-run', async () => {
+    const rig = dragRig({ w: 800, h: 600, sx: 0, sy: 0 }, (_m, p) => p.type === 'dragOver');
+    const sendWithIntercept: InputSend = async (m, p) => {
+      const r = await rig.send(m, p);
+      if (m === 'Input.dispatchMouseEvent' && p.type === 'mouseMoved' && p.buttons === 1) rig.intercept();
+      return r;
+    };
+    let caught: any = null;
+    await dragPath(sendWithIntercept, rig.on, async () => ({ x: 0, y: 0 }), async () => ({ x: 100, y: 50 }), { steps: 3 })
+      .catch((e) => { caught = e; });
+    assert(caught && /boom on dragOver/.test(caught.message), `original error rethrown: ${caught?.message}`);
+    const cancel = rig.calls.find((c) => c.method === 'Input.dispatchDragEvent' && c.params.type === 'dragCancel');
+    assert(cancel && cancel.params.data?.items?.[0]?.data === 'card-1', `dragCancel carries the data: ${JSON.stringify(cancel)}`);
+    assert(!rig.log.includes('mouseReleased') && !rig.log.includes('drop'), `no release or drop after an intercept: ${rig.log.join(',')}`);
+    assert(rig.log.at(-1) === 'Input.setInterceptDrags', 'interception is still switched off');
+  });
+
+  await test('input: synthetic drag refuses a pair that cannot share one viewport', async () => {
+    const rig = dragRig();
+    const to = async (): Promise<Point> => { rig.page.sy = 1800; return { x: 100, y: 500 }; };
+    const from = async (): Promise<Point> => { rig.page.sy = 0; return { x: 5, y: 5 }; };
+    let caught: any = null;
+    await dragPath(rig.send, rig.on, from, to, { mode: 'synthetic' }).catch((e) => { caught = e; });
+    assert(caught && /cannot be scrolled into view together/.test(caught.message), `clear error: ${caught?.message}`);
+    assert(!rig.calls.some((c) => c.method === 'Runtime.evaluate' && String(c.params.expression).includes('dragstart')), 'no drag events dispatched');
   });
 
   await test('input: another peer\'s dragIntercepted does not finish our drag', async () => {
