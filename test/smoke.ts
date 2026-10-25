@@ -2965,7 +2965,10 @@ c('find-el: finds elements by description, refs click at once, ordinals, exit 4,
 
   // Unnamed-by-label fields: placeholder, and the label text next to the field.
   r = await find('search products field');
-  assert(r.results[0].role === 'textbox' && r.results[0].why.includes('placeholder'), `placeholder: ${JSON.stringify(r.results[0])}`);
+  // Chromium exposes a lone placeholder as the accessible name, so the match
+  // arrives via `name`. The placeholder-only path (name empty, placeholder in
+  // props) is covered in test/find-el-unit.ts.
+  assert(r.results[0].role === 'textbox' && r.results[0].name === 'Search products' && r.results[0].score === 100, `placeholder-as-name: ${JSON.stringify(r.results[0])}`);
   r = await find('email address field');
   assert(r.results[0].role === 'textbox' && r.results[0].ref !== (await find('search products field')).results[0].ref, `label text finds the email field: ${JSON.stringify(r.results[0])}`);
 
