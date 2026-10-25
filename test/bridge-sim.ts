@@ -690,9 +690,10 @@ async function main(): Promise<void> {
       'a mid-dispatch detach must NOT be treated as a safe pre-dispatch retry',
     );
 
-    // The permanent case. It LOOKS like the transient one and is not: a page
-    // holding another extension's frame never becomes attachable, so this must
-    // stay distinguishable for the daemon to advise correctly (bridgeError).
+    // The foreign-frame case. It LOOKS like the transient one and is not
+    // always: a page holding another extension's frame stays unattachable
+    // until the bridge strips the frame, so this must stay distinguishable for
+    // the strip path and for the daemon to advise correctly (bridgeError).
     const permanent = 'Cannot access a chrome-extension:// URL of different extension';
     assert(
       /chrome-extension:\/\/ URL of different extension/i.test(permanent),
@@ -702,6 +703,167 @@ async function main(): Promise<void> {
       !/chrome-extension:\/\/ URL of different extension/i.test('Cannot access chrome:// and edge:// URLs'),
       'the browser-internal-page string must NOT match the extension-frame case',
     );
+  });
+
+  // Foreign extension frames (Hudu Assist on Autotask): the extension strips
+  // them and retries the attach. background.js can't be imported in Node
+  // (chrome.* at module scope), so these drive the exact helpers it calls.
+  type StripErrors = {
+    isForeignExtensionFrameError: (e: unknown) => boolean;
+    attachStrippingForeignFrames: (o: {
+      attach: () => Promise<unknown>;
+      strip: () => Promise<string[]>;
+      sleep?: (ms: number) => Promise<void>;
+      log?: (hosts: string[]) => void;
+      maxTries?: number;
+    }) => Promise<unknown>;
+    stripForeignExtensionFrames: (ownId: string) => string[];
+  };
+  const loadStrip = async (): Promise<StripErrors> => await import(
+    new URL('../extension/errors.js', import.meta.url).href
+  ) as StripErrors;
+  const FRAME_ERR = 'Cannot access a chrome-extension:// URL of different extension';
+
+  await test('foreign-frame predicate matches only the different-extension refusal', async () => {
+    const e = await loadStrip();
+    assert(e.isForeignExtensionFrameError(new Error(FRAME_ERR)), 'should match the refusal');
+    for (const msg of ['Cannot access chrome:// and edge:// URLs', 'Cannot attach to this target.', 'Cannot access a chrome-error:// URL']) {
+      assert(!e.isForeignExtensionFrameError(new Error(msg)), `should NOT match: ${msg}`);
+    }
+  });
+
+  await test('foreign-frame refusal: strip, then the retried attach succeeds', async () => {
+    const e = await loadStrip();
+    let attaches = 0;
+    let strips = 0;
+    const sleeps: number[] = [];
+    const logged: string[][] = [];
+    const out = await e.attachStrippingForeignFrames({
+      attach: async () => {
+        attaches++;
+        if (attaches === 1) throw new Error(FRAME_ERR);
+        return 'attached';
+      },
+      strip: async () => { strips++; return ['hudu-assist-id']; },
+      sleep: async (ms) => { sleeps.push(ms); },
+      log: (hosts) => { logged.push(hosts); },
+    });
+    assert(out === 'attached', `attach result should pass through, got ${String(out)}`);
+    assert(attaches === 2 && strips === 1, `want 2 attaches / 1 strip, got ${attaches} / ${strips}`);
+    assert(JSON.stringify(sleeps) === '[75]', `want one 75 ms backoff, got ${JSON.stringify(sleeps)}`);
+    assert(JSON.stringify(logged) === '[["hudu-assist-id"]]', `removed hosts should be logged, got ${JSON.stringify(logged)}`);
+  });
+
+  await test('foreign-frame refusal that persists surfaces the original error', async () => {
+    const e = await loadStrip();
+    const original = new Error(FRAME_ERR);
+    let attaches = 0;
+    let strips = 0;
+    const sleeps: number[] = [];
+    let caught: unknown = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => {
+          attaches++;
+          throw attaches === 1 ? original : new Error(FRAME_ERR);
+        },
+        strip: async () => { strips++; return ['hudu-assist-id']; },
+        sleep: async (ms) => { sleeps.push(ms); },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, `the ORIGINAL refusal must surface, got ${String(caught)}`);
+    assert(attaches === 5, `want 1 attach + 4 retries, got ${attaches}`);
+    assert(strips === 4, `each refused retry but the last re-strips, want 4 strips, got ${strips}`);
+    assert(JSON.stringify(sleeps) === '[75,150,225,300]', `want 75*(n+1) backoff, got ${JSON.stringify(sleeps)}`);
+
+    // Nothing removed (kill switch, not our tab, no frame found): no retry.
+    attaches = 0;
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { attaches++; throw original; },
+        strip: async () => [],
+        sleep: async () => { throw new Error('must not back off when nothing was removed'); },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original && attaches === 1, `nothing stripped must rethrow at once, got ${attaches} attaches`);
+
+    // A strip that throws (executeScript refused) behaves like nothing removed.
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { throw original; },
+        strip: async () => { throw new Error('Cannot access contents of the page'); },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught === original, 'a failed strip must surface the original refusal, not its own error');
+
+    // Any other attach failure never triggers a strip.
+    caught = null;
+    try {
+      await e.attachStrippingForeignFrames({
+        attach: async () => { throw new Error('No tab with given id 7'); },
+        strip: async () => { throw new Error('must not strip for an unrelated error'); },
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert(/No tab with given id/.test(String(caught)), `unrelated error must pass through, got ${String(caught)}`);
+  });
+
+  await test('frame stripper removes other extensions\' iframes, incl. closed shadow roots', async () => {
+    const e = await loadStrip();
+    type El = { tagName: string; src?: string; removed: boolean; shadow?: Root; closed?: boolean;
+      getAttribute: (n: string) => string | null; remove: () => void; shadowRoot: Root | null };
+    type Root = { querySelectorAll: (sel: string) => El[] };
+    const el = (tagName: string, opt: { src?: string; shadow?: Root; closed?: boolean } = {}): El => {
+      const x: El = {
+        tagName, src: opt.src, removed: false, shadow: opt.shadow, closed: opt.closed,
+        getAttribute: (n) => (n === 'src' ? x.src ?? null : null),
+        remove: () => { x.removed = true; },
+        get shadowRoot() { return x.closed ? null : x.shadow ?? null; },
+      };
+      return x;
+    };
+    const root = (els: El[]): Root => ({ querySelectorAll: () => els });
+    const foreignTop = el('IFRAME', { src: 'chrome-extension://huduassist/widget.html' });
+    const own = el('IFRAME', { src: 'chrome-extension://ghaxself/x.html' });
+    const web = el('IFRAME', { src: 'https://ww14.autotask.net/frame' });
+    const relative = el('IFRAME', { src: '/relative' });
+    const foreignClosed = el('IFRAME', { src: 'chrome-extension://otherext/panel.html' });
+    const foreignOpen = el('IFRAME', { src: 'chrome-extension://thirdext/p.html' });
+    const closedHost = el('HUDU-ASSIST', { shadow: root([foreignClosed]), closed: true });
+    const openHost = el('DIV', { shadow: root([foreignOpen]) });
+    const g = globalThis as Record<string, unknown>;
+    const saved = { document: g.document, chrome: g.chrome, location: g.location };
+    try {
+      g.document = root([foreignTop, own, web, relative, closedHost, openHost]);
+      g.location = { href: 'https://ww14.autotask.net/Mvc/Framework/Navigation.mvc' };
+      g.chrome = { dom: { openOrClosedShadowRoot: (x: El) => x.shadow ?? null } };
+      const hosts = e.stripForeignExtensionFrames('ghaxself');
+      assert(JSON.stringify(hosts) === '["huduassist","otherext","thirdext"]', `removed hosts wrong: ${JSON.stringify(hosts)}`);
+      assert(foreignTop.removed && foreignClosed.removed && foreignOpen.removed, 'every foreign extension frame must go');
+      assert(!own.removed && !web.removed && !relative.removed, 'our own frame and web frames must stay');
+
+      // Without chrome.dom, closed roots are out of reach; open ones still walk.
+      foreignOpen.removed = false;
+      foreignClosed.removed = false;
+      foreignTop.removed = false;
+      g.chrome = {};
+      const fallback = e.stripForeignExtensionFrames('ghaxself');
+      assert(JSON.stringify(fallback) === '["huduassist","thirdext"]', `fallback hosts wrong: ${JSON.stringify(fallback)}`);
+      assert(!foreignClosed.removed, 'a closed root must be unreachable without chrome.dom');
+    } finally {
+      g.document = saved.document;
+      g.chrome = saved.chrome;
+      g.location = saved.location;
+    }
   });
 
   // The `phase` field is only worth carrying if it changes what happens: a
