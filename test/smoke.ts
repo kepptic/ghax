@@ -25,6 +25,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { spawn, spawnSync } from 'child_process';
 import { createServer } from 'http';
@@ -3030,6 +3031,135 @@ c('find-el: finds elements by description, refs click at once, ordinals, exit 4,
   assert(hung.exitCode !== 0 && /'sleep'.*did not finish within 1s/.test(hung.stderr), `hung reranker: ${hung.exitCode} ${hung.stderr}`);
   const badTimeout = await run(['find-el', 'billing panel', '--rerank-timeout', '0'], { allowFailure: true });
   assert(badTimeout.exitCode === 1 || badTimeout.exitCode === 2, `bad --rerank-timeout is a usage error: ${badTimeout.exitCode}`);
+});
+
+// ─── PR D: screenshot --region/--scale, window size ─────────────
+
+/** Width/height from the PNG IHDR (bytes 16-24). */
+function pngDims(file: string): { width: number; height: number } {
+  const b = fs.readFileSync(file);
+  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+}
+
+/**
+ * RGB of the top-left pixel. Row 0 is the one scanline whose filter never
+ * reads a neighbour for its first pixel, so the bytes are raw whichever
+ * filter the encoder picked.
+ */
+function pngFirstPixel(file: string): [number, number, number] {
+  const b = fs.readFileSync(file);
+  const bytesPerPixel = b[25] === 6 ? 4 : 3; // colour type 6 = RGBA, 2 = RGB
+  const idat: Buffer[] = [];
+  for (let off = 8; off < b.length;) {
+    const len = b.readUInt32BE(off);
+    if (b.toString('latin1', off + 4, off + 8) === 'IDAT') idat.push(b.subarray(off + 8, off + 8 + len));
+    off += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  assert(raw.length > 1 + bytesPerPixel, 'PNG has pixel data');
+  return [raw[1], raw[2], raw[3]];
+}
+
+const REGION_PAGE = `data:text/html,${encodeURIComponent('<!doctype html><title>Region Fixture</title><body style="margin:0;background:#fff"><div style="height:3000px;position:relative"><div style="position:absolute;top:1000px;left:0;width:300px;height:200px;background:#f00"></div></div>')}`;
+
+c('screenshot --region alone zooms to scale 2 and reports the frame', async () => {
+  await run(['goto', REGION_PAGE]);
+  const out = path.join(os.tmpdir(), `ghax-region-${Date.now()}.png`);
+  const r = await run(['screenshot', '--region', '0,0,200,100', '--path', out, '--json']);
+  const d = parseJson<{
+    path: string; frame: string; scale: number; region: Record<string, number>;
+    viewport: { width: number; height: number }; image: { width: number; height: number }; note: string;
+  }>(r.stdout);
+  assert(d.path === out && d.frame === 'viewport-css-px' && d.scale === 2, `shape: ${r.stdout}`);
+  assert(d.region.x0 === 0 && d.region.y1 === 100, `region echoed: ${JSON.stringify(d.region)}`);
+  assert(d.viewport.width > 0 && d.viewport.height > 0, 'viewport reported');
+  assert(/x = x0 \+ px\/scale/.test(d.note), `coordinate note: ${d.note}`);
+  const dims = pngDims(out);
+  assert(dims.width === 400 && dims.height === 200, `PNG is ${dims.width}x${dims.height}, want 400x200`);
+  assert(d.image.width === dims.width && d.image.height === dims.height, 'reported image size matches the PNG');
+  fs.unlinkSync(out);
+});
+
+c('screenshot --region --scale overrides the zoom; --scale alone shrinks the viewport', async () => {
+  const out = path.join(os.tmpdir(), `ghax-scale-${Date.now()}.png`);
+  const r = await run(['screenshot', '--region', '0,0,400,200', '--scale', '0.5', '--path', out, '--json']);
+  const d = parseJson<{ scale: number }>(r.stdout);
+  const dims = pngDims(out);
+  assert(d.scale === 0.5 && dims.width === 200 && dims.height === 100, `scale 0.5: ${d.scale} ${dims.width}x${dims.height}`);
+  const v = await run(['screenshot', '--scale', '0.5', '--path', out, '--json']);
+  const vd = parseJson<{ region: unknown; viewport: { width: number; height: number } }>(v.stdout);
+  const vdims = pngDims(out);
+  assert(vd.region === null, 'no region reported for a viewport shot');
+  assert(vdims.width === Math.round(vd.viewport.width * 0.5), `viewport at 0.5: ${vdims.width} vs ${vd.viewport.width}`);
+  fs.unlinkSync(out);
+});
+
+c('screenshot --region stays in the viewport frame after a scroll', async () => {
+  await run(['goto', REGION_PAGE]);
+  await run(['eval', 'window.scrollTo(0, 900)']);
+  const out = path.join(os.tmpdir(), `ghax-region-scroll-${Date.now()}.png`);
+  // The red block sits at document y=1000, so viewport y=100 once scrolled to 900.
+  await run(['screenshot', '--region', '0,120,40,160', '--scale', '1', '--path', out]);
+  const [r1, g1, b1] = pngFirstPixel(out);
+  assert(r1 > 200 && g1 < 60 && b1 < 60, `region over the block should be red, got ${r1},${g1},${b1}`);
+  await run(['screenshot', '--region', '0,0,40,40', '--scale', '1', '--path', out]);
+  const [r2, g2, b2] = pngFirstPixel(out);
+  assert(r2 > 240 && g2 > 240 && b2 > 240, `region above the block should be white, got ${r2},${g2},${b2}`);
+  fs.unlinkSync(out);
+  await run(['eval', 'window.scrollTo(0, 0)']);
+});
+
+c('screenshot --region/--scale reject bad combinations with exit 2', async () => {
+  const bad: string[][] = [
+    ['screenshot', '--region', '0,0,10,10', '--full-page'],
+    ['screenshot', '--scale', '0.5', '--full-page'],
+    ['screenshot', '#nope', '--region', '0,0,10,10'],
+    ['screenshot', '--region', '10,10,5,5'],
+    ['screenshot', '--region', '0,0,10'],
+    ['screenshot', '--region', '0,0,99999,99999'],
+    ['screenshot', '--scale', '2'],
+    ['screenshot', '--region', '0,0,10,10', '--scale', '9'],
+    ['screenshot', '--region', '0,0,10,10', '--scale', '0'],
+  ];
+  for (const argv of bad) {
+    const r = await run(argv, { allowFailure: true });
+    assert(r.exitCode === 2, `${argv.join(' ')} should exit 2, got ${r.exitCode}: ${r.stderr}`);
+    assert(/screenshot:/.test(r.stderr), `${argv.join(' ')} names the verb: ${r.stderr}`);
+  }
+});
+
+c('window size reads the bounds; sets them on a headed browser', async () => {
+  const read = parseJson<{
+    windowId: number; width: number; height: number; left: number; top: number;
+    state: string; transport: string; viewport: { width: number; height: number };
+  }>((await run(['window', 'size', '--json'])).stdout);
+  for (const k of ['windowId', 'width', 'height', 'left', 'top'] as const) {
+    assert(typeof read[k] === 'number', `window size ${k}: ${JSON.stringify(read)}`);
+  }
+  assert(typeof read.state === 'string' && read.transport === 'cdp', `state/transport: ${JSON.stringify(read)}`);
+  assert(read.viewport.width > 0 && read.viewport.height > 0, 'inner size read from the page');
+  const ua = (await run(['eval', 'navigator.userAgent'])).stdout;
+  if (/Headless/i.test(ua)) {
+    console.log('  (skipped the set half: a headless browser does not apply window bounds)');
+    return;
+  }
+  const set = parseJson<{ width: number; height: number; viewport: { width: number } }>(
+    (await run(['window', 'size', '900x700', '--json'])).stdout,
+  );
+  assert(set.width === 900 && set.height === 700, `set bounds: ${JSON.stringify(set)}`);
+  assert(set.viewport.width <= 900, `inner width follows the window: ${JSON.stringify(set)}`);
+  await run(['window', 'size', `${read.width}x${read.height}`]);
+});
+
+c('window size rejects a bad spec (exit 2) and an unknown subcommand (usage, exit 1)', async () => {
+  for (const argv of [['window', 'size', '900'], ['window', 'size', '0x0'], ['window', 'size', 'big']]) {
+    const r = await run(argv, { allowFailure: true });
+    assert(r.exitCode === 2, `${argv.join(' ')} should exit 2, got ${r.exitCode}: ${r.stderr}`);
+  }
+  for (const argv of [['window'], ['window', 'move']]) {
+    const r = await run(argv, { allowFailure: true });
+    assert(r.exitCode === 1 && /Usage: ghax window size/.test(r.stderr), `${argv.join(' ')}: ${r.exitCode} ${r.stderr}`);
+  }
 });
 
 c('detach shuts the daemon', async () => {

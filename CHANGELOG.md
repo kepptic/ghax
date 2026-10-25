@@ -5,8 +5,33 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`screenshot --region x0,y0,x1,y1 [--scale 0.1..4]`.** Capture a rectangle
+  of the viewport in CSS pixels. `--region` alone is a 2x zoom; `--scale`
+  overrides it (0.1 to 1 without `--region`, shrinking the whole viewport).
+  `--json` reports `{path, scale, scaleY?, region, viewport, image, note}` so a
+  coordinate in the image maps back to a click as `x = x0 + px/scale`. `scale`
+  is measured from the image (`image.width / region width`), because the browser
+  rounds a small region to whole pixels (7x7 at 0.5 is 3x3, so `scale` is 0.43);
+  `scaleY` appears only when the height ratio differs. Works on
+  both transports through one `Page.captureScreenshot {clip}` path that adds
+  the scroll offset and divides the scale by devicePixelRatio. Refused with
+  `--full-page` or an `@ref`, and for a region outside the viewport.
+- **`window size [<WxH>] [--window <id>]`.** Read or set the browser window's
+  outer size (not emulation, unlike `viewport`). Bridge: new `window-bounds`
+  control action using `chrome.windows.update` (no new permission). CDP:
+  `Browser.setWindowBounds`. Reports `{windowId, width, height, left, top,
+  state, transport, viewport, note?}` with the page's `innerWidth`/`innerHeight`
+  read after the resize settles. A maximized, minimized or fullscreen window is
+  restored first, then sized. With `--window <id>`, `viewport` is read from a
+  tab in that window, or is `null` with a `note` (the bridge can only read the
+  controlled tab); it is never another window's numbers. A headless browser does not apply bounds. **Reload the
+  bridge extension (`ghax bridge reload`) to get the new action**; an older
+  one says so.
+### Fixed
+- Gestures on CDP read the viewport from `innerWidth`/`innerHeight` instead of
+  `page.viewportSize()`, which is null (so a 1280x720 guess) after a real window
+  resize.
 
 ## [0.13.0] - 2026-10-25
 ### Added
@@ -28,6 +53,25 @@ _No changes yet._
   20 returns the rest behind the reranked 20. Cursor-interactive text in the
   CDP `snapshot` is now JSON-quoted like the bridge's, so a label with quotes
   or a line break keeps its `@c` ref findable.
+- **`ghax shortcut`: saved, parameterised flows.** `shortcut save <name> <file>
+  [--var k=default]... [--desc <text>] [--force]` stores a recording (or a steps array) as
+  `~/.ghax/shortcuts/<name>.json` (directory 0700, file 0600; override the
+  directory with `GHAX_SHORTCUTS_DIR`). `${k}` in a string inside a step's
+  `args` or `opts` becomes a variable, including inside a `batch`; `$${k}` is a
+  literal `${k}`; `cmd` is never substituted. `shortcut list | show | rm`, and
+  `shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]`, which runs
+  through the same loop as `replay` (first failure stops it, a failed `expect`
+  exits 1, `--report` works). A variable with no value, or an unknown `--var`,
+  exits 1 before any command is sent. Save drops a recording's `at` stamps,
+  refuses the commands `record` never stores (`auth.export`, `text`, ...), and
+  warns about `@e<n>` refs, which do not survive a navigation. Names match
+  `^[a-z0-9][a-z0-9._-]{0,63}$`. CLI only; no daemon change.
+  `shortcut save` refuses a name that already exists (exit 1, names the file);
+  `--force` replaces it and prints `replaced shortcut <name> (was N steps)`.
+  The write goes through an exclusively created, uniquely named temp file
+  (a planted symlink is never followed), is forced to 0600, and the default
+  `~/.ghax/shortcuts` is forced to 0700 even if it already existed;
+  chmod errors are reported, not ignored.
 
 ## [0.12.0] - 2026-10-25
 ### Added
@@ -56,25 +100,6 @@ _No changes yet._
   `--count 3` selects a paragraph; `--button right` fires `contextmenu`.
   On CDP these go to Playwright's `click({button, clickCount})`; over the
   bridge to raw mouse events.
-- **`ghax shortcut`: saved, parameterised flows.** `shortcut save <name> <file>
-  [--var k=default]... [--desc <text>] [--force]` stores a recording (or a steps array) as
-  `~/.ghax/shortcuts/<name>.json` (directory 0700, file 0600; override the
-  directory with `GHAX_SHORTCUTS_DIR`). `${k}` in a string inside a step's
-  `args` or `opts` becomes a variable, including inside a `batch`; `$${k}` is a
-  literal `${k}`; `cmd` is never substituted. `shortcut list | show | rm`, and
-  `shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]`, which runs
-  through the same loop as `replay` (first failure stops it, a failed `expect`
-  exits 1, `--report` works). A variable with no value, or an unknown `--var`,
-  exits 1 before any command is sent. Save drops a recording's `at` stamps,
-  refuses the commands `record` never stores (`auth.export`, `text`, ...), and
-  warns about `@e<n>` refs, which do not survive a navigation. Names match
-  `^[a-z0-9][a-z0-9._-]{0,63}$`. CLI only; no daemon change.
-  `shortcut save` refuses a name that already exists (exit 1, names the file);
-  `--force` replaces it and prints `replaced shortcut <name> (was N steps)`.
-  The write goes through an exclusively created, uniquely named temp file
-  (a planted symlink is never followed), is forced to 0600, and the default
-  `~/.ghax/shortcuts` is forced to 0700 even if it already existed;
-  chmod errors are reported, not ignored.
 
 ### Changed
 - `gesture click`, `gesture dblclick` and the bridge `click` now share one
