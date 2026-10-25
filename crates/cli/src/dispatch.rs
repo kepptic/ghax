@@ -268,6 +268,13 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, verb, parsed)
         }
 
+        // `--force` is a switch: `hover --force @e3` must not swallow the target.
+        "hover" | "drag" => {
+            let mut parsed = args::parse(rest);
+            take_switch(&mut parsed, "force");
+            simple(cfg, verb, parsed)
+        }
+
         "eval" => {
             let mut parsed = args::parse(rest);
             take_switch(&mut parsed, "no-wait");
@@ -482,13 +489,16 @@ fn dispatch_ext_inner(cfg: &Config, surface: &str, rest: &[String]) -> Result<i3
 
 fn dispatch_gesture(cfg: &Config, rest: &[String]) -> Result<i32> {
     let Some(sub) = rest.first() else {
-        eprintln!("Usage: ghax gesture <click|dblclick|scroll|key> [args...]");
+        eprintln!("Usage: ghax gesture <click|dblclick|tripleclick|rightclick|hover|scroll|key> [args...]");
         return Ok(EXIT_USAGE);
     };
     let parsed = args::parse(&rest[1..]);
     let cmd = match sub.as_str() {
         "click" => "gesture.click",
         "dblclick" => "gesture.dblclick",
+        "tripleclick" => "gesture.tripleclick",
+        "rightclick" => "gesture.rightclick",
+        "hover" => "gesture.hover",
         "scroll" => "gesture.scroll",
         "key" => "gesture.key",
         other => {

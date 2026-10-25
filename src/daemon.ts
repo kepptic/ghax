@@ -82,6 +82,7 @@ import {
   type ControlTarget,
 } from './bridge';
 import { recordableStep } from './record-filter';
+import { INPUT_RETRY_SAFE, INPUT_VERBS, bridgeInputIO, bridgeTargetPoint, clickAt, parseClickOpts, registerInput, type InputOn, type InputSend } from './input';
 import { AuthExportError, exportAuth, LOCAL_STORAGE_EXPR, originOf, parseLocalStorage, type AuthSource } from './auth-export';
 import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
@@ -215,7 +216,8 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'bridge.stats',
   'cookies', 'cookies.delete', 'storage', 'auth.export',
   'batch', 'expect', 'record.start', 'record.stop', 'record.status',
-  'gesture.click', 'gesture.dblclick', 'gesture.scroll', 'gesture.key',
+  'gesture.scroll', 'gesture.key',
+  ...INPUT_VERBS,
 ]);
 
 /**
@@ -241,6 +243,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
  */
 const BRIDGE_RETRY_SAFE = new Set([
   'status', 'tabs', 'find', 'text', 'html', 'screenshot', 'snapshot', 'wait', 'cookies',
+  ...INPUT_RETRY_SAFE,
 ]);
 
 /**
@@ -2507,6 +2510,9 @@ register('click', async (ctx, args, opts) => {
   // --force skips the actionability guard (covered/disabled/hidden). Works as
   // a batch step opt too: {"cmd":"click","args":["@e3"],"opts":{"force":true}}.
   const force = opts.force === true;
+  // --button left|right|middle, --count 1|2|3. A context menu is not a
+  // [role=dialog], so the observe loop below needs no change for --button right.
+  const { button, count } = parseClickOpts(opts, 'click');
   const observeMs = (() => {
     const raw = opts['observe-ms'] ?? opts.observeMs;
     if (raw === undefined) return 300;
@@ -2529,18 +2535,8 @@ register('click', async (ctx, args, opts) => {
     // One in-page call: guard, scroll into view, and the click point. A
     // covered/disabled/hidden target fails here instead of clicking
     // whatever sits on top of it.
-    const handle = await bridgeResolveHandle(bridge, ref, target);
-    let guard;
-    try {
-      ({ guard } = await bridgeGuard(bridge, handle, target, 'click', force));
-    } finally {
-      bridgeReleaseHandle(bridge, handle);
-    }
-    const x = guard.x ?? 0;
-    const y = guard.y ?? 0;
-    await bridge.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    await bridge.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await bridge.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    const { x, y } = await bridgeTargetPoint(bridge, ref, target, force);
+    await clickAt((method, params) => bridge.send(method, params), x, y, { button, count });
     if (!observe) return { ok: true };
     const deadline = Date.now() + observeMs;
     let post = pre;
@@ -2570,7 +2566,12 @@ register('click', async (ctx, args, opts) => {
   const preDialogCount = observe ? await page.locator(MODAL_SEL).count() : 0;
   const preUrl = observe ? page.url() : '';
 
-  await loc.click(force ? { force: true } : undefined);
+  const clickOpts = {
+    ...(force ? { force: true } : {}),
+    ...(button !== 'left' ? { button } : {}),
+    ...(count !== 1 ? { clickCount: count } : {}),
+  };
+  await loc.click(Object.keys(clickOpts).length > 0 ? clickOpts : undefined);
 
   if (!observe) return { ok: true };
 
@@ -4294,20 +4295,29 @@ for (const { label, match } of EXT_VIEW_FILTERS) {
 
 // ─── Gesture commands (real Input.dispatch*) ───────────────────
 
-type InputSend = (method: string, params: Record<string, unknown>) => Promise<unknown>;
-
 /**
  * Run `fn` with a raw CDP sender for the active tab: the bridge's
  * `chrome.debugger` relay in bridge mode, a short-lived Playwright CDP
  * session otherwise. Gestures are the same Input.dispatch* calls either way.
+ * `on` subscribes to events on that same session (drag needs
+ * Input.dragIntercepted from the session that enabled interception).
  */
-async function withInput<T>(ctx: Ctx, fn: (send: InputSend) => Promise<T>): Promise<T> {
+async function withInput<T>(ctx: Ctx, fn: (send: InputSend, on: InputOn) => Promise<T>): Promise<T> {
   if (ctx.bridgeMode) {
-    const bridge = requireBridge(ctx);
-    return fn((method, params) => bridge.send(method, params));
+    // Pinned to the verb's peer, so a concurrent `bridge use` can't split
+    // one gesture across two browsers.
+    const io = bridgeInputIO(verbBridge(ctx));
+    return fn(io.send, io.on);
   }
   const page = await activePage(ctx);
-  return withCdpSession(page, (session) => fn((method, params) => session.send(method as never, params as never)));
+  return withCdpSession(page, (session) => {
+    const on: InputOn = (method, listener) => {
+      const l = (params: unknown) => listener((params ?? {}) as Record<string, unknown>);
+      session.on(method as never, l as never);
+      return () => { session.off(method as never, l as never); };
+    };
+    return fn((method, params) => session.send(method as never, params as never), on);
+  });
 }
 
 async function gestureViewport(ctx: Ctx): Promise<{ width: number; height: number }> {
@@ -4359,16 +4369,9 @@ function parseGesturePoint(spec: string): { x: number; y: number } {
   return { x, y };
 }
 
-register('gesture.click', async (ctx, args) => {
-  const spec = String(args[0] ?? '');
-  if (!spec) throw new Error('Usage: gesture click <x,y>');
-  const { x, y } = parseGesturePoint(spec);
-  await withInput(ctx, async (send) => {
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  });
-  return { ok: true };
+// hover, drag, gesture click/dblclick/tripleclick/rightclick/hover: src/input.ts.
+registerInput<Ctx>({
+  register, withInput, verbBridge, resolveBridgeTarget, resolveRef, activePage, requireTarget, parseGesturePoint,
 });
 
 // ─── Profiling ─────────────────────────────────────────────────
@@ -4658,23 +4661,6 @@ register('gesture.key', async (ctx, args) => {
   await withInput(ctx, async (send) => {
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key });
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key });
-  });
-  return { ok: true };
-});
-
-register('gesture.dblclick', async (ctx, args) => {
-  const spec = String(args[0] ?? '');
-  if (!spec) throw new Error('Usage: gesture dblclick <x,y>');
-  const { x, y } = parseGesturePoint(spec);
-  await withInput(ctx, async (send) => {
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    // clickCount=2 on the second pressed/released is what Chrome treats as a
-    // dblclick — firing pressed/released twice with clickCount=1 is NOT the
-    // same and won't trigger ondblclick handlers.
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 });
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 });
   });
   return { ok: true };
 });

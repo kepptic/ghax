@@ -1160,6 +1160,94 @@ c('gesture dblclick dispatches double press/release', async () => {
   assert(data.ok === true, 'gesture dblclick should return ok');
 });
 
+// ─── Input verbs (hover, drag, right/triple click) ──────────────
+const page = (body: string) => `data:text/html,${encodeURIComponent(`<!doctype html><title>input</title>${body}`)}`;
+const HOVER_PAGE = page(`<style>#menu{display:none} #wrap:hover #menu{display:block}</style>
+<div id="wrap" style="width:200px;height:60px;background:#eee"><button id="trigger">Menu</button><div id="menu">Settings</div></div>`);
+const CLICKS_PAGE = page(`<p id="para" style="font:16px sans-serif;width:400px">alpha beta gamma delta</p>
+<div id="ctx" style="width:120px;height:40px;background:#ccc">ctx</div>
+<script>window.__ctx=0;window.__sel='';
+document.getElementById('ctx').addEventListener('contextmenu',(e)=>{e.preventDefault();window.__ctx++;});
+document.addEventListener('selectionchange',()=>{window.__sel=String(getSelection());});</script>`);
+const DND_PAGE = page(`<div id="src" draggable="true" style="width:80px;height:40px;background:#9cf">card</div>
+<div id="dst" style="margin-top:80px;width:160px;height:80px;background:#fc9">drop here</div>
+<script>window.__dropped='';
+document.getElementById('src').addEventListener('dragstart',(e)=>e.dataTransfer.setData('text/plain','card-1'));
+const d=document.getElementById('dst');
+d.addEventListener('dragover',(e)=>e.preventDefault());
+d.addEventListener('drop',(e)=>{e.preventDefault();window.__dropped=e.dataTransfer.getData('text/plain');d.textContent='dropped:'+window.__dropped;});</script>`);
+const MOUSE_DRAG_PAGE = page(`<div id="pad" style="width:300px;height:100px;background:#ddd"></div>
+<script>window.__path=[];const p=document.getElementById('pad');
+p.addEventListener('mousedown',(e)=>window.__path.push('down'));
+p.addEventListener('mousemove',(e)=>{if(e.buttons===1)window.__path.push('move')});
+p.addEventListener('mouseup',(e)=>window.__path.push('up:'+Math.round(e.clientX)));</script>`);
+const evalJson = async <T,>(js: string): Promise<T> => parseJson<T>((await run(['eval', js, '--json'])).stdout);
+
+c('hover reveals a CSS :hover menu and leaves it open', async () => {
+  await run(['goto', HOVER_PAGE]);
+  // `is` exits 1 when the check is false, so a negative check must allow it.
+  // Exit 0 = visible, 1 = hidden; anything else is an error, not "hidden".
+  const isVisible = async () => (await run(['is', 'visible', '#menu', '--json'], { allowFailure: true })).exitCode;
+  assert(await isVisible() === 1, 'menu hidden before hover');
+  const r = parseJson<{ ok: boolean; x: number; y: number }>((await run(['hover', '#trigger', '--json'])).stdout);
+  assert(r.ok && r.x > 0 && r.y > 0, `hover result: ${JSON.stringify(r)}`);
+  assert(await isVisible() === 0, 'menu visible after hover (no mouse-up)');
+  // gesture hover elsewhere closes it again.
+  await run(['gesture', 'hover', '600,400']);
+  assert(await isVisible() === 1, 'gesture hover away closes the menu');
+});
+
+c('click --button right and gesture rightclick fire contextmenu', async () => {
+  await run(['goto', CLICKS_PAGE]);
+  await run(['click', '#ctx', '--button', 'right', '--no-observe']);
+  const box = parseJson<{ x: number; y: number; width: number; height: number }>((await run(['box', '#ctx', '--json'])).stdout);
+  await run(['gesture', 'rightclick', `${box.x + box.width / 2},${box.y + box.height / 2}`]);
+  const n = await evalJson<number>('window.__ctx');
+  assert(n === 2, `contextmenu fired twice, got ${n}`);
+  const bad = await run(['click', '#ctx', '--button', 'back'], { allowFailure: true });
+  assert(bad.exitCode !== 0 && /--button/.test(bad.stderr + bad.stdout), `bad --button refused: ${bad.stderr}`);
+});
+
+c('click --count 3 and gesture tripleclick select the paragraph', async () => {
+  await run(['goto', CLICKS_PAGE]);
+  await run(['click', '#para', '--count', '3', '--no-observe']);
+  await run(['wait', '100']);
+  let sel = await evalJson<string>('window.__sel');
+  assert(/alpha beta gamma delta/.test(sel), `click --count 3 selected: ${JSON.stringify(sel)}`);
+  await run(['eval', 'getSelection().removeAllRanges(); window.__sel=""; 1']);
+  const box = parseJson<{ x: number; y: number }>((await run(['box', '#para', '--json'])).stdout);
+  await run(['gesture', 'tripleclick', `${box.x + 10},${box.y + 8}`]);
+  await run(['wait', '100']);
+  sel = await evalJson<string>('window.__sel');
+  assert(/alpha beta gamma delta/.test(sel), `gesture tripleclick selected: ${JSON.stringify(sel)}`);
+});
+
+c('drag finishes an HTML5 drag-and-drop with the drag data', async () => {
+  await run(['goto', DND_PAGE]);
+  const r = parseJson<{ ok: boolean; html5: boolean; mode: string }>((await run(['drag', '#src', '#dst', '--json'])).stdout);
+  assert(r.ok && r.html5 === true && r.mode === 'auto', `drag result: ${JSON.stringify(r)}`);
+  const dropped = await evalJson<string>('window.__dropped');
+  assert(dropped === 'card-1', `drop received the dragstart data, got ${JSON.stringify(dropped)}`);
+});
+
+c('drag --mode synthetic reaches DragEvent listeners', async () => {
+  await run(['goto', DND_PAGE]);
+  const r = parseJson<{ html5: boolean; mode: string }>((await run(['drag', '#src', '#dst', '--mode', 'synthetic', '--json'])).stdout);
+  assert(r.mode === 'synthetic', `mode: ${JSON.stringify(r)}`);
+  assert(await evalJson<string>('window.__dropped') === 'card-1', 'synthetic drop carried the data');
+});
+
+c('drag without an HTML5 drag is press, moves, release', async () => {
+  await run(['goto', MOUSE_DRAG_PAGE]);
+  const box = parseJson<{ x: number; y: number }>((await run(['box', '#pad', '--json'])).stdout);
+  const y = Math.round(box.y + 50);
+  const r = parseJson<{ html5: boolean }>((await run(['drag', `${Math.round(box.x + 20)},${y}`, `${Math.round(box.x + 220)},${y}`, '--steps', '5', '--json'])).stdout);
+  assert(r.html5 === false, `plain mouse drag: ${JSON.stringify(r)}`);
+  const pathSeen = await evalJson<string[]>('window.__path');
+  assert(pathSeen[0] === 'down' && pathSeen.filter((p) => p === 'move').length >= 5, `moves with button held: ${JSON.stringify(pathSeen)}`);
+  assert(pathSeen.at(-1) === `up:${Math.round(box.x + 220)}`, `released at to: ${JSON.stringify(pathSeen)}`);
+});
+
 c('xpath query returns matches with text + tag + box', async () => {
   await run(['goto', H1_PAGE]);
   await run(['wait', '200']);

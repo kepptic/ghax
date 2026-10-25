@@ -5,8 +5,34 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+### Added
+- **`ghax hover <@ref|selector|x,y>`** and **`ghax gesture hover <x,y>`**.
+  One `mouseMoved` at the target's guarded click point and no button after
+  it, so a CSS `:hover` menu stays open for the next `snapshot` or
+  `screenshot`. Refuses a covered or disabled target like `click` does
+  (`--force` skips that). Returns `{ok, x, y}`.
+- **`ghax drag <from> <to> [--steps 10] [--mode auto|mouse|html5|synthetic]`.**
+  Both ends take an `@ref`, a selector or `x,y`. Playwright's drag
+  algorithm in raw CDP, so the bridge gets it too: with
+  `Input.setInterceptDrags` on, a page that starts an HTML5 drag is
+  finished with `dragEnter`/`dragOver`/`drop` carrying the drag data;
+  otherwise it's a plain press, N moves, release (sliders, canvas,
+  mouse-event sortables). `--mode html5` fails when no drag started,
+  `--mode mouse` never intercepts, `--mode synthetic` dispatches
+  `DragEvent`s in the page with one shared `DataTransfer`. Returns
+  `{ok, from, to, mode, html5}`.
+- **`click --button left|right|middle --count 1|2|3`**, plus
+  **`gesture rightclick <x,y>`** and **`gesture tripleclick <x,y>`**.
+  `--count 3` selects a paragraph; `--button right` fires `contextmenu`.
+  On CDP these go to Playwright's `click({button, clickCount})`; over the
+  bridge to raw mouse events.
 
-_No changes yet._
+### Changed
+- `gesture click`, `gesture dblclick` and the bridge `click` now share one
+  `clickAt` in the new `src/input.ts` (same events as before, plus the
+  `buttons` mask CDP expects on press). Bridge gestures now run on the
+  verb's pinned peer, like every other bridge verb, instead of whichever
+  browser is active when each event is sent.
 
 ## [0.11.1] - 2026-10-25
 ### Fixed

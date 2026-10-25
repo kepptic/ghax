@@ -237,6 +237,11 @@ ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
 ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console
 ghax click @e3                           # click by ref (refuses covered/disabled targets)
 ghax click @e3 --force                   # skip the actionability checks
+ghax click @e3 --button right            # context menu (also --button middle)
+ghax click @e3 --count 2                 # double click; --count 3 = triple (select a paragraph)
+ghax hover @e4                           # mouse stays there: :hover menus stay open for snapshot/screenshot
+ghax drag @e7 @e9                        # drag-and-drop; from/to also take selectors or x,y
+ghax drag @e7 @e9 --mode synthetic       # in-page DragEvents for react-dnd/dropzones that ignore real drags
 ghax fill @e5 "hello"                    # React-safe input fill
 ghax press Enter
 
@@ -254,6 +259,9 @@ ghax ext hot-reload <ext-id> --verbose   # per-tab injection report
 # Real user gestures (for APIs that require them)
 ghax gesture click 100,200               # real Input.dispatchMouseEvent
 ghax gesture dblclick 100,200
+ghax gesture tripleclick 100,200         # clickCount 1..3
+ghax gesture rightclick 100,200          # fires contextmenu
+ghax gesture hover 100,200               # mouseMoved only
 ghax gesture scroll down 400             # mouseWheel event at viewport center
 ghax gesture scroll down 400 --on @e7    # aim the wheel at an element (inner panel); works over the bridge too
 ghax gesture key Enter
