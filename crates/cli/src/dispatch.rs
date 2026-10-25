@@ -240,6 +240,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "chain" => return small::cmd_chain(cfg, rest),
         "batch" => return small::cmd_batch(cfg, rest),
         "replay" => return small::cmd_replay(cfg, rest),
+        "shortcut" => return crate::shortcuts::cmd_shortcut(cfg, rest),
         "expect" => return crate::expect::cmd_expect(cfg, rest),
         "gif" => return small::cmd_gif(cfg, rest),
         "qa" => return qa::cmd_qa(cfg, &args::parse(rest)),

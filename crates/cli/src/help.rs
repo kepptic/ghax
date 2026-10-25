@@ -211,6 +211,18 @@ Batch / recording:
   replay <file>
   (chain, batch and replay take --report <path>: JSON of every step's ok/ms/actual)
 
+Shortcuts (named, parameterised plans in ~/.ghax/shortcuts, or $GHAX_SHORTCUTS_DIR):
+  shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
+                              (<file>: a recording or a steps array; ${k} in an
+                               args/opts string is a variable, $${k} a literal;
+                               an existing <name> is refused unless --force)
+  shortcut list [--json]
+  shortcut show <name>
+  shortcut rm <name>
+  shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]
+                              (runs like replay; a missing var exits 1 before any
+                               command is sent; --dry-run prints the resolved steps)
+
 Checks (poll until true or --timeout ms, default 5000; exit 1 when one fails):
   expect --url <regex> | --title <regex>
   expect --text <substring> [--selector <css>]

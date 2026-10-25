@@ -2816,6 +2816,128 @@ c('an empty click/fill/select/upload target names the cause and exits 2', async 
   }
 });
 
+// ─── shortcuts ──────────────────────────────────────────────────
+
+async function withShortcutsDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-smoke-shortcuts-'));
+  const dir = path.join(base, 'shortcuts'); // does not exist yet: save must create it 0700
+  const prev = process.env.GHAX_SHORTCUTS_DIR;
+  process.env.GHAX_SHORTCUTS_DIR = dir;
+  try {
+    await fn(dir);
+  } finally {
+    if (prev === undefined) delete process.env.GHAX_SHORTCUTS_DIR; else process.env.GHAX_SHORTCUTS_DIR = prev;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
+c('shortcut save/list/show/rm: modes, vars, at stripped, bad input refused', async () => {
+  await withShortcutsDir(async (dir) => {
+    const file = path.join(path.dirname(dir), 'rec.json');
+    fs.writeFileSync(file, JSON.stringify({ steps: [
+      { cmd: 'goto', args: ['${url}'], at: 1 },
+      { cmd: 'fill', args: ['#name', '${who}'], at: 2 },
+    ] }));
+    const save = await run(['shortcut', 'save', 'rename', file, '--var', 'who=grace', '--desc', 'rename the user']);
+    assert(/saved shortcut rename .*2 steps, vars: url, who/.test(save.stdout), `save output: ${save.stdout}`);
+    const f = path.join(dir, 'rename.json');
+    assert((fs.statSync(dir).mode & 0o777) === 0o700, `dir mode ${(fs.statSync(dir).mode & 0o777).toString(8)}`);
+    assert((fs.statSync(f).mode & 0o777) === 0o600, `file mode ${(fs.statSync(f).mode & 0o777).toString(8)}`);
+    const doc = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    assert(doc.version === 1 && doc.description === 'rename the user', `doc: ${JSON.stringify(doc)}`);
+    assert(doc.vars.who.default === 'grace' && doc.vars.url.required === true, `vars: ${JSON.stringify(doc.vars)}`);
+    assert(doc.steps.every((st: Record<string, unknown>) => !('at' in st)), 'at stripped');
+    const list = parseJson<Array<{ name: string; steps: number; vars: string[] }>>((await run(['shortcut', 'list', '--json'])).stdout);
+    assert(list.length === 1 && list[0].name === 'rename' && list[0].steps === 2, `list: ${JSON.stringify(list)}`);
+    assert(parseJson<{ name: string }>((await run(['shortcut', 'show', 'rename'])).stdout).name === 'rename', 'show');
+    // Refused: bad name, a NEVER_RECORD step, a missing file.
+    const badName = await run(['shortcut', 'save', '../x', file], { allowFailure: true });
+    assert(badName.exitCode === 1 && /invalid name/.test(badName.stderr), `bad name: ${badName.exitCode} ${badName.stderr}`);
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['x'] }, { cmd: 'auth.export' }]));
+    const never = await run(['shortcut', 'save', 'leaky', file], { allowFailure: true });
+    assert(never.exitCode === 1 && /refusing to save auth\.export/.test(never.stderr), `never: ${never.exitCode} ${never.stderr}`);
+    assert(!fs.existsSync(path.join(dir, 'leaky.json')), 'nothing written for a refused save');
+    // @e refs warn but save.
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'click', args: ['@e7'] }]));
+    const ref = await run(['shortcut', 'save', 'refs', file]);
+    assert(/warning: step 1 \(click\) uses @e7/.test(ref.stderr), `ref warning: ${ref.stderr}`);
+    assert(/removed shortcut rename/.test((await run(['shortcut', 'rm', 'rename'])).stdout), 'rm');
+    const gone = await run(['shortcut', 'rm', 'rename'], { allowFailure: true });
+    assert(gone.exitCode === 1 && /no shortcut named/.test(gone.stderr), `rm twice: ${gone.exitCode} ${gone.stderr}`);
+  });
+});
+
+c('shortcut save: refuses an existing name, --force replaces it and keeps the positionals', async () => {
+  await withShortcutsDir(async (dir) => {
+    const file = path.join(path.dirname(dir), 'rec.json');
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['a'] }]));
+    await run(['shortcut', 'save', 'dup', file]);
+    const f = path.join(dir, 'dup.json');
+    const before = fs.readFileSync(f, 'utf-8');
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['a'] }, { cmd: 'goto', args: ['b'] }]));
+    const refused = await run(['shortcut', 'save', 'dup', file], { allowFailure: true });
+    assert(refused.exitCode === 1 && /dup\.json already exists/.test(refused.stderr) && /--force/.test(refused.stderr), `refuse: ${refused.exitCode} ${refused.stderr}`);
+    assert(fs.readFileSync(f, 'utf-8') === before, 'a refused save leaves the file alone');
+    // --force first and last: neither position may eat <name> or <file>.
+    const forced = await run(['shortcut', 'save', '--force', 'dup', file]);
+    assert(/replaced shortcut dup \(was 1 steps\)/.test(forced.stdout), `force: ${forced.stdout}`);
+    assert(JSON.parse(fs.readFileSync(f, 'utf-8')).steps.length === 2, 'replaced');
+    const forcedLast = await run(['shortcut', 'save', 'dup', file, '--force']);
+    assert(/replaced shortcut dup \(was 2 steps\)/.test(forcedLast.stdout), `force last: ${forcedLast.stdout}`);
+    assert((fs.statSync(f).mode & 0o777) === 0o600, 'mode stays 0600');
+  });
+});
+
+c('shortcut run: substitutes vars, --var beats the default, $${k} stays literal', async () => {
+  await withShortcutsDir(async (dir) => {
+    await withExpectPage(async (url) => {
+      const file = path.join(path.dirname(dir), 'rec.json');
+      fs.writeFileSync(file, JSON.stringify([
+        { cmd: 'goto', args: ['${url}'] },
+        { cmd: 'fill', args: ['#name', '${who}'] },
+        { cmd: 'eval', args: ['document.title = "$${who}"; 1'] },
+      ]));
+      await run(['shortcut', 'save', 'rename', file, '--var', 'who=grace']);
+      const dry = parseJson<{ steps: Array<{ args: string[] }> }>((await run(['shortcut', 'run', 'rename', '--var', `url=${url}`, '--dry-run'])).stdout);
+      assert(dry.steps[0].args[0] === url && dry.steps[1].args[1] === 'grace' && dry.steps[2].args[0].includes('"${who}"'), `dry-run: ${JSON.stringify(dry)}`);
+      const r1 = await run(['shortcut', 'run', 'rename', '--var', `url=${url}`]);
+      assert(/✓ goto/.test(r1.stdout) && /✓ fill/.test(r1.stdout) && /✓ eval/.test(r1.stdout), `run output: ${r1.stdout}`);
+      assert(/grace/.test((await run(['eval', "document.getElementById('name').value"])).stdout), 'default var filled');
+      assert(/\$\{who\}/.test((await run(['eval', 'document.title'])).stdout), 'escaped placeholder stayed literal');
+      await run(['shortcut', 'run', 'rename', '--var', `url=${url}`, '--var', 'who=ada lovelace']);
+      assert(/ada lovelace/.test((await run(['eval', "document.getElementById('name').value"])).stdout), '--var overrides the default');
+      // --report is written like replay's.
+      const rep = path.join(path.dirname(dir), 'report.json');
+      await run(['shortcut', 'run', 'rename', '--var', `url=${url}`, '--report', rep]);
+      const report = JSON.parse(fs.readFileSync(rep, 'utf-8'));
+      assert(JSON.stringify(report).includes('"fill"'), `report: ${JSON.stringify(report).slice(0, 200)}`);
+    });
+  });
+});
+
+c('shortcut run: a missing var exits 1 before any RPC; a failing step exits 4', async () => {
+  await withShortcutsDir(async (dir) => {
+    const file = path.join(path.dirname(dir), 'rec.json');
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['${url}'] }, { cmd: 'click', args: ['#nope-${k}'] }]));
+    await run(['shortcut', 'save', 'fails', file, '--var', 'k=x']);
+    // A state file that points nowhere: any RPC attempt would exit 2 (not attached).
+    const prev = process.env.GHAX_STATE_FILE;
+    process.env.GHAX_STATE_FILE = path.join(path.dirname(dir), 'no-daemon.json');
+    try {
+      const missing = await run(['shortcut', 'run', 'fails'], { allowFailure: true });
+      assert(missing.exitCode === 1 && /missing value for url/.test(missing.stderr), `missing var: ${missing.exitCode} ${missing.stderr}`);
+      const typo = await run(['shortcut', 'run', 'fails', '--var', 'urll=x'], { allowFailure: true });
+      assert(typo.exitCode === 1 && /unknown --var urll/.test(typo.stderr), `typo: ${typo.exitCode} ${typo.stderr}`);
+    } finally {
+      if (prev === undefined) delete process.env.GHAX_STATE_FILE; else process.env.GHAX_STATE_FILE = prev;
+    }
+    await withExpectPage(async (url) => {
+      const bad = await run(['shortcut', 'run', 'fails', '--var', `url=${url}`], { allowFailure: true });
+      assert(bad.exitCode === 4 && /✓ goto/.test(bad.stdout) && /✗ click/.test(bad.stderr), `failing step: ${bad.exitCode} ${bad.stdout} ${bad.stderr}`);
+    });
+  });
+});
+
 c('detach shuts the daemon', async () => {
   const r = await run(['detach']);
   assert(/detached/.test(r.stdout), `detach output: ${r.stdout}`);

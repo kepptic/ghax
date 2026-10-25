@@ -332,6 +332,7 @@ as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
 - `ghax eval <js>` runs in page context and **awaits Promises and async IIFEs automatically** — `(async () => { await fetch(...); return 'ok' })()` resolves before ghax prints the result; no special await syntax or retry needed on the caller's side.
 - `ghax shell` is a REPL that keeps the CLI process alive between commands, ~1.8× faster for multi-turn agent sessions.
 - `ghax record start / stop` captures commands into a replayable JSON file; `ghax replay <file>` runs them back; `ghax gif <recording>` stitches frames via ffmpeg.
+- `ghax shortcut save <name> <file> [--var k=default]...` keeps a recording as a named flow in `~/.ghax/shortcuts/` (`GHAX_SHORTCUTS_DIR` overrides). Write `${k}` in a step's `args`/`opts` strings to make a variable (`$${k}` is a literal). `ghax shortcut run <name> --var k=v [--report p] [--dry-run]` substitutes and runs it exactly like `replay`; a variable with no value exits `1` before anything is sent. Also `shortcut list | show | rm`. Save refuses read-only commands (`text`, `auth.export`, ...) and warns about `@e<n>` refs, which will not survive the next page load: use selectors.
 
 ### Orchestrated verbs
 
