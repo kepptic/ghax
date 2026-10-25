@@ -13,7 +13,7 @@ export const NEVER_RECORD = new Set([
   // Read-only queries that don't change page state — replay would re-fire
   // the measurement, not the action, and waste time. Add every new
   // read-only handler here.
-  'find', 'is', 'perf', 'xpath', 'box',
+  'find', 'is', 'perf', 'xpath', 'box', 'findEl',
 ]);
 
 export interface RecordableStep {

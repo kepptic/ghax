@@ -71,7 +71,7 @@ export interface SnapshotResult {
   scoped?: boolean;
 }
 
-const INTERACTIVE_ROLES = new Set([
+export const INTERACTIVE_ROLES = new Set([
   'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox',
   'listbox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
   'option', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',
@@ -368,7 +368,8 @@ export async function snapshot(
           const ref = allocator.assign('c', `s${elem.selector}`, 'cursor-interactive', elem.text);
           const locator = target.locator(elem.selector);
           refs.set(ref, { locator, role: 'cursor-interactive', name: elem.text });
-          output.push(`@${ref} [${elem.reason}] "${elem.text}"`);
+          // JSON-quoted like the bridge renderer: innerText carries quotes and newlines.
+          output.push(`@${ref} [${elem.reason}] ${JSON.stringify(elem.text)}`);
         }
       }
     } catch (err: any) {

@@ -111,6 +111,23 @@ Snapshot & interact:
                                              #   auto: HTML5 drag-and-drop when the
                                              #   page starts one, else a plain mouse
                                              #   drag. synthetic: in-page DragEvents.
+  find-el "<description>" [--top 5] [--min-score 20] [--interactive-only] [--json]
+          [--rerank-cmd <cmd>] [--rerank-timeout <secs>]
+                                  # find an element by description ("save button",
+                                  #   "second delete link", "email field"). Scores
+                                  #   the snapshot text, no model call: name, role,
+                                  #   placeholder, state, ordinal, nearby text.
+                                  #   Prints `@ref  score  role "name"  (why)` and a
+                                  #   confidence line on stderr; refs are clickable
+                                  #   at once. No match above --min-score: exit 4.
+                                  #   --rerank-cmd: a command (split on spaces, no
+                                  #   shell) that gets {query,candidates} (top 20)
+                                  #   on stdin and prints back a reordered
+                                  #   [{ref,score}]. That is the only model hook.
+                                  #   --rerank-timeout: seconds the command gets
+                                  #   (default 60); then it is killed and find-el
+                                  #   exits 4. --top above 20 keeps the rest, in
+                                  #   scorer order, behind the reranked 20.
   fill <@ref|selector> <value> [--force]    # Monaco-aware: routes into
                                              #   monaco.editor.getEditors() when
                                              #   the target is inside a Monaco editor.

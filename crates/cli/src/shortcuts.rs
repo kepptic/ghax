@@ -50,6 +50,7 @@ const NEVER_SAVE: &[&str] = &[
     "perf",
     "xpath",
     "box",
+    "findEl",
 ];
 
 pub fn cmd_shortcut(cfg: &Config, rest: &[String]) -> Result<i32> {

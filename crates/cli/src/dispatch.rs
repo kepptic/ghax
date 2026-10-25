@@ -39,7 +39,7 @@ fn empty_target(verb: &str, parsed: &Parsed) -> Option<i32> {
 /// the flag becomes a plain true. `--name=true` / `--name=false` is the
 /// flag's own value and becomes that bool. Tokens after a `--` terminator
 /// are values and are never read as switches.
-fn parse_switches(rest: &[String], names: &[&str]) -> Parsed {
+pub(crate) fn parse_switches(rest: &[String], names: &[&str]) -> Parsed {
     let end = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
     let mut seen: Vec<&str> = Vec::new();
     let mut kept: Vec<String> = Vec::with_capacity(rest.len());
@@ -242,6 +242,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "replay" => return small::cmd_replay(cfg, rest),
         "shortcut" => return crate::shortcuts::cmd_shortcut(cfg, rest),
         "expect" => return crate::expect::cmd_expect(cfg, rest),
+        "find-el" => return crate::find_el::cmd_find_el(cfg, rest),
         "gif" => return small::cmd_gif(cfg, rest),
         "qa" => return qa::cmd_qa(cfg, &args::parse(rest)),
         "canary" => return canary::cmd_canary(cfg, &args::parse(rest)),
