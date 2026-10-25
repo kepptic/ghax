@@ -5,8 +5,19 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Fixed
+- **Bridge: tabs holding another extension's frame are now drivable.**
+  Chromium refuses `chrome.debugger.attach` on any tab with a
+  `chrome-extension://` frame from a different extension ("Cannot access a
+  chrome-extension:// URL of different extension"), which made authenticated
+  Autotask unusable with Hudu Assist installed. On that error the bridge now
+  removes those iframes from every frame of the tab, including closed shadow
+  roots, and retries the attach (up to 4 times, 75 ms apart and growing). It
+  only does this for a tab the asking agent owns, and logs the extension ids
+  it removed in the bridge service-worker console. Set
+  `chrome.storage.local` `ghaxStripExtensionFrames` to `false` to turn it off.
+  The extension now asks for the `scripting` permission: reload it in
+  `edge://extensions` / `chrome://extensions` after updating.
 
 ## [0.11.0] - 2026-10-20
 ### Added

@@ -60,7 +60,12 @@
  * kick a connect.
  */
 
-import { isTemporarilyUnattachable, isDetachedMidCommand } from './errors.js';
+import {
+  isTemporarilyUnattachable,
+  isDetachedMidCommand,
+  attachStrippingForeignFrames,
+  stripForeignExtensionFrames,
+} from './errors.js';
 
 const DEFAULT_PORT = 9223;
 /**
@@ -714,13 +719,37 @@ class BridgeConnection {
   // happens if the previous SW instance left the session live). Callers MUST
   // have claimed the tab first — the swallow above is only safe for a tab this
   // connection owns.
+  //
+  // A tab holding another extension's chrome-extension:// frame (Hudu Assist on
+  // Autotask) is refused outright; attachStrippingForeignFrames removes those
+  // frames and retries. See stripForeignFramesIn for the guards.
   async attachTo(tabId) {
-    try {
-      await chrome.debugger.attach({ tabId }, '1.3');
-    } catch (err) {
-      const msg = err?.message ?? String(err);
-      if (!/already attached/i.test(msg)) throw err;
-    }
+    await attachStrippingForeignFrames({
+      attach: async () => {
+        try {
+          await chrome.debugger.attach({ tabId }, '1.3');
+        } catch (err) {
+          const msg = err?.message ?? String(err);
+          if (!/already attached/i.test(msg)) throw err;
+        }
+      },
+      strip: () => this.stripForeignFramesIn(tabId),
+      // The strip/retry backoff spans ~750ms, during which this connection can
+      // lose the tab (--stop, a switch, demotion to parked, another agent).
+      stillWanted: () => this.controlledTabId === tabId
+        && tabOwners.get(tabId) === this
+        && this.bridgeRole === 'bound',
+      // A retry that landed after we lost the tab is undone, but never out from
+      // under another connection that now owns (and may have attached) it.
+      detach: async () => {
+        const owner = tabOwners.get(tabId);
+        if (owner && owner !== this) return;
+        await chrome.debugger.detach({ tabId }).catch(() => undefined);
+      },
+      log: (hosts) => console.warn(
+        `[ghax] removed ${hosts.length} foreign extension frame(s) from tab ${tabId} to allow chrome.debugger: ${[...new Set(hosts)].join(', ')}`,
+      ),
+    });
     this.attached = true;
     this.detachedReason = null;
     // Focus emulation lives and dies with the debugger session. The daemon
@@ -732,6 +761,31 @@ class BridgeConnection {
     // browser without the method still drives fine in the foreground.
     await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true })
       .catch(() => undefined);
+  }
+
+  /**
+   * Remove other extensions' chrome-extension:// iframes from every frame of
+   * `tabId` so chrome.debugger can attach. Resolves to the extension hosts
+   * removed ([] = nothing done, and the caller rethrows the original refusal).
+   *
+   * This edits a page the user is looking at, so it is fenced twice:
+   *   - only for a tab this connection owns (same rule as attachTo's
+   *     "already attached" swallow), never for a tab another agent drives;
+   *   - kill switch: chrome.storage.local `ghaxStripExtensionFrames === false`
+   *     turns it off and the refusal surfaces as before.
+   */
+  async stripForeignFramesIn(tabId) {
+    if (tabOwners.get(tabId) !== this) return [];
+    const { ghaxStripExtensionFrames } = await chrome.storage.local.get('ghaxStripExtensionFrames');
+    if (ghaxStripExtensionFrames === false) return [];
+    if (!chrome.scripting?.executeScript) return [];
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      injectImmediately: true,
+      func: stripForeignExtensionFrames,
+      args: [chrome.runtime.id],
+    });
+    return results.flatMap((r) => (Array.isArray(r?.result) ? r.result : []));
   }
 
   /**

@@ -3825,16 +3825,20 @@ function bridgeError(raw: unknown, ctx?: { tab?: string | null }): BridgeError {
   // frame inside an otherwise-normal page, vs the tab itself being a
   // browser-internal page ("Cannot access chrome:// and edge:// URLs"). They
   // need different advice: switching tabs fixes the second and does nothing
-  // for the first. Observed on the authenticated Autotask Onyx app, where
-  // every command is refused while example.com/Hudu/Datto on the same tab are
-  // fine — retrying cannot help, because the frame does not go away.
+  // for the first. Observed on the authenticated Autotask Onyx app (Hudu
+  // Assist's frame). The extension already removes such frames and retries
+  // before this reaches us (attachStrippingForeignFrames in
+  // extension/errors.js), so arriving here means that did not work.
   if (/chrome-extension:\/\/ URL of different extension/i.test(message)) {
     return new BridgeError(
       message,
       'BRIDGE_TAB_EXTENSION_FRAME',
       'another extension owns a frame in this page, and chrome.debugger refuses to attach to the whole tab. '
-      + 'This is not transient — retrying will not clear it. Disable the injecting extension for this site, '
-      + 'or drive the page over the CDP transport instead (`ghax attach --launch`, scratch profile).',
+      + 'The bridge already tried removing that frame and retrying: either it found none it could reach, '
+      + 'the extension kept putting it back, or frame stripping is off (chrome.storage.local '
+      + '`ghaxStripExtensionFrames: false`). Disable the injecting extension for this site, '
+      + 'or drive the page over the CDP transport instead (`ghax attach --launch`, scratch profile). '
+      + 'If you see this right after a navigation, reload the bridge extension: an old one has no frame stripping.',
     );
   }
   if (/cannot (?:access|attach to)|not attachable|chrome-extension:\/\/|chrome:\/\/|edge:\/\//i.test(message)) {

@@ -1,6 +1,6 @@
 ---
 name: ghax
-description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP directly, so ghax drives the user's REAL session through its own bridge extension (`ghax attach --extension`, full verb parity) and drives fresh user-approved scratch instances via `--launch`. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use gstack browse or playwright-cli for that.
+description: Drive Chrome or Edge via CDP — tabs, accessibility-tree snapshots with @ref clicks, MV3 extension internals (service workers, sidepanels, chrome.storage, hot-reload), real user gestures. Read this BEFORE any Edge/Chrome CDP or relaunch attempt — since Edge 150/Chrome 136 the real profile can't expose CDP directly, so ghax drives the user's REAL session through its own bridge extension (`ghax attach --extension`, full verb parity) and drives fresh user-approved scratch instances via `--launch`. Use when the user mentions ghax, asks to QA a site, verify a deploy, test an extension they wrote, or interact with a browser dashboard. Triggers — "attach to my browser", "test the extension", "hot-reload", "click in edge", "snapshot the dashboard", "run this in the service worker", "read chrome.storage", and after `pnpm build` finishes on any extension target. Do NOT use for headless one-off testing — use playwright-cli for that.
 ---
 
 # Skill: ghax
@@ -38,12 +38,12 @@ instances via `ghax attach --launch`.
 
 ## When NOT to reach for ghax
 
-- Quick one-off headless testing → use **gstack browse** (`$B`).
+- Quick one-off headless testing → `ghax attach --launch` (scratch profile) or **playwright-cli**.
 - Programmatic test suites, tracing, video → **playwright-cli**.
 - The task needs the user's real session but the **ghax bridge extension
   isn't installed** and can't be → fall back to the **Claude-in-Chrome
-  extension** (`mcp__claude-in-chrome__*`) or gstack browse with saved
-  `.auth/` cookies. (With the bridge installed, real-session work is a
+  extension** (`mcp__claude-in-chrome__*`) or playwright-cli with the saved
+  `.auth/` storageState cookies. (With the bridge installed, real-session work is a
   ghax job — see Lane 1 below.)
 
 ## Prerequisites
@@ -92,6 +92,7 @@ this.
 | Clean-room / CI / extension dev / you explicitly don't want the real session | **Lane 2** — `ghax attach --launch` (scratch profile). |
 | Bridge verb errors "not supported over the extension bridge yet" | That verb needs browser-context (viewport/responsive, qa, perf, gestures, the `ext` family). Switch to Lane 2 (`--launch`) for it. |
 | Bridge connected but `goto`/commands return "Cannot attach to this target" | The controlled tab landed on a privileged page (`chrome://`, `edge://`, cert-error/`chrome-error://` interstitial) — `chrome.debugger` can't attach there. `goto` self-recovers via `chrome.tabs.update`; if stuck, `ghax bridge control --active` after navigating the tab to a normal page. |
+| Bridge error `BRIDGE_TAB_EXTENSION_FRAME` / "Cannot access a chrome-extension:// URL of different extension" | Another extension (e.g. Hudu Assist on Autotask) put its own frame in the page. The bridge already removed those frames and retried before you saw this, so it is still failing: the extension re-injects, the frame is unreachable, stripping is off (`ghaxStripExtensionFrames: false` in the bridge's `chrome.storage.local`), or the loaded bridge extension predates the fix (reload it). Next: disable that extension for the site, or use Lane 2 (`ghax attach --launch`). Switching tabs does not help. |
 | A scratch (`--user-data-dir`) Edge is the only Edge running and the user says extensions/sign-ins "vanished" | Dock-icon hijack, **not** data loss — check `ps aux | grep -i "Microsoft Edge" \| grep user-data-dir`; make sure their normal (no-flags) Edge is also running. |
 | `attach --extension` exits with `BRIDGE_AMBIGUOUS` | More than one browser (or profile) has the bridge extension loaded and nothing said which to drive. Re-run with `--browser edge\|chrome\|<label>`, or keep the daemon and `ghax bridge use <id\|browser\|label>`. Never pick one at random: ask the user which browser if it isn't obvious. |
 | Several browsers must be driven from one daemon (compare two profiles, copy between them) | `ghax attach --extension --browser all`. `ghax tabs` then lists every bound browser (`#1..N`; a silent browser appears as a `note:` row), `ghax tab '#n'` in another browser switches the active browser and clears refs, and `console`/`network` cover the active tab only (`--tab '#n'\|<id>` for another, `--all` for every tab). `ghax bridge instances` marks the active one. |
@@ -451,7 +452,7 @@ Typed errors print `ghax: <message>` then `hint: <next step>` on stderr
   checks. Raised on both transports; the CDP path only pre-checks inherited
   `aria-disabled` and `inert` (Playwright handles the rest itself).
 
-## Design principles (inherited from gstack, adapted)
+## Design principles (inherited from gstack, which is no longer installed; adapted)
 
 1. **Real over sandbox.** Attach to what the dev already has.
 2. **Daemon over one-shot.** Persistent background server, ~60-200ms

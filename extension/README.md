@@ -202,6 +202,25 @@ Certificate interstitials can temporarily make a tab refuse
 extension retains the controlled tab and retries attach when it becomes
 attachable again (for example after the user proceeds or navigates back).
 
+## Pages with another extension's frame (the `"scripting"` permission)
+
+Chromium refuses `chrome.debugger.attach` on any tab that holds a
+`chrome-extension://` iframe from a different extension: "Cannot access a
+chrome-extension:// URL of different extension". Hudu Assist does this on
+authenticated Autotask. When an attach fails that way, the bridge injects a
+one-shot script (`chrome.scripting.executeScript`, all frames) that removes
+every iframe whose src is another extension's `chrome-extension://` URL,
+closed shadow roots included, then retries the attach up to 4 times with a
+short backoff. That is what the `"scripting"` permission is for.
+
+- It only runs for a tab the asking agent owns, never one another agent drives.
+- The removed extension ids are logged as a warning in the bridge's
+  service-worker console.
+- The other extension's widget is gone from that page until it reloads.
+- Turn it off: in the bridge's service-worker console run
+  `chrome.storage.local.set({ ghaxStripExtensionFrames: false })`. The
+  refusal then surfaces as `BRIDGE_TAB_EXTENSION_FRAME`, as before.
+
 ## Known limits
 
 - One controlled tab at a time; commands are not multiplexed across tabs.
