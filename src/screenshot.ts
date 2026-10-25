@@ -67,7 +67,10 @@ export function pngSize(png: Buffer): { width: number; height: number } {
 export interface ClipShot {
   png: Buffer;
   region: Region | null;
+  /** Measured: image.width / region width, so `x = x0 + px/scale` holds. */
   scale: number;
+  /** Measured image.height / region height; only set when it differs from `scale`. */
+  scaleY?: number;
   viewport: { width: number; height: number };
   image: { width: number; height: number };
 }
@@ -87,17 +90,19 @@ async function readViewport(send: CdpSend): Promise<ViewportInfo> {
 }
 
 /**
- * Capture `region` (viewport CSS px; null = the whole viewport) at `scale`
- * with `Page.captureScreenshot {clip}`. `scale` is image px per CSS px:
- * image.width == round(region width * scale).
+ * Capture `region` (viewport CSS px; null = the whole viewport) at about
+ * `scale` with `Page.captureScreenshot {clip}`. The browser rounds the image to
+ * whole pixels, so the returned `scale` is MEASURED (image.width / region
+ * width), not the requested one; a tiny region can be off by a pixel.
  *
  * Two things the clip does not do by itself:
  *  - `clip` is in document coordinates, so the scroll offset is added to keep
  *    `region` in the viewport frame the click/gesture verbs use.
  *  - Chrome multiplies the output by devicePixelRatio, so the clip scale is
- *    divided by it. If the measured width still misses the target (a browser
- *    that does not multiply), recapture once with the scale corrected by the
- *    measured ratio.
+ *    divided by it. If an image misses its rounded target by more than a pixel
+ *    (and 2%) in either dimension (a browser that does not multiply),
+ *    recapture once with the scale corrected by the measured ratio, and fail
+ *    if that misses too.
  */
 export async function captureClip(send: CdpSend, region: Region | null, scale: number): Promise<ClipShot> {
   const vp = await readViewport(send);
@@ -119,16 +124,43 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
     if (!shot.data) throw new Error('screenshot: the browser returned no image data');
     return Buffer.from(shot.data, 'base64');
   };
+  // Absolute pixels against the rounded target: a 7px region at 0.5 is 3 or 4
+  // px, which is rounding, not a miss that a recapture could fix.
+  const expectedW = Math.max(1, Math.round(width * scale));
+  const expectedH = Math.max(1, Math.round(height * scale));
+  const off = (img: { width: number; height: number }): number =>
+    Math.max(
+      Math.abs(img.width - expectedW) / Math.max(1, SCALE_TOLERANCE * width * scale),
+      Math.abs(img.height - expectedH) / Math.max(1, SCALE_TOLERANCE * height * scale),
+    );
   let clipScale = scale / vp.dpr;
   let png = await grab(clipScale);
   let image = pngSize(png);
-  const measured = image.width / width;
-  if (Math.abs(measured - scale) / scale > SCALE_TOLERANCE) {
-    clipScale *= scale / measured;
+  if (off(image) > 1) {
+    // Correct by the dimension that missed by more.
+    const ratio = Math.abs(image.width - expectedW) / expectedW >= Math.abs(image.height - expectedH) / expectedH
+      ? expectedW / image.width
+      : expectedH / image.height;
+    clipScale *= ratio;
     png = await grab(clipScale);
     image = pngSize(png);
+    if (off(image) > 1) {
+      throw new Error(
+        `screenshot: the browser returned ${image.width}x${image.height} for a ${width}x${height} region at scale ${scale} `
+        + `(expected about ${expectedW}x${expectedH}) even after one correction. Try a different --scale.`,
+      );
+    }
   }
-  return { png, region, scale, viewport: { width: vp.width, height: vp.height }, image };
+  const measuredX = image.width / width;
+  const measuredY = image.height / height;
+  return {
+    png,
+    region,
+    scale: measuredX,
+    ...(Math.abs(measuredY - measuredX) > 1e-9 ? { scaleY: measuredY } : {}),
+    viewport: { width: vp.width, height: vp.height },
+    image,
+  };
 }
 
 /**
@@ -206,10 +238,11 @@ export function registerScreenshot<C>(deps: ScreenshotDeps<C>): void {
         path: outPath,
         frame: 'viewport-css-px',
         scale: shot.scale,
+        ...(shot.scaleY === undefined ? {} : { scaleY: shot.scaleY }),
         region: shot.region,
         viewport: shot.viewport,
         image: shot.image,
-        note: 'click/gesture coords are viewport CSS px: x = x0 + px/scale',
+        note: 'click/gesture coords are viewport CSS px: x = x0 + px/scale, y = y0 + py/(scaleY ?? scale). scale is measured from the image, so it can differ slightly from --scale on a small region',
       };
     }
 

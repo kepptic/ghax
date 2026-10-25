@@ -2140,6 +2140,7 @@ const captureDeps = {
   register,
   bridgeOf: (ctx: Ctx) => (ctx.bridgeMode ? verbBridge(ctx) : null),
   activePage,
+  allPages,
   withCdpSession,
 };
 registerScreenshot({ ...captureDeps, resolveBridgeTarget, resolveRef });

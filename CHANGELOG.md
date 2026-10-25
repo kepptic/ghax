@@ -9,8 +9,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`screenshot --region x0,y0,x1,y1 [--scale 0.1..4]`.** Capture a rectangle
   of the viewport in CSS pixels. `--region` alone is a 2x zoom; `--scale`
   overrides it (0.1 to 1 without `--region`, shrinking the whole viewport).
-  `--json` reports `{path, scale, region, viewport, image, note}` so a
-  coordinate in the image maps back to a click as `x = x0 + px/scale`. Works on
+  `--json` reports `{path, scale, scaleY?, region, viewport, image, note}` so a
+  coordinate in the image maps back to a click as `x = x0 + px/scale`. `scale`
+  is measured from the image (`image.width / region width`), because the browser
+  rounds a small region to whole pixels (7x7 at 0.5 is 3x3, so `scale` is 0.43);
+  `scaleY` appears only when the height ratio differs. Works on
   both transports through one `Page.captureScreenshot {clip}` path that adds
   the scroll offset and divides the scale by devicePixelRatio. Refused with
   `--full-page` or an `@ref`, and for a region outside the viewport.
@@ -18,8 +21,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   outer size (not emulation, unlike `viewport`). Bridge: new `window-bounds`
   control action using `chrome.windows.update` (no new permission). CDP:
   `Browser.setWindowBounds`. Reports `{windowId, width, height, left, top,
-  state, transport, viewport}` with the page's `innerWidth`/`innerHeight` read
-  after the resize. A headless browser does not apply bounds. **Reload the
+  state, transport, viewport, note?}` with the page's `innerWidth`/`innerHeight`
+  read after the resize settles. A maximized, minimized or fullscreen window is
+  restored first, then sized. With `--window <id>`, `viewport` is read from a
+  tab in that window, or is `null` with a `note` (the bridge can only read the
+  controlled tab); it is never another window's numbers. A headless browser does not apply bounds. **Reload the
   bridge extension (`ghax bridge reload`) to get the new action**; an older
   one says so.
 ### Fixed

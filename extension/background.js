@@ -1138,15 +1138,32 @@ class BridgeConnection {
           windowId = (await chrome.tabs.get(this.controlledTabId)).windowId;
         }
         if (typeof msg.width === 'number' && typeof msg.height === 'number') {
-          // `normal` first: a maximized or fullscreen window ignores a size.
-          await chrome.windows.update(windowId, { state: 'normal', width: msg.width, height: msg.height });
+          // A maximized, minimized or fullscreen window ignores a size, and
+          // fullscreen/maximize transitions are async: restore on its own
+          // first and wait (bounded) for `normal`, then size it.
+          let win = await chrome.windows.get(windowId);
+          if (win.state !== 'normal') {
+            await chrome.windows.update(windowId, { state: 'normal' });
+            for (let i = 0; i < 20 && win.state !== 'normal'; i++) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              win = await chrome.windows.get(windowId);
+            }
+          }
+          await chrome.windows.update(windowId, { width: msg.width, height: msg.height });
         }
         const win = await chrome.windows.get(windowId);
+        // The viewport can only be read from the controlled tab, so say which
+        // window that is: the daemon returns viewport:null for any other.
+        let controlledWindowId = null;
+        if (this.controlledTabId !== null) {
+          controlledWindowId = (await chrome.tabs.get(this.controlledTabId).catch(() => null))?.windowId ?? null;
+        }
         this.send({
           type: 'control-ack', id, ok: true,
           result: {
             windowId: win.id, width: win.width ?? 0, height: win.height ?? 0,
             left: win.left ?? 0, top: win.top ?? 0, state: win.state ?? 'normal',
+            controlledWindowId,
           },
         });
         return;
