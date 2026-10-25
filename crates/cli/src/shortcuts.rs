@@ -6,7 +6,7 @@
 //! substitutes them and hands the steps to `small::run_steps`, the same loop
 //! `replay` uses. No daemon change: it is plain RPCs.
 //!
-//!   shortcut save <name> <file> [--var k=default]... [--desc <text>]
+//!   shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
 //!   shortcut list | show <name> | rm <name>
 //!   shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]
 //!
@@ -26,7 +26,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: ghax shortcut save <name> <file> [--var k=default]... [--desc <text>]
+const USAGE: &str = "Usage: ghax shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
        ghax shortcut list [--json] | show <name> | rm <name>
        ghax shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]";
 
@@ -57,9 +57,12 @@ pub fn cmd_shortcut(cfg: &Config, rest: &[String]) -> Result<i32> {
     // parser cannot swallow the token after them as their value.
     let json = rest.iter().any(|a| a == "--json");
     let dry_run = rest.iter().any(|a| a == "--dry-run");
+    // `--force` is a switch of `save`: strip it before parsing so it cannot
+    // swallow <name> or <file> as its value.
+    let force = rest.first().is_some_and(|s| s == "save") && rest.iter().any(|a| a == "--force");
     let rest: Vec<String> = rest
         .iter()
-        .filter(|a| *a != "--json" && *a != "--dry-run")
+        .filter(|a| *a != "--json" && *a != "--dry-run" && !(force && *a == "--force"))
         .cloned()
         .collect();
     let Some(sub) = rest.first() else {
@@ -68,7 +71,7 @@ pub fn cmd_shortcut(cfg: &Config, rest: &[String]) -> Result<i32> {
     };
     let parsed = args::parse(&rest[1..]);
     match sub.as_str() {
-        "save" => cmd_save(&parsed),
+        "save" => cmd_save(&parsed, force),
         "list" => cmd_list(json),
         "show" => cmd_show(&parsed),
         "rm" => cmd_rm(&parsed),
@@ -119,7 +122,7 @@ fn name_arg(parsed: &Parsed, what: &str) -> Result<String, i32> {
 }
 
 fn load(name: &str) -> Result<Value, String> {
-    let path = dir_or_err()?.join(format!("{name}.json"));
+    let path = shortcut_path(name)?;
     let body = std::fs::read_to_string(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("no shortcut named '{name}' (see 'ghax shortcut list')")
@@ -141,37 +144,94 @@ fn load(name: &str) -> Result<Value, String> {
     Ok(v)
 }
 
-/// Directory 0700 (only when we create it, so an existing dir given through
-/// the env var keeps its mode) and file 0600, written via a temp file.
+/// True when the directory is ghax's own `~/.ghax/shortcuts`. A dir given
+/// through `GHAX_SHORTCUTS_DIR` (a test hook) keeps whatever mode it has.
+fn dir_is_default() -> bool {
+    std::env::var_os("GHAX_SHORTCUTS_DIR").is_none()
+}
+
+fn shortcut_path(name: &str) -> Result<PathBuf, String> {
+    Ok(dir_or_err()?.join(format!("{name}.json")))
+}
+
+/// Directory 0700 (the default dir is forced to 0700 even if it already
+/// exists; an env-var dir keeps its mode unless we create it) and file 0600, written through an
+/// exclusively created temp file so a planted symlink is never followed.
 fn write_shortcut(name: &str, doc: &Value) -> Result<PathBuf, String> {
     let dir = dir_or_err()?;
     let fresh = !dir.exists();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     #[cfg(unix)]
-    if fresh {
+    if fresh || dir_is_default() {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot set mode 0700 on {}: {e}", dir.display()))?;
     }
     #[cfg(not(unix))]
     let _ = fresh;
     let path = dir.join(format!("{name}.json"));
-    let tmp = dir.join(format!(".{name}.json.tmp"));
     let body = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())? + "\n";
-    write_private(&tmp, &body).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    write_private_atomic(&dir, name, &path, &body)?;
     Ok(path)
 }
 
-fn write_private(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+/// Unique, unpredictable-enough sibling name: pid + clock + counter.
+fn tmp_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    dir.join(format!(
+        ".{name}.json.{}.{nanos:08x}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Create the temp file with O_EXCL (`create_new`, which also refuses to
+/// follow a symlink at that path), 0600, write it, then rename over `path`.
+/// The temp file is removed on any error after it was created.
+fn write_private_atomic(
+    dir: &std::path::Path,
+    name: &str,
+    path: &std::path::Path,
+    body: &str,
+) -> Result<(), String> {
     use std::io::Write as _;
+    let tmp = tmp_path(dir, name);
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(path)?.write_all(body.as_bytes())
+    // Not ours until create_new succeeds, so a failure here removes nothing.
+    let mut file = opts
+        .open(&tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    let mut finish = || -> Result<(), String> {
+        // The creation mode only applies to a new inode and is masked by the
+        // umask; fchmod the open handle so 0600 is guaranteed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("cannot set mode 0600 on {}: {e}", tmp.display()))?;
+        }
+        file.write_all(body.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    };
+    let res = finish();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 // ─── placeholders ────────────────────────────────────────────────────────────
@@ -478,7 +538,7 @@ fn clean_step(step: &Value) -> Result<Value, String> {
 
 // ─── verbs ───────────────────────────────────────────────────────────────────
 
-fn cmd_save(parsed: &Parsed) -> Result<i32> {
+fn cmd_save(parsed: &Parsed, force: bool) -> Result<i32> {
     let name = match name_arg(parsed, "save") {
         Ok(n) => n,
         Err(c) => return Ok(c),
@@ -576,8 +636,36 @@ fn cmd_save(parsed: &Parsed) -> Result<i32> {
     doc.insert("source".into(), json!(file));
     doc.insert("vars".into(), Value::Object(vars));
     doc.insert("steps".into(), Value::Array(steps.clone()));
+    let existing = match shortcut_path(&name) {
+        Ok(p) => p,
+        Err(m) => {
+            eprintln!("ghax shortcut: {m}");
+            return Ok(EXIT_USAGE);
+        }
+    };
+    // symlink_metadata: a dangling symlink at the path counts as existing.
+    // shortcut: check-then-rename, not atomic against a concurrent save of the
+    // same name; upgrade to hard_link no-clobber if two writers ever matter.
+    let replaced = if existing.symlink_metadata().is_ok() {
+        if !force {
+            eprintln!(
+                "ghax shortcut: {} already exists — pass --force to replace it",
+                existing.display()
+            );
+            return Ok(EXIT_USAGE);
+        }
+        Some(load(&name).ok().and_then(|v| v["steps"].as_array().map(Vec::len)))
+    } else {
+        None
+    };
     match write_shortcut(&name, &Value::Object(doc)) {
         Ok(path) => {
+            if let Some(was) = replaced {
+                match was {
+                    Some(n) => println!("replaced shortcut {name} (was {n} steps)"),
+                    None => println!("replaced shortcut {name} (previous file was unreadable)"),
+                }
+            }
             let var_list = scanned.iter().cloned().collect::<Vec<_>>().join(", ");
             println!(
                 "saved shortcut {name} → {} ({} steps{})",

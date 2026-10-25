@@ -321,12 +321,14 @@ ghax gif .ghax/recordings/my-session.json /tmp/run.gif
 
 # Saved shortcuts: a recording with ${var} placeholders, kept by name
 ghax shortcut save login recording.json --var user=ada --desc "sign in"
+ghax shortcut save login recording.json --force   # replace an existing name (refused otherwise)
 ghax shortcut list
 ghax shortcut run login --var user=grace --var pass=...   # same semantics as replay
 ghax shortcut run login --var user=grace --var pass=x --dry-run   # print the resolved steps
 ```
 
-Shortcuts live in `~/.ghax/shortcuts/<name>.json` (`GHAX_SHORTCUTS_DIR` overrides).
+Shortcuts live in `~/.ghax/shortcuts/<name>.json` (`GHAX_SHORTCUTS_DIR` overrides;
+files 0600, the default dir 0700). `save` on an existing name exits 1 unless `--force`.
 `${k}` is substituted only in `args`/`opts` strings (also inside `batch`),
 `$${k}` is a literal, and a missing var exits 1 before any command runs. Save
 refuses `text`/`html`/`auth.export` etc. and warns on `@e<n>` refs: save

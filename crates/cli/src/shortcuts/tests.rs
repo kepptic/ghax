@@ -157,11 +157,17 @@ fn never_save_commands_are_refused_even_in_a_batch() {
 
 #[test]
 fn never_save_matches_the_daemon_never_record_set() {
-    // src/record-filter.ts is the source of truth. Skip when the crate is
-    // built outside the repo tree.
+    // src/record-filter.ts is the source of truth. A missing file is a failure
+    // (a silent skip let the lists drift); only a vendored crate build, with
+    // GHAX_VENDORED=1, may skip.
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/record-filter.ts");
-    let Ok(src) = std::fs::read_to_string(p) else {
-        return;
+    let src = match std::fs::read_to_string(&p) {
+        Ok(src) => src,
+        Err(_) if std::env::var_os("GHAX_VENDORED").is_some_and(|v| v == "1") => return,
+        Err(e) => panic!(
+            "cannot read {}: {e} — run from the repo tree, or set GHAX_VENDORED=1 for a vendored build",
+            p.display()
+        ),
     };
     let block = src
         .split("NEVER_RECORD = new Set([")
@@ -212,4 +218,105 @@ fn var_flags_are_recovered_from_raw_argv() {
     );
     let bad = args::parse(&["--var".to_string(), "9x=1".to_string()]);
     assert!(var_pairs(&bad).is_err());
+}
+
+fn scratch_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "ghax-shortcuts-test-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[cfg(unix)]
+#[test]
+fn temp_file_never_follows_a_planted_symlink() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let dir = scratch_dir("symlink");
+    let victim = dir.join("victim.txt");
+    std::fs::write(&victim, "keep").unwrap();
+    let path = dir.join("a.json");
+    // Plant symlinks at the old fixed temp name and at a stale-looking one.
+    symlink(&victim, dir.join(".a.json.tmp")).unwrap();
+    write_private_atomic(&dir, "a", &path, "{}\n").unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    // The exclusive create itself refuses a path that already exists, even a
+    // symlink, and leaves its target alone.
+    let planted = dir.join("planted");
+    symlink(&victim, &planted).unwrap();
+    let r = std::fs::OpenOptions::new().write(true).create_new(true).open(&planted);
+    assert!(r.is_err());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    // No temp files are left behind besides the planted one.
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp") && n != ".a.json.tmp")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_over_a_0644_file_leaves_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir("mode");
+    let path = dir.join("a.json");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    write_private_atomic(&dir, "a", &path, "new").unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_rename_removes_the_temp_file() {
+    let dir = scratch_dir("cleanup");
+    // Renaming a file onto a non-empty directory fails.
+    let target = dir.join("a.json");
+    std::fs::create_dir_all(target.join("child")).unwrap();
+    assert!(write_private_atomic(&dir, "a", &target, "x").is_err());
+    let tmps = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(tmps, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_refuses_an_existing_name_until_forced() {
+    // The only test that sets GHAX_SHORTCUTS_DIR; it is process-global.
+    let base = scratch_dir("save");
+    let store = base.join("store");
+    std::env::set_var("GHAX_SHORTCUTS_DIR", &store);
+    let rec = base.join("rec.json");
+    let argv = |n: &str| -> Parsed {
+        args::parse(&[n.to_string(), rec.display().to_string()])
+    };
+
+    std::fs::write(&rec, r#"[{"cmd":"goto","args":["a"]}]"#).unwrap();
+    assert_eq!(cmd_save(&argv("one"), false).unwrap(), EXIT_OK);
+    let f = store.join("one.json");
+    let first = std::fs::read_to_string(&f).unwrap();
+
+    std::fs::write(&rec, r#"[{"cmd":"goto","args":["a"]},{"cmd":"goto","args":["b"]}]"#).unwrap();
+    assert_eq!(cmd_save(&argv("one"), false).unwrap(), EXIT_USAGE);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), first, "refused save must not touch the file");
+
+    assert_eq!(cmd_save(&argv("one"), true).unwrap(), EXIT_OK);
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+    assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+
+    std::env::remove_var("GHAX_SHORTCUTS_DIR");
+    let _ = std::fs::remove_dir_all(&base);
 }

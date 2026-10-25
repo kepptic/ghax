@@ -212,9 +212,10 @@ Batch / recording:
   (chain, batch and replay take --report <path>: JSON of every step's ok/ms/actual)
 
 Shortcuts (named, parameterised plans in ~/.ghax/shortcuts, or $GHAX_SHORTCUTS_DIR):
-  shortcut save <name> <file> [--var k=default]... [--desc <text>]
+  shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
                               (<file>: a recording or a steps array; ${k} in an
-                               args/opts string is a variable, $${k} a literal)
+                               args/opts string is a variable, $${k} a literal;
+                               an existing <name> is refused unless --force)
   shortcut list [--json]
   shortcut show <name>
   shortcut rm <name>

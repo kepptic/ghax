@@ -32,7 +32,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   On CDP these go to Playwright's `click({button, clickCount})`; over the
   bridge to raw mouse events.
 - **`ghax shortcut`: saved, parameterised flows.** `shortcut save <name> <file>
-  [--var k=default]... [--desc <text>]` stores a recording (or a steps array) as
+  [--var k=default]... [--desc <text>] [--force]` stores a recording (or a steps array) as
   `~/.ghax/shortcuts/<name>.json` (directory 0700, file 0600; override the
   directory with `GHAX_SHORTCUTS_DIR`). `${k}` in a string inside a step's
   `args` or `opts` becomes a variable, including inside a `batch`; `$${k}` is a
@@ -44,6 +44,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refuses the commands `record` never stores (`auth.export`, `text`, ...), and
   warns about `@e<n>` refs, which do not survive a navigation. Names match
   `^[a-z0-9][a-z0-9._-]{0,63}$`. CLI only; no daemon change.
+  `shortcut save` refuses a name that already exists (exit 1, names the file);
+  `--force` replaces it and prints `replaced shortcut <name> (was N steps)`.
+  The write goes through an exclusively created, uniquely named temp file
+  (a planted symlink is never followed), is forced to 0600, and the default
+  `~/.ghax/shortcuts` is forced to 0700 even if it already existed;
+  chmod errors are reported, not ignored.
 
 ### Changed
 - `gesture click`, `gesture dblclick` and the bridge `click` now share one

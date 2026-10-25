@@ -2867,6 +2867,27 @@ c('shortcut save/list/show/rm: modes, vars, at stripped, bad input refused', asy
   });
 });
 
+c('shortcut save: refuses an existing name, --force replaces it and keeps the positionals', async () => {
+  await withShortcutsDir(async (dir) => {
+    const file = path.join(path.dirname(dir), 'rec.json');
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['a'] }]));
+    await run(['shortcut', 'save', 'dup', file]);
+    const f = path.join(dir, 'dup.json');
+    const before = fs.readFileSync(f, 'utf-8');
+    fs.writeFileSync(file, JSON.stringify([{ cmd: 'goto', args: ['a'] }, { cmd: 'goto', args: ['b'] }]));
+    const refused = await run(['shortcut', 'save', 'dup', file], { allowFailure: true });
+    assert(refused.exitCode === 1 && /dup\.json already exists/.test(refused.stderr) && /--force/.test(refused.stderr), `refuse: ${refused.exitCode} ${refused.stderr}`);
+    assert(fs.readFileSync(f, 'utf-8') === before, 'a refused save leaves the file alone');
+    // --force first and last: neither position may eat <name> or <file>.
+    const forced = await run(['shortcut', 'save', '--force', 'dup', file]);
+    assert(/replaced shortcut dup \(was 1 steps\)/.test(forced.stdout), `force: ${forced.stdout}`);
+    assert(JSON.parse(fs.readFileSync(f, 'utf-8')).steps.length === 2, 'replaced');
+    const forcedLast = await run(['shortcut', 'save', 'dup', file, '--force']);
+    assert(/replaced shortcut dup \(was 2 steps\)/.test(forcedLast.stdout), `force last: ${forcedLast.stdout}`);
+    assert((fs.statSync(f).mode & 0o777) === 0o600, 'mode stays 0600');
+  });
+});
+
 c('shortcut run: substitutes vars, --var beats the default, $${k} stays literal', async () => {
   await withShortcutsDir(async (dir) => {
     await withExpectPage(async (url) => {
