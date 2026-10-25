@@ -27,8 +27,9 @@
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
  *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop"|
- *                             "list-tabs"|"new-window"|"new-tab"|"reload","tabId?":N,
- *                             "focus?":bool (control-tab only),"url?":"...","windowId?":N (new-tab)}
+ *                             "list-tabs"|"new-window"|"new-tab"|"reload"|"window-bounds","tabId?":N,
+ *                             "focus?":bool (control-tab only),"url?":"...","windowId?":N (new-tab,
+ *                             window-bounds),"width?":N,"height?":N (window-bounds)}
  *   -> daemon, control ack:  {"type":"control-ack","id":<n>,"ok":bool,"tabId?":N,"error?":"..."}
  *      "reload" is the odd one out: it acks BEFORE doing the thing (see
  *      handleControl), because chrome.runtime.reload() kills this worker
@@ -1124,6 +1125,29 @@ class BridgeConnection {
               index: typeof tab.index === 'number' ? tab.index : null,
             };
           }),
+        });
+        return;
+      }
+      if (msg.action === 'window-bounds') {
+        // Read or set the OS window's outer size. chrome.windows needs no
+        // manifest permission, and it is the only route: the bridge has no
+        // browser-level CDP session, so Browser.setWindowBounds is out of reach.
+        let windowId = msg.windowId;
+        if (typeof windowId !== 'number') {
+          if (this.controlledTabId === null) throw new Error('window-bounds: no controlled tab to find a window from; pass a window id');
+          windowId = (await chrome.tabs.get(this.controlledTabId)).windowId;
+        }
+        if (typeof msg.width === 'number' && typeof msg.height === 'number') {
+          // `normal` first: a maximized or fullscreen window ignores a size.
+          await chrome.windows.update(windowId, { state: 'normal', width: msg.width, height: msg.height });
+        }
+        const win = await chrome.windows.get(windowId);
+        this.send({
+          type: 'control-ack', id, ok: true,
+          result: {
+            windowId: win.id, width: win.width ?? 0, height: win.height ?? 0,
+            left: win.left ?? 0, top: win.top ?? 0, state: win.state ?? 'normal',
+          },
         });
         return;
       }

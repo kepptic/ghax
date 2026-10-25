@@ -5,8 +5,27 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`screenshot --region x0,y0,x1,y1 [--scale 0.1..4]`.** Capture a rectangle
+  of the viewport in CSS pixels. `--region` alone is a 2x zoom; `--scale`
+  overrides it (0.1 to 1 without `--region`, shrinking the whole viewport).
+  `--json` reports `{path, scale, region, viewport, image, note}` so a
+  coordinate in the image maps back to a click as `x = x0 + px/scale`. Works on
+  both transports through one `Page.captureScreenshot {clip}` path that adds
+  the scroll offset and divides the scale by devicePixelRatio. Refused with
+  `--full-page` or an `@ref`, and for a region outside the viewport.
+- **`window size [<WxH>] [--window <id>]`.** Read or set the browser window's
+  outer size (not emulation, unlike `viewport`). Bridge: new `window-bounds`
+  control action using `chrome.windows.update` (no new permission). CDP:
+  `Browser.setWindowBounds`. Reports `{windowId, width, height, left, top,
+  state, transport, viewport}` with the page's `innerWidth`/`innerHeight` read
+  after the resize. A headless browser does not apply bounds. **Reload the
+  bridge extension (`ghax bridge reload`) to get the new action**; an older
+  one says so.
+### Fixed
+- Gestures on CDP read the viewport from `innerWidth`/`innerHeight` instead of
+  `page.viewportSize()`, which is null (so a 1280x720 guess) after a real window
+  resize.
 
 ## [0.13.0] - 2026-10-25
 ### Added

@@ -83,6 +83,10 @@ export type ControlTarget =
   | { action: 'new-window'; url: string }
   | { action: 'new-tab'; url: string; windowId?: number }
   | { action: 'reload' }
+  // Read (no width/height) or set the OS window's outer size. `windowId`
+  // defaults to the window of the controlled tab. Never recorded as desired
+  // control: it changes the window, not which tab is driven.
+  | { action: 'window-bounds'; width?: number; height?: number; windowId?: number }
   | { action: 'stop' };
 
 export interface ControlAck {

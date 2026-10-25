@@ -86,7 +86,15 @@ Tab:
   text
   html [<selector>]
   screenshot [<@ref|selector>] [--path <p>] [--full-page] [--path-only]
+             [--region x0,y0,x1,y1] [--scale 0.1..4]
                                   # --path-only prints just the file path
+                                  # --region captures a viewport rectangle (CSS px)
+                                  #   at scale 2 (a zoom); --scale sets it, 0.1 to 4
+                                  #   (0.1 to 1 without --region). Not with
+                                  #   --full-page or an @ref. --json gives
+                                  #   {path, scale, region, viewport, image}:
+                                  #   x = x0 + px/scale maps image px back to
+                                  #   click/gesture coordinates
 
 Snapshot & interact:
   snapshot [-i] [-c] [-d <N>] [-s <sel>] [-C] [-a] [-o <path>]
@@ -147,6 +155,11 @@ Snapshot & interact:
                                   #   wait for the DOM to stop changing (SPA hydration).
                                   #   Also available as --stable on goto/text/snapshot.
   viewport <WxH>
+  window size [<WxH>] [--window <windowId>]
+                                  # read or set the browser WINDOW's outer size
+                                  #   (not emulation, unlike 'viewport'); no size =
+                                  #   read. Needs a headed browser to apply.
+                                  #   bridge: older extensions need 'bridge reload'
   responsive [prefix] [--fullPage]
   diff <url1> <url2>
   is <visible|hidden|enabled|disabled|checked|editable> <@ref|selector>

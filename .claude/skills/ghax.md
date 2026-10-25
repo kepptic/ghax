@@ -119,7 +119,7 @@ ghax bridge control [--active | --tab-id '#n'|<id> | --stop]   # (re)point mid-s
 ```
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
-snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot/box, gestures,
+snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot (+ `--region`/`--scale`)/box, `window size`, gestures,
 tabs/tab/new-window/new-tab, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
 yet": viewport/responsive, qa/perf/profile,
@@ -127,6 +127,10 @@ and the `ext` family (SW/panel/hot-reload).
 
 Bridge caveats:
 
+- **`window size` needs the new extension.** The bridge reaches the window
+  through a `window-bounds` control action (`chrome.windows.update`). A bridge
+  extension older than this errors with "run `ghax bridge reload`"; do that
+  once. A headless browser ignores the resize.
 - **Reload after updating ghax — no click needed.** The extension's
   service worker caches its own build-info at startup, so after a
   `git pull` + `npm run build` it keeps reporting stale (or no) provenance
@@ -237,6 +241,11 @@ ghax find-el "second delete link" --top 3 --json   # ordinals pick among tied ma
 ghax find-el "email field" --interactive-only      # exit 4 when nothing scores >= --min-score (20): fall back to snapshot -i
 ghax find-el "billing tab" --rerank-cmd "<cmd>" --rerank-timeout 30   # optional model step: <cmd> reads {query,candidates} on stdin, prints [{ref,score}]; killed after 30 s (default 60)
 ghax screenshot --path-only              # prints just the file path
+ghax screenshot --region 0,0,400,300     # viewport rectangle (CSS px) at 2x; --scale 0.1..4 overrides
+ghax screenshot --region 0,0,400,300 --json   # + scale/region/image: click at x = x0 + px/scale
+ghax screenshot --scale 0.5              # whole viewport, half size (cheaper to read)
+ghax window size                         # read the browser WINDOW's outer size + page inner size
+ghax window size 1440x900                # resize the window (headed only; not viewport emulation)
 ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
 ghax eval '<js>' --no-wait               # fire-and-forget on a 0 ms timer; errors -> ghax console
 ghax click @e3                           # click by ref (refuses covered/disabled targets)

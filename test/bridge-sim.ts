@@ -42,6 +42,8 @@ import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, list
 import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
 import { recordableStep } from '../src/record-filter';
 import { bridgeInputIO, dragPath, registerInput, type InputDeps, type InputOn, type InputSend, type Point } from '../src/input';
+import { captureClip, type CdpSend } from '../src/screenshot';
+import { bridgeWindowSize } from '../src/window';
 import { spawnSync } from 'child_process';
 import { RefRegistry, docIdOfMarker } from '../src/ref-registry';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, DEFAULT_MAX_REFS, grepSnapshotLines } from '../src/snapshot-budget';
@@ -85,6 +87,10 @@ class FakeExt {
   received: string[] = [];
   /** Control actions received, in order. */
   controls: string[] = [];
+  /** Full control messages received, for checks on a control action's fields. */
+  controlMsgs: Array<Record<string, unknown>> = [];
+  /** What the fake's one window looks like; `window-bounds` reads and updates it. */
+  windowBounds = { windowId: 7, width: 1200, height: 800, left: 10, top: 20, state: 'maximized' };
   /** Methods to never answer, to simulate a command in flight at drop time. */
   swallow = new Set<string>();
   /** Methods to answer with an error reply, keyed by the `phase` to report. */
@@ -207,6 +213,7 @@ class FakeExt {
     if (msg.type === 'pong' || msg.type === 'ping') return;
     if (msg.type === 'control') {
       this.controls.push(String(msg.action));
+      this.controlMsgs.push(msg);
       if (msg.action === this.ignoreControlAction) return; // "too old to understand this" — no ack at all
       if (msg.action === this.rejectControlAction) {
         this.send({ type: 'control-ack', id: msg.id, ok: false, error: `unknown control action: ${msg.action}` });
@@ -217,6 +224,14 @@ class FakeExt {
           type: 'control-ack', id: msg.id, ok: true, tabId: 42,
           result: [{ id: 42, title: `${this.instanceId} tab`, url: 'https://example.com', active: true }],
         });
+        return;
+      }
+      if (msg.action === 'window-bounds') {
+        // Like chrome.windows.update: a size forces state back to normal.
+        if (typeof msg.width === 'number' && typeof msg.height === 'number') {
+          this.windowBounds = { ...this.windowBounds, width: msg.width, height: msg.height, state: 'normal' };
+        }
+        this.send({ type: 'control-ack', id: msg.id, ok: true, result: { ...this.windowBounds } });
         return;
       }
       // Answer control immediately so the daemon's resume sequence completes.
@@ -2399,6 +2414,111 @@ async function main(): Promise<void> {
         'should log the flapping warning',
       );
     });
+  });
+
+  // ─── PR D: window size, screenshot --region/--scale ───────────
+  await test('window-bounds: a size is sent as width/height and the ack carries the new bounds', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-win-set');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { width: 880, height: 600 } } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+      const r = await bridgeWindowSize(bridge.pinned(), { width: 900, height: 700 });
+      const msg = ext.controlMsgs.find((m) => m.action === 'window-bounds');
+      assert(msg && msg.width === 900 && msg.height === 700 && !('windowId' in msg), `control message: ${JSON.stringify(msg)}`);
+      assert(r.width === 900 && r.height === 700 && r.state === 'normal', `bounds: ${JSON.stringify(r)}`);
+      assert(r.windowId === 7 && r.left === 10 && r.top === 20 && r.transport === 'bridge', `fields: ${JSON.stringify(r)}`);
+      assert(r.viewport.width === 880 && r.viewport.height === 600, `inner size read from the page: ${JSON.stringify(r.viewport)}`);
+    });
+  });
+
+  await test('window-bounds: no size reads without resizing; --window is passed through', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-win-read');
+      ext.replies.set('Runtime.evaluate', () => ({ result: { value: { width: 1180, height: 700 } } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+      const r = await bridgeWindowSize(bridge.pinned(), null, 7);
+      const msg = ext.controlMsgs.find((m) => m.action === 'window-bounds');
+      assert(msg && !('width' in msg) && !('height' in msg) && msg.windowId === 7, `read message: ${JSON.stringify(msg)}`);
+      assert(r.width === 1200 && r.state === 'maximized', `a read must not change the window: ${JSON.stringify(r)}`);
+    });
+  });
+
+  await test('window-bounds against an extension that predates it → "run ghax bridge reload"', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-win-old');
+      ext.rejectControlAction = 'window-bounds';
+      await ext.connect();
+      await until(() => bridge.connected, 'bound');
+      let caught: any;
+      try {
+        await bridgeWindowSize(bridge.pinned(), { width: 900, height: 700 });
+      } catch (err) {
+        caught = err;
+      }
+      assert(caught, 'must reject');
+      assert(/ghax bridge reload/.test(caught.message) && !/unknown control action/.test(caught.message), `message: ${caught?.message}`);
+      assert(!ext.sent.some((c) => c.method === 'Runtime.evaluate'), 'must not read the page after a refused resize');
+    });
+  });
+
+  // A PNG with only a signature and an IHDR: enough for the IHDR size read.
+  const fakePng = (width: number, height: number): string => {
+    const b = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+    b.writeUInt32BE(13, 8);
+    b.write('IHDR', 12, 'latin1');
+    b.writeUInt32BE(width, 16);
+    b.writeUInt32BE(height, 20);
+    return b.toString('base64');
+  };
+  const clipSender = (page: { width: number; height: number; dpr: number; pageX: number; pageY: number }, multipliesDpr: boolean) => {
+    const clips: Array<Record<string, number>> = [];
+    const send: CdpSend = async (method, params) => {
+      if (method === 'Runtime.evaluate') return { result: { value: page } };
+      if (method === 'Page.captureScreenshot') {
+        const clip = (params as { clip: Record<string, number> }).clip;
+        clips.push(clip);
+        const k = clip.scale * (multipliesDpr ? page.dpr : 1);
+        return { data: fakePng(Math.round(clip.width * k), Math.round(clip.height * k)) };
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+    return { send, clips };
+  };
+
+  await test('screenshot clip: scroll offset added, scale divided by devicePixelRatio, image is region*scale', async () => {
+    const { send, clips } = clipSender({ width: 1280, height: 720, dpr: 2, pageX: 0, pageY: 900 }, true);
+    const shot = await captureClip(send, { x0: 10, y0: 20, x1: 210, y1: 120 }, 2);
+    assert(clips.length === 1, `one capture expected, got ${clips.length}`);
+    const c = clips[0];
+    assert(c.x === 10 && c.y === 920 && c.width === 200 && c.height === 100 && c.scale === 1, `clip params: ${JSON.stringify(c)}`);
+    assert(shot.image.width === 400 && shot.image.height === 200, `image: ${JSON.stringify(shot.image)}`);
+    assert(shot.scale === 2 && shot.viewport.width === 1280, `result: ${JSON.stringify(shot)}`);
+  });
+
+  await test('screenshot clip: a browser that ignores devicePixelRatio gets one corrected recapture', async () => {
+    const { send, clips } = clipSender({ width: 1280, height: 720, dpr: 2, pageX: 0, pageY: 0 }, false);
+    const shot = await captureClip(send, { x0: 0, y0: 0, x1: 200, y1: 100 }, 2);
+    assert(clips.length === 2, `expected capture + one retry, got ${clips.length}`);
+    assert(clips[1].scale === 2, `the retry restores the requested scale: ${JSON.stringify(clips)}`);
+    assert(shot.image.width === 400, `image width ${shot.image.width}`);
+  });
+
+  await test('screenshot clip: no region captures the viewport; a region outside it is a usage error', async () => {
+    const a = clipSender({ width: 800, height: 600, dpr: 1, pageX: 0, pageY: 0 }, true);
+    const shot = await captureClip(a.send, null, 0.5);
+    assert(a.clips[0].width === 800 && a.clips[0].height === 600 && shot.region === null, `clip: ${JSON.stringify(a.clips[0])}`);
+    assert(shot.image.width === 400 && shot.image.height === 300, `image: ${JSON.stringify(shot.image)}`);
+    let caught: any;
+    try {
+      await captureClip(a.send, { x0: 0, y0: 0, x1: 900, y1: 100 }, 1);
+    } catch (err) {
+      caught = err;
+    }
+    assert(caught?.exitCode === 2 && /outside the 800x600 viewport/.test(caught.message), `error: ${caught?.message}`);
+    assert(a.clips.length === 1, 'no capture is attempted for an out-of-viewport region');
   });
 
   console.log();

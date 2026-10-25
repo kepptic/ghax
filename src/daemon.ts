@@ -84,6 +84,8 @@ import {
 } from './bridge';
 import { recordableStep } from './record-filter';
 import { INPUT_RETRY_SAFE, INPUT_VERBS, bridgeInputIO, bridgeTargetPoint, clickAt, parseClickOpts, registerInput, type InputOn, type InputSend } from './input';
+import { captureBridgeScreenshot, registerScreenshot } from './screenshot';
+import { WINDOW_VERBS, registerWindow } from './window';
 import { AuthExportError, exportAuth, LOCAL_STORAGE_EXPR, originOf, parseLocalStorage, type AuthSource } from './auth-export';
 import { CookieDeleteError, deleteCookie, fromCdpCookie, listCookies, type Cookie, type CookieBackend } from './cookies';
 import * as fs from 'fs';
@@ -220,6 +222,7 @@ const BRIDGE_SUPPORTED_COMMANDS = new Set([
   'gesture.scroll', 'gesture.key',
   ...INPUT_VERBS,
   ...FIND_EL_VERBS,
+  ...WINDOW_VERBS,
 ]);
 
 /**
@@ -2133,57 +2136,14 @@ register('html', async (ctx, args) => {
   return await page.content();
 });
 
-register('screenshot', async (ctx, args, opts) => {
-  const outPath = (opts.path as string) || `/tmp/ghax-shot-${Date.now()}.png`;
-  const target = args[0] ? String(args[0]) : null;
-  // Accept both `--fullPage` (v0.1 camelCase) and `--full-page` (kebab,
-  // matches every other CLI flag). Kebab is the preferred form going
-  // forward; camelCase stays for back-compat with live scripts.
-  const fullPage = Boolean(opts.fullPage || opts['full-page']);
-  if (ctx.bridgeMode) {
-    const ref = target ? await resolveBridgeTarget(ctx, target) : null;
-    await captureBridgeScreenshot(verbBridge(ctx), outPath, fullPage, ref, target ?? 'element');
-    return { path: outPath };
-  }
-  const page = await activePage(ctx);
-  if (target) {
-    await (await resolveRef(ctx, target, page)).screenshot({ path: outPath });
-  } else {
-    await page.screenshot({ path: outPath, fullPage });
-  }
-  return { path: outPath };
-});
-
-async function captureBridgeScreenshot(
-  bridge: BridgeConn,
-  outPath: string,
-  fullPage: boolean,
-  ref: BridgeRef | null = null,
-  label = 'element',
-): Promise<void> {
-  await bridge.send('Page.enable');
-  let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
-  if (ref) {
-    clip = { ...(await bridgeBox(bridge, ref, label)), scale: 1 };
-  } else if (fullPage) {
-    const metrics = await bridge.send('Page.getLayoutMetrics') as {
-      cssContentSize?: { x?: number; y?: number; width?: number; height?: number };
-      contentSize?: { x?: number; y?: number; width?: number; height?: number };
-    };
-    const size = metrics.cssContentSize ?? metrics.contentSize;
-    if (size?.width && size?.height) {
-      clip = { x: size.x ?? 0, y: size.y ?? 0, width: size.width, height: size.height, scale: 1 };
-    }
-  }
-  const shot = await bridge.send('Page.captureScreenshot', {
-    format: 'png',
-    fromSurface: true,
-    captureBeyondViewport: Boolean(fullPage || ref),
-    ...(clip ? { clip } : {}),
-  }) as { data?: string };
-  if (!shot.data) throw new Error('screenshot: bridge returned no image data');
-  fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
-}
+const captureDeps = {
+  register,
+  bridgeOf: (ctx: Ctx) => (ctx.bridgeMode ? verbBridge(ctx) : null),
+  activePage,
+  withCdpSession,
+};
+registerScreenshot({ ...captureDeps, resolveBridgeTarget, resolveRef });
+registerWindow(captureDeps);
 
 // ─── xpath / box — utility queries ─────────────────────────────
 //
@@ -4338,6 +4298,11 @@ async function gestureViewport(ctx: Ctx): Promise<{ width: number; height: numbe
     return { width: v?.width || 1280, height: v?.height || 720 };
   }
   const page = await activePage(ctx);
+  // innerWidth/innerHeight, not viewportSize(): that is null unless emulation
+  // was set, so it ignores a real window resize (`window size`).
+  const v = await page.evaluate('({ width: innerWidth, height: innerHeight })').catch(() => null) as
+    { width?: number; height?: number } | null;
+  if (v?.width && v?.height) return { width: v.width, height: v.height };
   return page.viewportSize() ?? { width: 1280, height: 720 };
 }
 

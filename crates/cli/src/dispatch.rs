@@ -328,6 +328,18 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, "newTab", parsed)
         }
 
+        "window" => {
+            let mut parsed = args::parse(rest);
+            // `window size [<WxH>] [--window <id>]` is the only subcommand so
+            // far; the RPC is `window.size` and takes the size alone.
+            if parsed.positional.first().map(String::as_str) != Some("size") {
+                eprintln!("Usage: ghax window size [<WxH>] [--window <windowId>]");
+                return Ok(EXIT_USAGE);
+            }
+            parsed.positional.remove(0);
+            simple(cfg, "window.size", parsed)
+        }
+
         "fill" => {
             let parsed = args::parse(rest);
             if let Some(code) = empty_target("fill", &parsed) {
