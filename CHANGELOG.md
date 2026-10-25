@@ -31,6 +31,19 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--count 3` selects a paragraph; `--button right` fires `contextmenu`.
   On CDP these go to Playwright's `click({button, clickCount})`; over the
   bridge to raw mouse events.
+- **`ghax shortcut`: saved, parameterised flows.** `shortcut save <name> <file>
+  [--var k=default]... [--desc <text>]` stores a recording (or a steps array) as
+  `~/.ghax/shortcuts/<name>.json` (directory 0700, file 0600; override the
+  directory with `GHAX_SHORTCUTS_DIR`). `${k}` in a string inside a step's
+  `args` or `opts` becomes a variable, including inside a `batch`; `$${k}` is a
+  literal `${k}`; `cmd` is never substituted. `shortcut list | show | rm`, and
+  `shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]`, which runs
+  through the same loop as `replay` (first failure stops it, a failed `expect`
+  exits 1, `--report` works). A variable with no value, or an unknown `--var`,
+  exits 1 before any command is sent. Save drops a recording's `at` stamps,
+  refuses the commands `record` never stores (`auth.export`, `text`, ...), and
+  warns about `@e<n>` refs, which do not survive a navigation. Names match
+  `^[a-z0-9][a-z0-9._-]{0,63}$`. CLI only; no daemon change.
 
 ### Changed
 - `gesture click`, `gesture dblclick` and the bridge `click` now share one

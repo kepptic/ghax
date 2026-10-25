@@ -18,6 +18,7 @@ mod review;
 mod rpc;
 mod shell;
 mod ship;
+mod shortcuts;
 mod small;
 mod sse;
 mod state;

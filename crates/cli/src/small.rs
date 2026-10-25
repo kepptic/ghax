@@ -575,23 +575,10 @@ pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
             return Ok(EXIT_USAGE);
         }
     };
-    let steps: Vec<Value> = match serde_json::from_str::<Value>(&body) {
-        Ok(Value::Object(ref obj)) if obj.contains_key("steps") => {
-            match obj.get("steps").cloned().unwrap_or(Value::Array(vec![])) {
-                Value::Array(arr) => arr,
-                _ => {
-                    eprintln!("ghax replay: `steps` field is not an array");
-                    return Ok(EXIT_USAGE);
-                }
-            }
-        }
-        Ok(Value::Array(arr)) => arr,
-        Ok(_) => {
-            eprintln!("ghax replay: invalid recording — expected array or {{steps: [...]}}");
-            return Ok(EXIT_USAGE);
-        }
-        Err(e) => {
-            eprintln!("ghax replay: invalid recording — {e}");
+    let steps = match parse_steps(&body) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("ghax replay: {msg}");
             return Ok(EXIT_USAGE);
         }
     };
@@ -604,17 +591,41 @@ pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
         }
     };
 
-    let mut report = match Report::from_flags(&parsed) {
+    let report = match Report::from_flags(&parsed) {
         Ok(r) => r,
         Err(c) => return Ok(c),
     };
-    for step in &steps {
+    Ok(run_steps(port, &steps, report))
+}
+
+/// The steps of a recording: `{steps: [...]}` or a bare array. Shared by
+/// `replay` and `shortcut save`; the Err text is what follows `ghax <verb>: `.
+pub fn parse_steps(body: &str) -> std::result::Result<Vec<Value>, String> {
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::Object(ref obj)) if obj.contains_key("steps") => {
+            match obj.get("steps").cloned().unwrap_or(Value::Array(vec![])) {
+                Value::Array(arr) => Ok(arr),
+                _ => Err("`steps` field is not an array".to_string()),
+            }
+        }
+        Ok(Value::Array(arr)) => Ok(arr),
+        Ok(_) => Err("invalid recording — expected array or {steps: [...]}".to_string()),
+        Err(e) => Err(format!("invalid recording — {e}")),
+    }
+}
+
+/// Run `steps` one RPC at a time, printing `✓`/`✗` per step. Stops at the
+/// first failure (`EXIT_CDP_ERROR`, or the failed expect's own code) and
+/// writes the report either way. Shared by `replay` and `shortcut run` so
+/// both have identical semantics.
+pub fn run_steps(port: u16, steps: &[Value], mut report: Report) -> i32 {
+    for step in steps {
         let cmd = match step.get("cmd").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => {
                 eprintln!("✗ <missing cmd> — step missing cmd field");
                 report.write(EXIT_CDP_ERROR);
-                return Ok(EXIT_CDP_ERROR);
+                return EXIT_CDP_ERROR;
             }
         };
         let args = step.get("args").cloned().unwrap_or(Value::Array(vec![]));
@@ -636,7 +647,7 @@ pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
                     eprintln!("✗ {cmd} — {}", f.message);
                     report.push(&cmd, false, t.elapsed().as_millis(), Some(&data), Some(&f.message));
                     report.write(f.exit());
-                    return Ok(f.exit());
+                    return f.exit();
                 }
                 println!("✓ {cmd}{args_display}");
                 report.push(&cmd, true, t.elapsed().as_millis(), Some(&data), None);
@@ -650,12 +661,12 @@ pub fn cmd_replay(cfg: &Config, rest: &[String]) -> Result<i32> {
                 eprintln!("✗ {cmd} — {msg}");
                 report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
                 report.write(EXIT_CDP_ERROR);
-                return Ok(EXIT_CDP_ERROR);
+                return EXIT_CDP_ERROR;
             }
         }
     }
     report.write(EXIT_OK);
-    Ok(EXIT_OK)
+    EXIT_OK
 }
 
 // ─── gif ─────────────────────────────────────────────────────────────────────
