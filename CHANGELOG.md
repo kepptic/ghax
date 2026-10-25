@@ -5,6 +5,10 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [0.14.0] - 2026-10-25
 ### Added
 - **`screenshot --region x0,y0,x1,y1 [--scale 0.1..4]`.** Capture a rectangle
   of the viewport in CSS pixels. `--region` alone is a 2x zoom; `--scale`
@@ -1770,7 +1774,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/kepptic/ghax/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/kepptic/ghax/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/kepptic/ghax/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/kepptic/ghax/compare/v0.11.0...v0.11.1
