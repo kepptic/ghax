@@ -92,7 +92,7 @@ jobs:
       # this job starts (another push landed); always release off main's
       # current tip, not a possibly-stale event payload.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -107,7 +107,7 @@ jobs:
       # tree, and an untracked checkout inside the working tree would
       # otherwise look exactly like one).
       - name: Checkout ghax release tools
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: kepptic/ghax
           # github.workflow_sha is the commit SHA of *this* workflow file as

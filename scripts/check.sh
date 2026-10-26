@@ -24,8 +24,8 @@ echo "── ghax check ──"
 
 # 1. TypeScript — matches CI `typecheck` job
 if [ -f package.json ]; then
-  echo "▸ bunx tsc --noEmit"
-  bunx tsc --noEmit
+  echo "▸ npm run typecheck"
+  npm run typecheck
 fi
 
 # 2. Rust — matches CI `build` job's compile step. `cargo check` is much
@@ -36,7 +36,7 @@ if [ -f Cargo.toml ]; then
 fi
 
 # 3. Daemon bundle still builds — catches bad imports in src/
-echo "▸ bun run build (daemon bundle)"
-bun run build >/dev/null
+echo "▸ npm run build (daemon bundle)"
+npm run build >/dev/null
 
 echo "✓ all checks passed"

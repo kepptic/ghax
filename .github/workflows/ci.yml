@@ -14,14 +14,15 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          bun-version: 1.3.11
+          node-version: '24'
+          cache: npm
       - name: Install deps
-        run: bun install --frozen-lockfile
+        run: npm ci
       - name: Typecheck
-        run: bunx tsc --noEmit
+        run: npm run typecheck
 
   build:
     needs: typecheck
@@ -29,18 +30,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['24', '26']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          bun-version: 1.3.11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -49,9 +49,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install deps
-        run: bun install --frozen-lockfile
+        run: npm ci
       - name: Build daemon bundle
-        run: bun run build
+        run: npm run build
       - name: Build Rust CLI
         run: cargo build --release --manifest-path crates/cli/Cargo.toml
       - name: Test Rust CLI
@@ -79,8 +79,11 @@ jobs:
           set -eo pipefail
           ./dist/ghax.exe --help | head -5
           test -f dist/ghax-daemon.mjs
+      # One artifact set per OS: the Node matrix only varies the daemon
+      # build host, and identical names would collide.
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        if: matrix.node == '24'
+        uses: actions/upload-artifact@v6
         with:
           name: ghax-${{ matrix.os }}
           path: |

@@ -1,12 +1,12 @@
 //! `ghax ship` — stage, commit, push, and open a PR in one step.
 //!
 //! Port of `cmdShip()` in `src/cli.ts`. No daemon needed; orchestrates
-//! `git`, `bun run typecheck`, `bun run build`, and `gh pr create`.
+//! `git`, `npm run typecheck`, `npm run build`, and `gh pr create`.
 //!
 //! Args:
 //!   --message <msg>  commit message (implies stage-all + commit if tree is dirty)
-//!   --no-check       skip `bun run typecheck`
-//!   --no-build       skip `bun run build`
+//!   --no-check       skip `npm run typecheck`
+//!   --no-build       skip `npm run build`
 //!   --no-pr          skip `gh pr create`
 //!   --dry-run        print the plan and exit before any mutations
 
@@ -49,6 +49,9 @@ fn sh(
         }
     }
 }
+
+/// On Windows npm is a `.cmd` shim, which `Command` only finds by its full name.
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
 /// Run a command, inheriting stdout/stderr so the user sees live output.
 /// Returns true on success.
@@ -110,11 +113,11 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
             step += 1;
         }
         if !skip_check {
-            println!("  {step}. bun run typecheck");
+            println!("  {step}. npm run typecheck");
             step += 1;
         }
         if !skip_build {
-            println!("  {step}. bun run build");
+            println!("  {step}. npm run build");
             step += 1;
         }
         println!("  {step}. git push -u origin <branch>");
@@ -129,7 +132,7 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
     // Typecheck (streaming — user sees compiler output in real time).
     if !skip_check {
         println!("→ typecheck");
-        if !sh_stream("bun", &["run", "typecheck"], &repo_root) {
+        if !sh_stream(NPM, &["run", "typecheck"], &repo_root) {
             return Ok(EXIT_USAGE);
         }
     }
@@ -137,7 +140,7 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
     // Build (streaming).
     if !skip_build {
         println!("→ build");
-        if !sh_stream("bun", &["run", "build"], &repo_root) {
+        if !sh_stream(NPM, &["run", "build"], &repo_root) {
             return Ok(EXIT_USAGE);
         }
     }

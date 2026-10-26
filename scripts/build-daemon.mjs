@@ -14,8 +14,7 @@
 //      MV3 service workers have no filesystem or child_process access) can
 //      report matching values in its `hello` handshake.
 //
-// Usage: node scripts/build-daemon.mjs   (what `npm run build` / `bun run
-// build` now invoke)
+// Usage: node scripts/build-daemon.mjs   (what `npm run build` invokes)
 
 import { build } from 'esbuild';
 import { execFileSync } from 'node:child_process';

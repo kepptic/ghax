@@ -6,10 +6,10 @@
  * test/smoke.ts against it. Per-browser results are tabulated at the end.
  *
  * Run:
- *   bun run test/cross-browser.ts
+ *   npx tsx test/cross-browser.ts
  *
  * Notes:
- *   - Requires `bun run build` beforehand so dist/ghax exists.
+ *   - Requires `npm run build:all` beforehand so dist/ghax exists.
  *   - Uses GHAX_STATE_FILE + an explicit --port to keep each daemon in
  *     its own lane. That way we don't collide with whatever the user has
  *     running on :9222.
@@ -47,7 +47,7 @@ const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax'
 const smoke = path.join(root, 'test', 'smoke.ts');
 
 if (!fs.existsSync(ghax)) {
-  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
+  console.error(`ghax binary missing at ${ghax} — run 'npm run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 
