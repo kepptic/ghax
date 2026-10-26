@@ -1,0 +1,48 @@
+# cargo-deny policy. CI runs `cargo deny check advisories bans licenses sources`.
+# Run it locally with the same command (brew install cargo-deny).
+
+[graph]
+# Check the dependency graph for every target, so the Windows and Linux
+# crates are covered even when this runs on a Mac.
+all-features = true
+
+[advisories]
+# Vulnerabilities and unmaintained crates both fail the build.
+unmaintained = "all"
+yanked = "deny"
+# Every ignore needs an id and a reason. None today.
+ignore = []
+
+[licenses]
+# ghax is MIT. This is what the current Cargo.lock needs, nothing more.
+# Dual-licensed crates (MIT OR Apache-2.0) pass on either side.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    # webpki-roots / webpki-root-certs (the bundled Mozilla CA list).
+    "CDLA-Permissive-2.0",
+    # icu_* / zerovec / tinystr (idna -> url -> reqwest).
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    { crate = "openssl", reason = "ghax uses rustls with the ring provider, so there is no system OpenSSL dependency." },
+    { crate = "openssl-sys", reason = "ghax uses rustls with the ring provider, so there is no system OpenSSL dependency." },
+    { crate = "aws-lc-rs", reason = "rustls runs on ring here. aws-lc needs a C/CMake toolchain and breaks the cross builds." },
+    { crate = "aws-lc-sys", reason = "rustls runs on ring here. aws-lc needs a C/CMake toolchain and breaks the cross builds." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
