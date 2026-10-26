@@ -14,12 +14,12 @@
 
 use crate::args;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_NOT_ATTACHED, EXIT_OK, EXIT_USAGE};
-use crate::expect::{failed_expect, failed_expect_entry, Report};
+use crate::expect::{Report, failed_expect, failed_expect_entry};
 use crate::output;
 use crate::rpc::{self, RpcError};
-use crate::state::{self, read_state, Config};
+use crate::state::{self, Config, read_state};
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Read as _;
 
@@ -65,7 +65,10 @@ pub fn cmd_status(cfg: &Config, rest: &[String]) -> Result<i32> {
                 m.insert(k.clone(), v.clone());
             }
         }
-        println!("{}", serde_json::to_string_pretty(&merged).unwrap_or_else(|_| "{}".into()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&merged).unwrap_or_else(|_| "{}".into())
+        );
     } else {
         let uptime_ms = data.get("uptimeMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let up_min = (uptime_ms / 60000.0).floor() as u64;
@@ -75,23 +78,52 @@ pub fn cmd_status(cfg: &Config, rest: &[String]) -> Result<i32> {
             .split("/devtools/")
             .next()
             .unwrap_or(&daemon_state.browser_url);
-        println!("attached    {} ({})", daemon_state.browser_kind, browser_url_short);
-        println!("daemon      pid {}, port {}, up {}m", daemon_state.pid, daemon_state.port, up_min);
-        println!("tabs        {}", data.get("tabCount").and_then(|v| v.as_u64()).unwrap_or(0));
+        println!(
+            "attached    {} ({})",
+            daemon_state.browser_kind, browser_url_short
+        );
+        println!(
+            "daemon      pid {}, port {}, up {}m",
+            daemon_state.pid, daemon_state.port, up_min
+        );
+        println!(
+            "tabs        {}",
+            data.get("tabCount").and_then(|v| v.as_u64()).unwrap_or(0)
+        );
         // Surface the active tab so operators can sanity-check which page
         // they're about to drive before issuing clicks / fills. Silently
         // skipped if the daemon didn't send one (older daemon on new CLI).
         if let Some(title) = data.get("activeTabTitle").and_then(|v| v.as_str()) {
-            let url = data.get("activeTabUrl").and_then(|v| v.as_str()).unwrap_or("");
-            let id = data.get("activeTabId").and_then(|v| v.as_str()).unwrap_or("");
+            let url = data
+                .get("activeTabUrl")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let id = data
+                .get("activeTabId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !id.is_empty() {
                 let title_trim = title.chars().take(60).collect::<String>();
-                let label = if title_trim.is_empty() { url.to_string() } else { title_trim };
+                let label = if title_trim.is_empty() {
+                    url.to_string()
+                } else {
+                    title_trim
+                };
                 println!("active      {} — {}", id, label);
             }
         }
-        println!("targets     {}", data.get("targetCount").and_then(|v| v.as_u64()).unwrap_or(0));
-        println!("extensions  {}", data.get("extensionCount").and_then(|v| v.as_u64()).unwrap_or(0));
+        println!(
+            "targets     {}",
+            data.get("targetCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
+        println!(
+            "extensions  {}",
+            data.get("extensionCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        );
         println!("cwd         {}", daemon_state.cwd);
         println!("log         {}", daemon_log_path(cfg).display());
     }
@@ -133,7 +165,11 @@ fn print_daemon_log_hint(cfg: &state::Config) {
 /// deferred as noted in CLAUDE.md.
 pub fn cmd_pair(cfg: &Config, rest: &[String]) -> Result<i32> {
     let parsed = args::parse(rest);
-    let sub = parsed.positional.first().map(|s| s.as_str()).unwrap_or("status");
+    let sub = parsed
+        .positional
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("status");
     match sub {
         "status" | "info" => {
             let Some(daemon_state) = read_state(cfg) else {
@@ -144,7 +180,10 @@ pub fn cmd_pair(cfg: &Config, rest: &[String]) -> Result<i32> {
             let user = std::env::var("USER").unwrap_or_else(|_| "$(whoami)".to_string());
             println!("ghax pair — v0 (SSH-tunnel mode)");
             println!();
-            println!("Local daemon: 127.0.0.1:{} (pid {})", daemon_state.port, daemon_state.pid);
+            println!(
+                "Local daemon: 127.0.0.1:{} (pid {})",
+                daemon_state.port, daemon_state.pid
+            );
             println!("Browser:      {}", daemon_state.browser_kind);
             println!();
             println!("To share with a remote agent:");
@@ -236,9 +275,18 @@ pub fn cmd_diff_state(rest: &[String]) -> Result<i32> {
     diff_values("", &before, &after, &mut diffs);
 
     if parsed.json() {
-        let added = diffs.iter().filter(|d| matches!(d.kind, DiffKind::Added)).count();
-        let removed = diffs.iter().filter(|d| matches!(d.kind, DiffKind::Removed)).count();
-        let changed = diffs.iter().filter(|d| matches!(d.kind, DiffKind::Changed)).count();
+        let added = diffs
+            .iter()
+            .filter(|d| matches!(d.kind, DiffKind::Added))
+            .count();
+        let removed = diffs
+            .iter()
+            .filter(|d| matches!(d.kind, DiffKind::Removed))
+            .count();
+        let changed = diffs
+            .iter()
+            .filter(|d| matches!(d.kind, DiffKind::Changed))
+            .count();
         let arr: Vec<Value> = diffs
             .iter()
             .map(|d| match d.kind {
@@ -266,7 +314,10 @@ pub fn cmd_diff_state(rest: &[String]) -> Result<i32> {
             "removed": removed,
             "changed": changed,
         });
-        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".into())
+        );
     } else if diffs.is_empty() {
         println!("(no differences)");
     } else {
@@ -314,8 +365,11 @@ fn diff_values(path: &str, a: &Value, b: &Value, out: &mut Vec<DiffEntry>) {
         (Value::Object(ao), Value::Object(bo)) => {
             // Preserve insertion-order iteration where possible; use BTreeSet
             // only for the union-of-keys to guarantee deterministic ordering.
-            let keys: BTreeSet<&str> =
-                ao.keys().map(|s| s.as_str()).chain(bo.keys().map(|s| s.as_str())).collect();
+            let keys: BTreeSet<&str> = ao
+                .keys()
+                .map(|s| s.as_str())
+                .chain(bo.keys().map(|s| s.as_str()))
+                .collect();
             for k in keys {
                 // JSON Pointer escaping: ~ → ~0, / → ~1.
                 let escaped = k.replace('~', "~0").replace('/', "~1");
@@ -428,7 +482,8 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
         let cmd = match step.get("cmd").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => {
-                results.push(json!({ "cmd": "<missing>", "ok": false, "error": "step missing cmd" }));
+                results
+                    .push(json!({ "cmd": "<missing>", "ok": false, "error": "step missing cmd" }));
                 any_failed = true;
                 if stop_on_error {
                     break;
@@ -444,7 +499,13 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
                 if let Some(f) = failed_expect(&cmd, &data) {
                     // A failed check ends the plan whatever stopOnError says:
                     // the steps after it assume it held.
-                    report.push(&cmd, false, t.elapsed().as_millis(), Some(&data), Some(&f.message));
+                    report.push(
+                        &cmd,
+                        false,
+                        t.elapsed().as_millis(),
+                        Some(&data),
+                        Some(&f.message),
+                    );
                     results.push(failed_expect_entry(&cmd, results.len(), &f));
                     expect_exit = Some(f.exit());
                     any_failed = true;
@@ -538,7 +599,10 @@ pub fn cmd_batch(cfg: &Config, rest: &[String]) -> Result<i32> {
     // its own code: the page did what it was told, it just was not right.
     let any_failed = data
         .as_array()
-        .map(|arr| arr.iter().any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true)))
+        .map(|arr| {
+            arr.iter()
+                .any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true))
+        })
         .unwrap_or(false);
     let code = if let Some(f) = failed_expect("batch", &data) {
         f.exit()
@@ -645,7 +709,13 @@ pub fn run_steps(port: u16, steps: &[Value], mut report: Report) -> i32 {
                 // Covers a recorded `expect` step and a `batch` step holding one.
                 if let Some(f) = failed_expect(&cmd, &data) {
                     eprintln!("✗ {cmd} — {}", f.message);
-                    report.push(&cmd, false, t.elapsed().as_millis(), Some(&data), Some(&f.message));
+                    report.push(
+                        &cmd,
+                        false,
+                        t.elapsed().as_millis(),
+                        Some(&data),
+                        Some(&f.message),
+                    );
                     report.write(f.exit());
                     return f.exit();
                 }
@@ -696,12 +766,20 @@ pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let delay_ms: u64 = parsed
         .flags
         .get("delay")
-        .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64()))
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| v.as_u64())
+        })
         .unwrap_or(1000);
     let scale: u64 = parsed
         .flags
         .get("scale")
-        .and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64()))
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| v.as_u64())
+        })
         .unwrap_or(800);
     let keep_frames = matches!(parsed.flags.get("keepFrames"), Some(Value::Bool(true)));
 
@@ -767,7 +845,12 @@ pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let frame_path = |n: usize| format!("{}/frame-{:04}.png", tmp_dir, n);
 
     // Capture initial state before any steps run.
-    rpc::call(port, "screenshot", json!([]), json!({ "path": frame_path(frame), "fullPage": false }))?;
+    rpc::call(
+        port,
+        "screenshot",
+        json!([]),
+        json!({ "path": frame_path(frame), "fullPage": false }),
+    )?;
     frame += 1;
 
     for (i, step) in steps.iter().enumerate() {
@@ -793,7 +876,12 @@ pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
         }
         // Let layout settle — mirrors the TS 250ms wait.
         std::thread::sleep(std::time::Duration::from_millis(250));
-        rpc::call(port, "screenshot", json!([]), json!({ "path": frame_path(frame), "fullPage": false }))?;
+        rpc::call(
+            port,
+            "screenshot",
+            json!([]),
+            json!({ "path": frame_path(frame), "fullPage": false }),
+        )?;
         frame += 1;
     }
 
@@ -820,9 +908,12 @@ pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let palette_output = std::process::Command::new("ffmpeg")
         .args([
             "-y",
-            "-framerate", &framerate,
-            "-i", &frame_pattern,
-            "-vf", &format!("{scale_str},palettegen"),
+            "-framerate",
+            &framerate,
+            "-i",
+            &frame_pattern,
+            "-vf",
+            &format!("{scale_str},palettegen"),
             &palette,
         ])
         .stdout(std::process::Stdio::null())
@@ -856,11 +947,16 @@ pub fn cmd_gif(cfg: &Config, rest: &[String]) -> Result<i32> {
     let render_output = std::process::Command::new("ffmpeg")
         .args([
             "-y",
-            "-framerate", &framerate,
-            "-i", &frame_pattern,
-            "-i", &palette,
-            "-lavfi", &lavfi,
-            "-loop", "0",
+            "-framerate",
+            &framerate,
+            "-i",
+            &frame_pattern,
+            "-i",
+            &palette,
+            "-lavfi",
+            &lavfi,
+            "-loop",
+            "0",
             &out_gif,
         ])
         .stdout(std::process::Stdio::null())
@@ -953,10 +1049,14 @@ fn ffprobe_available() -> bool {
 fn probe_png_dims(path: &str) -> Option<(u32, u32)> {
     let out = std::process::Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
             path,
         ])
         .output()
@@ -988,7 +1088,9 @@ fn normalize_frame_dims(frame_paths: &[String]) {
         return;
     };
     for path in &frame_paths[1..] {
-        let Some(dims) = probe_png_dims(path) else { continue };
+        let Some(dims) = probe_png_dims(path) else {
+            continue;
+        };
         if dims == (target_w, target_h) {
             continue;
         }
@@ -996,8 +1098,10 @@ fn normalize_frame_dims(frame_paths: &[String]) {
         let status = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
-                "-i", path,
-                "-update", "1",
+                "-i",
+                path,
+                "-update",
+                "1",
                 "-vf",
                 &format!(
                     "scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,\

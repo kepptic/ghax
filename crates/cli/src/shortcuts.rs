@@ -22,11 +22,12 @@ use crate::small::{parse_steps, run_steps};
 use crate::state::{self, Config};
 use crate::time_util::iso_now;
 use anyhow::Result;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: ghax shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
+const USAGE: &str =
+    "Usage: ghax shortcut save <name> <file> [--var k=default]... [--desc <text>] [--force]
        ghax shortcut list [--json] | show <name> | rm <name>
        ghax shortcut run <name> [--var k=v]... [--report <path>] [--dry-run]";
 
@@ -116,7 +117,9 @@ fn name_arg(parsed: &Parsed, what: &str) -> Result<String, i32> {
         return Err(EXIT_USAGE);
     };
     if !valid_name(name) {
-        eprintln!("ghax shortcut: invalid name '{name}' — use lowercase letters, digits, '.', '_' or '-' (max 64, starting with a letter or digit)");
+        eprintln!(
+            "ghax shortcut: invalid name '{name}' — use lowercase letters, digits, '.', '_' or '-' (max 64, starting with a letter or digit)"
+        );
         return Err(EXIT_USAGE);
     }
     Ok(name.clone())
@@ -225,8 +228,7 @@ fn write_private_atomic(
         file.write_all(body.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        std::fs::rename(&tmp, path).map_err(|e| format!("cannot write {}: {e}", path.display()))
     };
     let res = finish();
     if res.is_err() {
@@ -459,7 +461,9 @@ fn var_pairs(parsed: &Parsed) -> Result<Vec<(String, Option<String>)>, String> {
             None => (raw, None),
         };
         if !is_ident(k) {
-            return Err(format!("--var '{raw}': a variable name is letters, digits and '_', not starting with a digit"));
+            return Err(format!(
+                "--var '{raw}': a variable name is letters, digits and '_', not starting with a digit"
+            ));
         }
         out.push((k.to_string(), v));
     }
@@ -655,7 +659,11 @@ fn cmd_save(parsed: &Parsed, force: bool) -> Result<i32> {
             );
             return Ok(EXIT_USAGE);
         }
-        Some(load(&name).ok().and_then(|v| v["steps"].as_array().map(Vec::len)))
+        Some(
+            load(&name)
+                .ok()
+                .and_then(|v| v["steps"].as_array().map(Vec::len)),
+        )
     } else {
         None
     };

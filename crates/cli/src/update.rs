@@ -18,7 +18,7 @@
 
 use crate::args::Parsed;
 use crate::dispatch::{EXIT_CDP_ERROR, EXIT_OK};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -156,7 +156,10 @@ fn spawn_background_refresh() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub fn cmd_update(parsed: &Parsed) -> Result<i32> {
-    let background = matches!(parsed.flags.get("background-refresh"), Some(Value::Bool(true)));
+    let background = matches!(
+        parsed.flags.get("background-refresh"),
+        Some(Value::Bool(true))
+    );
     let check_only = matches!(parsed.flags.get("check"), Some(Value::Bool(true)));
     let to_version: Option<String> = parsed
         .flags
@@ -193,7 +196,11 @@ pub fn cmd_update(parsed: &Parsed) -> Result<i32> {
             println!("ghax {} → {} available", current_version(), target);
             println!("Run `ghax update` to install.");
         } else {
-            println!("ghax {} is up to date (latest: {})", current_version(), latest);
+            println!(
+                "ghax {} is up to date (latest: {})",
+                current_version(),
+                latest
+            );
         }
         return Ok(EXIT_OK);
     }
@@ -203,7 +210,11 @@ pub fn cmd_update(parsed: &Parsed) -> Result<i32> {
         return Ok(EXIT_OK);
     }
 
-    println!("ghax: installing {} (current: {})...", target, current_version());
+    println!(
+        "ghax: installing {} (current: {})...",
+        target,
+        current_version()
+    );
     let status = run_install_release(target)?;
     if status == EXIT_OK {
         println!(

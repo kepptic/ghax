@@ -6,12 +6,12 @@
 //! reordered `[{ref, score}]` on stdout. The command gets `--rerank-timeout`
 //! seconds (default 60) for the whole exchange, then it is killed.
 
-use crate::dispatch::{parse_switches, EXIT_OK, EXIT_USAGE};
+use crate::dispatch::{EXIT_OK, EXIT_USAGE, parse_switches};
 use crate::output;
 use crate::rpc;
 use crate::state::{self, Config};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Map, Value, json};
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -29,7 +29,9 @@ pub fn cmd_find_el(cfg: &Config, rest: &[String]) -> Result<i32> {
 
     let description = parsed.positional.join(" ");
     if description.trim().is_empty() {
-        eprintln!("Usage: ghax find-el \"<description>\" [--top 5] [--min-score 20] [--interactive-only] [--json] [--rerank-cmd <cmd>] [--rerank-timeout <secs>]");
+        eprintln!(
+            "Usage: ghax find-el \"<description>\" [--top 5] [--min-score 20] [--interactive-only] [--json] [--rerank-cmd <cmd>] [--rerank-timeout <secs>]"
+        );
         return Ok(EXIT_USAGE);
     }
     let rerank_cmd = match parsed.flags.get("rerank-cmd") {
@@ -72,11 +74,21 @@ pub fn cmd_find_el(cfg: &Config, rest: &[String]) -> Result<i32> {
     // The daemon validates --min-score; --top is asked for in full so the
     // reranker sees its pool and the cut happens after it.
     let mut opts = Map::new();
-    opts.insert("top".into(), json!(if rerank_cmd.is_some() { top.max(RERANK_POOL) } else { top }));
+    opts.insert(
+        "top".into(),
+        json!(if rerank_cmd.is_some() {
+            top.max(RERANK_POOL)
+        } else {
+            top
+        }),
+    );
     if let Some(v) = parsed.flags.get("min-score") {
         opts.insert("minScore".into(), v.clone());
     }
-    if matches!(parsed.flags.get("interactive-only"), Some(Value::Bool(true))) {
+    if matches!(
+        parsed.flags.get("interactive-only"),
+        Some(Value::Bool(true))
+    ) {
         opts.insert("interactiveOnly".into(), Value::Bool(true));
     }
 
@@ -84,10 +96,15 @@ pub fn cmd_find_el(cfg: &Config, rest: &[String]) -> Result<i32> {
     let mut data = rpc::call(port, "findEl", json!([description]), Value::Object(opts))?;
 
     if let Some(cmd) = rerank_cmd {
-        let results = data.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let results = data
+            .get("results")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
         let pool: Vec<Value> = results.iter().take(RERANK_POOL).cloned().collect();
         let reply = run_reranker(&cmd, &description, &pool, rerank_timeout)?;
-        let reordered = finish_rerank(&results, &reply, top).map_err(|e| anyhow!("find-el: --rerank-cmd: {e}"))?;
+        let reordered = finish_rerank(&results, &reply, top)
+            .map_err(|e| anyhow!("find-el: --rerank-cmd: {e}"))?;
         data["results"] = Value::Array(reordered);
         data["reranked"] = Value::Bool(true);
     } else if let Some(arr) = data.get_mut("results").and_then(|r| r.as_array_mut()) {
@@ -122,7 +139,12 @@ fn text_lines(data: &Value) -> Vec<String> {
                 .and_then(|w| w.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
-            let mut line = format!("{}  {}  {}", s("ref"), m.get("score").and_then(|v| v.as_i64()).unwrap_or(0), s("role"));
+            let mut line = format!(
+                "{}  {}  {}",
+                s("ref"),
+                m.get("score").and_then(|v| v.as_i64()).unwrap_or(0),
+                s("role")
+            );
             if !name.is_empty() {
                 line.push(' ');
                 line.push_str(&serde_json::to_string(name).unwrap_or_default());
@@ -141,7 +163,9 @@ fn text_lines(data: &Value) -> Vec<String> {
 /// stdin, or never closes its stdout, cannot hold this thread past the deadline.
 fn run_reranker(cmdline: &str, query: &str, pool: &[Value], timeout: Duration) -> Result<Value> {
     let mut parts = cmdline.split_whitespace();
-    let program = parts.next().ok_or_else(|| anyhow!("find-el: --rerank-cmd is empty"))?;
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow!("find-el: --rerank-cmd is empty"))?;
     let mut child = Command::new(program)
         .args(parts)
         .stdin(Stdio::piped())
@@ -182,15 +206,24 @@ fn run_reranker(cmdline: &str, query: &str, pool: &[Value], timeout: Duration) -
         thread::sleep(Duration::from_millis(10));
     };
     if !status.success() {
-        return Err(anyhow!("find-el: --rerank-cmd '{program}' exited {}", status.code().map_or("by signal".to_string(), |c| c.to_string())));
+        return Err(anyhow!(
+            "find-el: --rerank-cmd '{program}' exited {}",
+            status
+                .code()
+                .map_or("by signal".to_string(), |c| c.to_string())
+        ));
     }
     // The command is gone, but a grandchild may still hold the pipe open.
     let stdout = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(read) => read.with_context(|| format!("find-el: could not read --rerank-cmd '{program}' output"))?,
+        Ok(read) => read
+            .with_context(|| format!("find-el: could not read --rerank-cmd '{program}' output"))?,
         Err(_) => return Err(timed_out(&mut child)),
     };
-    serde_json::from_slice(&stdout)
-        .map_err(|e| anyhow!("find-el: --rerank-cmd '{program}' did not print a JSON array of {{ref, score}}: {e}"))
+    serde_json::from_slice(&stdout).map_err(|e| {
+        anyhow!(
+            "find-el: --rerank-cmd '{program}' did not print a JSON array of {{ref, score}}: {e}"
+        )
+    })
 }
 
 /// The reranked pool followed by the candidates the reranker never saw, cut to
@@ -207,14 +240,27 @@ fn finish_rerank(results: &[Value], reply: &Value, top: usize) -> Result<Vec<Val
 /// The reranker's order, with its scores. Candidates it leaves out follow in
 /// their original order; a ref it invents is an error, not a silent drop.
 fn apply_rerank(pool: &[Value], reply: &Value) -> Result<Vec<Value>, String> {
-    let items = reply.as_array().ok_or("reply must be a JSON array of {ref, score}")?;
+    let items = reply
+        .as_array()
+        .ok_or("reply must be a JSON array of {ref, score}")?;
     let mut out: Vec<Value> = Vec::new();
     for item in items {
-        let r = item.get("ref").and_then(|v| v.as_str()).ok_or("every reply item needs a \"ref\"")?;
-        let Some(orig) = pool.iter().find(|c| c.get("ref").and_then(|v| v.as_str()) == Some(r)) else {
-            return Err(format!("reply names {r}, which was not among the candidates"));
+        let r = item
+            .get("ref")
+            .and_then(|v| v.as_str())
+            .ok_or("every reply item needs a \"ref\"")?;
+        let Some(orig) = pool
+            .iter()
+            .find(|c| c.get("ref").and_then(|v| v.as_str()) == Some(r))
+        else {
+            return Err(format!(
+                "reply names {r}, which was not among the candidates"
+            ));
         };
-        if out.iter().any(|o| o.get("ref").and_then(|v| v.as_str()) == Some(r)) {
+        if out
+            .iter()
+            .any(|o| o.get("ref").and_then(|v| v.as_str()) == Some(r))
+        {
             continue;
         }
         let mut next = orig.clone();
@@ -225,7 +271,10 @@ fn apply_rerank(pool: &[Value], reply: &Value) -> Result<Vec<Value>, String> {
     }
     for c in pool {
         let r = c.get("ref").and_then(|v| v.as_str());
-        if !out.iter().any(|o| o.get("ref").and_then(|v| v.as_str()) == r) {
+        if !out
+            .iter()
+            .any(|o| o.get("ref").and_then(|v| v.as_str()) == r)
+        {
             out.push(c.clone());
         }
     }
@@ -259,40 +308,78 @@ mod tests {
         let refs: Vec<&str> = out.iter().map(|v| v["ref"].as_str().unwrap()).collect();
         assert_eq!(refs, ["@e3", "@e1", "@e2"]);
         assert_eq!(out[0]["score"], 100);
-        assert_eq!(out[1]["score"], 90, "no score in the reply keeps the original");
+        assert_eq!(
+            out[1]["score"], 90,
+            "no score in the reply keeps the original"
+        );
     }
 
     #[test]
     fn rerank_rejects_an_invented_ref_and_a_non_array() {
-        assert!(apply_rerank(&pool(), &json!([{"ref": "@e99"}])).unwrap_err().contains("@e99"));
+        assert!(
+            apply_rerank(&pool(), &json!([{"ref": "@e99"}]))
+                .unwrap_err()
+                .contains("@e99")
+        );
         assert!(apply_rerank(&pool(), &json!({"ref": "@e1"})).is_err());
         assert!(apply_rerank(&pool(), &json!([{"score": 1}])).is_err());
     }
 
     fn many(n: usize) -> Vec<Value> {
-        (1..=n).map(|i| json!({"ref": format!("@e{i}"), "score": 100 - i as i64})).collect()
+        (1..=n)
+            .map(|i| json!({"ref": format!("@e{i}"), "score": 100 - i as i64}))
+            .collect()
     }
 
     #[test]
     fn rerank_keeps_the_unreranked_tail_so_top_beyond_the_pool_works() {
         let results = many(30);
-        let reply: Vec<Value> = results[..RERANK_POOL].iter().rev().map(|c| json!({"ref": c["ref"]})).collect();
+        let reply: Vec<Value> = results[..RERANK_POOL]
+            .iter()
+            .rev()
+            .map(|c| json!({"ref": c["ref"]}))
+            .collect();
         let out = finish_rerank(&results, &Value::Array(reply), 25).unwrap();
         let refs: Vec<&str> = out.iter().map(|v| v["ref"].as_str().unwrap()).collect();
         assert_eq!(out.len(), 25);
         assert_eq!(&refs[..2], ["@e20", "@e19"], "pool reordered");
-        assert_eq!(&refs[20..], ["@e21", "@e22", "@e23", "@e24", "@e25"], "tail follows in scorer order");
-        assert_eq!(finish_rerank(&results, &json!([]), 100).unwrap().len(), 30, "top above what exists returns it all");
-        assert_eq!(finish_rerank(&results, &json!([]), 3).unwrap().len(), 3, "top still cuts");
-        assert_eq!(finish_rerank(&many(5), &json!([]), 40).unwrap().len(), 5, "a short list is not padded");
+        assert_eq!(
+            &refs[20..],
+            ["@e21", "@e22", "@e23", "@e24", "@e25"],
+            "tail follows in scorer order"
+        );
+        assert_eq!(
+            finish_rerank(&results, &json!([]), 100).unwrap().len(),
+            30,
+            "top above what exists returns it all"
+        );
+        assert_eq!(
+            finish_rerank(&results, &json!([]), 3).unwrap().len(),
+            3,
+            "top still cuts"
+        );
+        assert_eq!(
+            finish_rerank(&many(5), &json!([]), 40).unwrap().len(),
+            5,
+            "a short list is not padded"
+        );
     }
 
     #[test]
     fn a_hung_reranker_is_killed_at_the_deadline() {
         let t = Instant::now();
-        let err = run_reranker("sleep 5", "q", &pool(), Duration::from_secs(1)).unwrap_err().to_string();
-        assert!(t.elapsed() < Duration::from_secs(4), "returned at the deadline, not after sleep: {:?}", t.elapsed());
-        assert!(err.contains("'sleep'") && err.contains("--rerank-timeout"), "{err}");
+        let err = run_reranker("sleep 5", "q", &pool(), Duration::from_secs(1))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            t.elapsed() < Duration::from_secs(4),
+            "returned at the deadline, not after sleep: {:?}",
+            t.elapsed()
+        );
+        assert!(
+            err.contains("'sleep'") && err.contains("--rerank-timeout"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -304,7 +391,11 @@ mod tests {
 
     #[test]
     fn rerank_ignores_a_repeated_ref() {
-        let out = apply_rerank(&pool(), &json!([{"ref": "@e2"}, {"ref": "@e2", "score": 1}])).unwrap();
+        let out = apply_rerank(
+            &pool(),
+            &json!([{"ref": "@e2"}, {"ref": "@e2", "score": 1}]),
+        )
+        .unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0]["score"], 60);
     }

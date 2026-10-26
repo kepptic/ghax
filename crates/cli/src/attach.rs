@@ -125,40 +125,68 @@ pub struct CdpEndpoint {
 #[cfg(target_os = "macos")]
 fn mac_binaries() -> Vec<(BrowserKind, &'static str)> {
     vec![
-        (BrowserKind::Edge,     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-        (BrowserKind::Chrome,   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        (BrowserKind::Chromium, "/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        (BrowserKind::Brave,    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-        (BrowserKind::Arc,      "/Applications/Arc.app/Contents/MacOS/Arc"),
+        (
+            BrowserKind::Edge,
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ),
+        (
+            BrowserKind::Chrome,
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            BrowserKind::Chromium,
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        (
+            BrowserKind::Brave,
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ),
+        (BrowserKind::Arc, "/Applications/Arc.app/Contents/MacOS/Arc"),
     ]
 }
 
 #[cfg(target_os = "linux")]
 fn linux_binaries() -> Vec<(BrowserKind, Vec<&'static str>)> {
     vec![
-        (BrowserKind::Edge,     vec!["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"]),
-        (BrowserKind::Chrome,   vec!["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]),
-        (BrowserKind::Chromium, vec!["/usr/bin/chromium", "/usr/bin/chromium-browser"]),
-        (BrowserKind::Brave,    vec!["/usr/bin/brave-browser"]),
-        (BrowserKind::Arc,      vec![]),
+        (
+            BrowserKind::Edge,
+            vec!["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
+        ),
+        (
+            BrowserKind::Chrome,
+            vec!["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
+        ),
+        (
+            BrowserKind::Chromium,
+            vec!["/usr/bin/chromium", "/usr/bin/chromium-browser"],
+        ),
+        (BrowserKind::Brave, vec!["/usr/bin/brave-browser"]),
+        (BrowserKind::Arc, vec![]),
     ]
 }
 
 #[cfg(windows)]
 fn win_binaries() -> Vec<(BrowserKind, Vec<&'static str>)> {
     vec![
-        (BrowserKind::Edge, vec![
-            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-        ]),
-        (BrowserKind::Chrome, vec![
-            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        ]),
+        (
+            BrowserKind::Edge,
+            vec![
+                "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+                "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+            ],
+        ),
+        (
+            BrowserKind::Chrome,
+            vec![
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            ],
+        ),
         (BrowserKind::Chromium, vec![]),
-        (BrowserKind::Brave, vec![
-            "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-        ]),
+        (
+            BrowserKind::Brave,
+            vec!["C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"],
+        ),
         (BrowserKind::Arc, vec![]),
     ]
 }
@@ -187,7 +215,11 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
         for (kind, candidate) in mac_binaries() {
             let p = Path::new(candidate);
             if is_executable(p) {
-                found.push(BrowserBinary { label: kind.label(), kind, path: p.to_path_buf() });
+                found.push(BrowserBinary {
+                    label: kind.label(),
+                    kind,
+                    path: p.to_path_buf(),
+                });
             }
         }
     }
@@ -198,7 +230,11 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
             for candidate in candidates {
                 let p = Path::new(candidate);
                 if is_executable(p) {
-                    found.push(BrowserBinary { label: kind.label(), kind: kind.clone(), path: p.to_path_buf() });
+                    found.push(BrowserBinary {
+                        label: kind.label(),
+                        kind: kind.clone(),
+                        path: p.to_path_buf(),
+                    });
                     break; // first hit per kind
                 }
             }
@@ -207,10 +243,16 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
         // For each kind not yet found, try `which <name>`.
         let kinds_found: Vec<_> = found.iter().map(|b| b.kind.clone()).collect();
         let path_names = [
-            (BrowserKind::Edge,     &["microsoft-edge", "microsoft-edge-stable"][..]),
-            (BrowserKind::Chrome,   &["google-chrome", "google-chrome-stable"][..]),
+            (
+                BrowserKind::Edge,
+                &["microsoft-edge", "microsoft-edge-stable"][..],
+            ),
+            (
+                BrowserKind::Chrome,
+                &["google-chrome", "google-chrome-stable"][..],
+            ),
             (BrowserKind::Chromium, &["chromium", "chromium-browser"][..]),
-            (BrowserKind::Brave,    &["brave-browser"][..]),
+            (BrowserKind::Brave, &["brave-browser"][..]),
         ];
         for (kind, names) in &path_names {
             if kinds_found.contains(kind) {
@@ -219,9 +261,14 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
             for name in *names {
                 if let Ok(out) = std::process::Command::new("which").arg(name).output() {
                     if out.status.success() {
-                        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                        let path =
+                            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
                         if is_executable(&path) {
-                            found.push(BrowserBinary { label: kind.label(), kind: kind.clone(), path });
+                            found.push(BrowserBinary {
+                                label: kind.label(),
+                                kind: kind.clone(),
+                                path,
+                            });
                             break;
                         }
                     }
@@ -236,7 +283,11 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
             for candidate in candidates {
                 let p = Path::new(candidate);
                 if p.exists() {
-                    found.push(BrowserBinary { label: kind.label(), kind: kind.clone(), path: p.to_path_buf() });
+                    found.push(BrowserBinary {
+                        label: kind.label(),
+                        kind: kind.clone(),
+                        path: p.to_path_buf(),
+                    });
                     break;
                 }
             }
@@ -348,7 +399,8 @@ fn profile_dir_for(kind: &BrowserKind) -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".ghax").join(format!("{}-profile", kind.as_str()))
+    home.join(".ghax")
+        .join(format!("{}-profile", kind.as_str()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -426,8 +478,7 @@ fn launch_browser(
     }
 
     if let Some(ext_path) = load_extension {
-        let resolved = std::fs::canonicalize(ext_path)
-            .unwrap_or_else(|_| PathBuf::from(ext_path));
+        let resolved = std::fs::canonicalize(ext_path).unwrap_or_else(|_| PathBuf::from(ext_path));
         let manifest = resolved.join("manifest.json");
         if !manifest.exists() {
             return Err(anyhow::anyhow!(
@@ -446,9 +497,9 @@ fn launch_browser(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    let child = cmd.spawn().map_err(|e| {
-        anyhow::anyhow!("Failed to launch {}: {e}", binary.path.display())
-    })?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to launch {}: {e}", binary.path.display()))?;
     let pid = child.id();
     // `unref` equivalent — we intentionally don't wait on the child.
     drop(child);
@@ -457,7 +508,11 @@ fn launch_browser(
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(ep) = probe_cdp(port) {
-            return Ok(LaunchResult { pid, endpoint: ep, data_dir });
+            return Ok(LaunchResult {
+                pid,
+                endpoint: ep,
+                data_dir,
+            });
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -714,7 +769,9 @@ fn self_heal_daemon_bundle(share_dir: &Path) -> Result<PathBuf> {
         .map_err(|e| anyhow::anyhow!("failed to run `tar` to extract {member}: {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(anyhow::anyhow!("`tar` exited with {status} extracting {member}"));
+        return Err(anyhow::anyhow!(
+            "`tar` exited with {status} extracting {member}"
+        ));
     }
 
     let extracted = tmp.join(&member);
@@ -737,9 +794,8 @@ fn self_heal_daemon_bundle(share_dir: &Path) -> Result<PathBuf> {
 /// `.gitignore` if present but missing the entry. Mirrors `ensureStateDir`
 /// in config.ts.
 fn ensure_state_dir(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir).map_err(|e| {
-        anyhow::anyhow!("Cannot create {}: {e}", cfg.state_dir.display())
-    })?;
+    std::fs::create_dir_all(&cfg.state_dir)
+        .map_err(|e| anyhow::anyhow!("Cannot create {}: {e}", cfg.state_dir.display()))?;
 
     // Best-effort .gitignore append — same as the TS implementation.
     let gitignore = cfg.project_dir.join(".gitignore");
@@ -802,11 +858,17 @@ fn wait_for_daemon(
         // Daemon died before becoming healthy — surface its stderr immediately
         // instead of waiting out the 15s deadline.
         if !state::is_process_alive(expected_pid as i32) {
-            return Err(daemon_failure(stderr_path, "exited before becoming healthy"));
+            return Err(daemon_failure(
+                stderr_path,
+                "exited before becoming healthy",
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(daemon_failure(stderr_path, "did not become healthy within 15s"))
+    Err(daemon_failure(
+        stderr_path,
+        "did not become healthy within 15s",
+    ))
 }
 
 /// True when the daemon's stderr indicates a missing bare-import module —
@@ -861,10 +923,10 @@ fn build_daemon_cmd(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(stderr_file))
-        .env("GHAX_STATE_FILE",      cfg.state_file.as_os_str())
-        .env("GHAX_CDP_HTTP_URL",    &endpoint.http_url)
+        .env("GHAX_STATE_FILE", cfg.state_file.as_os_str())
+        .env("GHAX_CDP_HTTP_URL", &endpoint.http_url)
         .env("GHAX_CDP_BROWSER_URL", &endpoint.browser_url)
-        .env("GHAX_BROWSER_KIND",    kind.as_str());
+        .env("GHAX_BROWSER_KIND", kind.as_str());
     if let Some(pattern) = capture_bodies {
         cmd.env("GHAX_CAPTURE_BODIES", pattern);
     }
@@ -968,9 +1030,13 @@ fn detach_session(cmd: &mut std::process::Command) {
 }
 
 fn open_stderr_capture(cfg: &Config) -> Result<(std::path::PathBuf, std::fs::File)> {
-    let path = cfg.state_dir.join(format!("ghax-daemon-spawn-{}.stderr", std::process::id()));
+    let path = cfg
+        .state_dir
+        .join(format!("ghax-daemon-spawn-{}.stderr", std::process::id()));
     let file = std::fs::OpenOptions::new()
-        .create(true).write(true).truncate(true)
+        .create(true)
+        .write(true)
+        .truncate(true)
         .open(&path)
         .map_err(|e| anyhow::anyhow!("Failed to open daemon stderr capture: {e}"))?;
     Ok((path, file))
@@ -988,7 +1054,13 @@ fn spawn_daemon(
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
         let mut cmd = build_daemon_cmd(
-            cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file,
+            cfg,
+            endpoint,
+            kind,
+            capture_bodies,
+            downloads_dir,
+            &bundle,
+            stderr_file,
         );
         set_agent_name(&mut cmd, agent_name);
         cmd
@@ -1014,7 +1086,13 @@ fn spawn_daemon_bridge(
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
         let mut cmd = build_daemon_cmd_bridge(
-            cfg, bridge_port, port_explicit, control_active, bind_filter, pair_code, &bundle,
+            cfg,
+            bridge_port,
+            port_explicit,
+            control_active,
+            bind_filter,
+            pair_code,
+            &bundle,
             stderr_file,
         );
         set_agent_name(&mut cmd, agent_name);
@@ -1066,9 +1144,9 @@ fn run_spawn_retry_loop(
     for attempt in 0..2 {
         let (stderr_path, stderr_file) = open_stderr_capture(cfg)?;
         let mut cmd = build_cmd(stderr_file);
-        let child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("Failed to spawn daemon (node {bundle:?}): {e}")
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn daemon (node {bundle:?}): {e}"))?;
         let pid = child.id();
         drop(child); // daemon runs independently
 
@@ -1128,11 +1206,18 @@ fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
 }}
 "#
         );
-        std::fs::write(dir.join("package.json"), pkg)
-            .map_err(|e| anyhow::anyhow!("Failed to write package.json in {}: {e}", dir.display()))?;
+        std::fs::write(dir.join("package.json"), pkg).map_err(|e| {
+            anyhow::anyhow!("Failed to write package.json in {}: {e}", dir.display())
+        })?;
     }
     let status = std::process::Command::new("npm")
-        .args(["install", "--silent", "--no-audit", "--no-fund", "--omit=dev"])
+        .args([
+            "install",
+            "--silent",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+        ])
         .current_dir(dir)
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run npm install in {}: {e}", dir.display()))?;
@@ -1180,8 +1265,15 @@ fn pick_endpoint(endpoints: Vec<CdpEndpoint>, prefer_kind: Option<&BrowserKind>)
     if !is_tty {
         // Non-interactive: print note to stderr, return first.
         let descriptions: Vec<String> = endpoints.iter().map(describe_endpoint).collect();
-        eprintln!("Found {} CDPs: {}.", endpoints.len(), descriptions.join(", "));
-        eprintln!("  using {} (pass --port to override)", describe_endpoint(&endpoints[0]));
+        eprintln!(
+            "Found {} CDPs: {}.",
+            endpoints.len(),
+            descriptions.join(", ")
+        );
+        eprintln!(
+            "  using {} (pass --port to override)",
+            describe_endpoint(&endpoints[0])
+        );
         return endpoints.into_iter().next().unwrap();
     }
 
@@ -1230,8 +1322,14 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         .and_then(|v| v.as_str())
         .and_then(BrowserKind::from_str);
 
-    let launch = matches!(parsed.flags.get("launch"), Some(serde_json::Value::Bool(true)));
-    let headless = matches!(parsed.flags.get("headless"), Some(serde_json::Value::Bool(true)));
+    let launch = matches!(
+        parsed.flags.get("launch"),
+        Some(serde_json::Value::Bool(true))
+    );
+    let headless = matches!(
+        parsed.flags.get("headless"),
+        Some(serde_json::Value::Bool(true))
+    );
 
     // --capture-bodies forms:
     //   absent   → None
@@ -1281,7 +1379,10 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     // ── Bridge mode (`--extension`) — no CDP endpoint involved at all. ──────
-    if matches!(parsed.flags.get("extension"), Some(serde_json::Value::Bool(true))) {
+    if matches!(
+        parsed.flags.get("extension"),
+        Some(serde_json::Value::Bool(true))
+    ) {
         return cmd_attach_extension(parsed, cfg);
     }
 
@@ -1345,7 +1446,9 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         }
 
         if browsers.is_empty() {
-            eprintln!("No supported browsers installed. Expected Edge, Chrome, Chromium, Brave, or Arc.");
+            eprintln!(
+                "No supported browsers installed. Expected Edge, Chrome, Chromium, Brave, or Arc."
+            );
             return Ok(EXIT_NOT_ATTACHED);
         }
 
@@ -1364,7 +1467,11 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 eprintln!(
                     "Browser {} not found. Installed: {}",
                     browser_opt.as_ref().unwrap().as_str(),
-                    browsers.iter().map(|b| b.kind.as_str()).collect::<Vec<_>>().join(", ")
+                    browsers
+                        .iter()
+                        .map(|b| b.kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
                 return Ok(EXIT_NOT_ATTACHED);
             }
@@ -1379,7 +1486,14 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 let inuse_kind = browser_opt
                     .clone()
                     .unwrap_or_else(|| infer_kind_from_ua(&inuse.version.user_agent));
-                let state = spawn_daemon(cfg, &inuse, &inuse_kind, capture_bodies_ref, downloads_dir_ref, agent_name)?;
+                let state = spawn_daemon(
+                    cfg,
+                    &inuse,
+                    &inuse_kind,
+                    capture_bodies_ref,
+                    downloads_dir_ref,
+                    agent_name,
+                )?;
                 println!(
                     "attached (port race resolved) — pid {}, port {}, browser {}",
                     state.pid, state.port, state.browser_kind
@@ -1435,12 +1549,21 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     let ep = endpoint.unwrap(); // always Some at this point
-    let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref, downloads_dir_ref, agent_name)?;
+    let state = spawn_daemon(
+        cfg,
+        &ep,
+        &kind,
+        capture_bodies_ref,
+        downloads_dir_ref,
+        agent_name,
+    )?;
     // POSIX convention — stay quiet on fresh success. `--verbose` restores
     // the pid/port/browser one-liner for humans; the `already attached`
     // branch above still prints because that's informational, not success.
-    let verbose = matches!(parsed.flags.get("verbose"), Some(serde_json::Value::Bool(true)))
-        || std::env::var("GHAX_VERBOSE").is_ok();
+    let verbose = matches!(
+        parsed.flags.get("verbose"),
+        Some(serde_json::Value::Bool(true))
+    ) || std::env::var("GHAX_VERBOSE").is_ok();
     if verbose {
         println!(
             "attached — pid {}, port {}, browser {}",
@@ -1491,20 +1614,27 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     };
 
     match resolve_extension_dir() {
-        Some(dir) => println!("ghax bridge (experimental): load unpacked from {}", dir.display()),
+        Some(dir) => println!(
+            "ghax bridge (experimental): load unpacked from {}",
+            dir.display()
+        ),
         None => println!(
             "ghax bridge (experimental): could not auto-locate the extension/ directory.\n  \
              Load unpacked from the `extension/` directory of your ghax checkout \
              (or set GHAX_EXTENSION_DIR to point at it)."
         ),
     }
-    println!("  1. edge://extensions or chrome://extensions → enable Developer mode → Load unpacked.");
+    println!(
+        "  1. edge://extensions or chrome://extensions → enable Developer mode → Load unpacked."
+    );
     if control_active {
         println!(
             "  2. Nothing else to click — with --control-active the daemon drives the browser's active tab as soon as the extension connects."
         );
     } else {
-        println!("  2. Click the \"ghax bridge\" toolbar icon → \"Control this tab\" on the tab you want ghax to drive.");
+        println!(
+            "  2. Click the \"ghax bridge\" toolbar icon → \"Control this tab\" on the tab you want ghax to drive."
+        );
     }
     if let Some(code) = &pair_code {
         println!("  ⚷  Pairing required. In the ghax bridge popup, enter this code: {code}");
@@ -1533,7 +1663,12 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
     println!("Waiting for the extension on ws://127.0.0.1:{actual_port}...");
 
-    match wait_for_extension(state.port, actual_port, Duration::from_secs(60), control_active) {
+    match wait_for_extension(
+        state.port,
+        actual_port,
+        Duration::from_secs(60),
+        control_active,
+    ) {
         Ok((info, controlled_tab)) => {
             let label = match &info {
                 Some((agent, version)) => format!(" ({agent} v{version})"),
@@ -1945,9 +2080,7 @@ mod tests {
 
     /// Serve `/bridge-status` bodies from `body_for(elapsed)` on a loopback
     /// port until the process ends; returns the port.
-    fn serve_bridge_status(
-        body_for: impl Fn(Duration) -> String + Send + 'static,
-    ) -> u16 {
+    fn serve_bridge_status(body_for: impl Fn(Duration) -> String + Send + 'static) -> u16 {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1983,7 +2116,11 @@ mod tests {
         let t0 = Instant::now();
         let err = wait_for_extension(port, 9223, Duration::from_millis(1200), false)
             .expect_err("nothing ever matches");
-        assert!(t0.elapsed() >= Duration::from_millis(1200), "returned early: {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() >= Duration::from_millis(1200),
+            "returned early: {:?}",
+            t0.elapsed()
+        );
         let msg = err.to_string();
         assert!(msg.contains("BRIDGE_NO_CANDIDATE"), "{msg}");
         assert!(msg.contains("chrome · - · ccc333"), "{msg}");
@@ -2012,7 +2149,11 @@ mod tests {
         });
         let t0 = Instant::now();
         let err = wait_for_extension(port, 9223, Duration::from_secs(30), false).unwrap_err();
-        assert!(t0.elapsed() < Duration::from_secs(5), "should not wait: {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "should not wait: {:?}",
+            t0.elapsed()
+        );
         assert!(err.to_string().contains("BRIDGE_AMBIGUOUS"));
     }
 

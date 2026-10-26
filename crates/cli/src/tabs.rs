@@ -97,14 +97,25 @@ fn owner_label(c: &Value) -> String {
     if c.get("self").and_then(Value::as_bool) == Some(true) {
         return "you".to_string();
     }
-    if let Some(name) = c.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+    if let Some(name) = c
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
+    {
         return name.to_string();
     }
-    let cwd = c.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let cwd = c
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
     let pid = c.get("pid").and_then(Value::as_u64);
     if let (Some(cwd), Some(pid)) = (cwd, pid) {
         let trimmed = cwd.trim_end_matches(['/', '\\']);
-        let base = trimmed.rsplit(['/', '\\']).next().filter(|b| !b.is_empty()).unwrap_or(cwd);
+        let base = trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|b| !b.is_empty())
+            .unwrap_or(cwd);
         return format!("{base}/{pid}");
     }
     match c.get("port").and_then(Value::as_u64) {
@@ -136,12 +147,30 @@ mod tests {
     fn owner_labels() {
         assert_eq!(owner_label(&Value::Null), "none");
         assert_eq!(owner_label(&json!(9223)), ":9223");
-        assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "x", "cwd": "/a", "self": true})), "you");
-        assert_eq!(owner_label(&json!({"port": 9223, "pid": 1, "name": "claude-a", "cwd": "/a", "self": false})), "claude-a");
-        assert_eq!(owner_label(&json!({"port": 9225, "pid": null, "name": null, "cwd": null, "self": false})), ":9225");
+        assert_eq!(
+            owner_label(&json!({"port": 9223, "pid": 1, "name": "x", "cwd": "/a", "self": true})),
+            "you"
+        );
+        assert_eq!(
+            owner_label(
+                &json!({"port": 9223, "pid": 1, "name": "claude-a", "cwd": "/a", "self": false})
+            ),
+            "claude-a"
+        );
+        assert_eq!(
+            owner_label(
+                &json!({"port": 9225, "pid": null, "name": null, "cwd": null, "self": false})
+            ),
+            ":9225"
+        );
         // Current daemons send the basename already (cwdLabel); an older one
         // sends the full path. Both print `<basename>/<pid>`.
-        assert_eq!(owner_label(&json!({"port": 9224, "pid": 7, "name": null, "cwd": "ghax", "self": false})), "ghax/7");
+        assert_eq!(
+            owner_label(
+                &json!({"port": 9224, "pid": 7, "name": null, "cwd": "ghax", "self": false})
+            ),
+            "ghax/7"
+        );
         assert_eq!(
             owner_label(&json!({"port": 9224, "pid": 7, "name": null,
                 "cwd": "/Users/someone/Documents/a/very/long/path/that/exceeds/forty/chars/ghax/", "self": false})),
@@ -158,8 +187,7 @@ mod tests {
             "#1  edge-1a2b3c:5  \"a\"  Edge · — · win 1  controlledBy=none"
         );
         // CDP rows carry no controlledBy at all.
-        let cdp =
-            json!({"index": 2, "id": "ABCD", "title": "t", "browser": "Chrome", "profile": "—", "active": true});
+        let cdp = json!({"index": 2, "id": "ABCD", "title": "t", "browser": "Chrome", "profile": "—", "active": true});
         assert_eq!(
             format_tab_line(&cdp).unwrap(),
             "#2  ABCD  \"t\"  Chrome · —  active"

@@ -33,7 +33,9 @@ pub fn cmd_review(parsed: &Parsed) -> Result<i32> {
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&repo_root)
         .output()?;
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
 
     // Diff between base and HEAD.
     let diff_out = Command::new("git")
@@ -59,7 +61,10 @@ pub fn cmd_review(parsed: &Parsed) -> Result<i32> {
     let log_text = String::from_utf8_lossy(&log_out.stdout).trim().to_string();
 
     // --diff: print raw diff only.
-    if matches!(parsed.flags.get("diff"), Some(serde_json::Value::Bool(true))) {
+    if matches!(
+        parsed.flags.get("diff"),
+        Some(serde_json::Value::Bool(true))
+    ) {
         print!("{diff_text}");
         return Ok(EXIT_OK);
     }

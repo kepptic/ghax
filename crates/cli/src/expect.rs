@@ -11,7 +11,7 @@ use crate::output;
 use crate::rpc;
 use crate::state::{self, Config};
 use anyhow::Result;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::time::Instant;
 
 /// A failed expect found in an RPC reply.
@@ -194,11 +194,15 @@ pub fn cmd_expect(cfg: &Config, rest: &[String]) -> Result<i32> {
         m.remove("report");
     }
     if opts.as_object().map(|m| m.is_empty()).unwrap_or(true) {
-        eprintln!("Usage: ghax expect --url <regex> | --title <regex> | --text <substring> [--selector <css>] |");
+        eprintln!(
+            "Usage: ghax expect --url <regex> | --title <regex> | --text <substring> [--selector <css>] |"
+        );
         eprintln!(
             "                   --visible <@ref|css> | --hidden <@ref|css> | --count <css> --n N |"
         );
-        eprintln!("                   --value <@ref|css> --expected <text> | --eval <js>   [--timeout ms]");
+        eprintln!(
+            "                   --value <@ref|css> --expected <text> | --eval <js>   [--timeout ms]"
+        );
         return Ok(EXIT_USAGE);
     }
 
@@ -289,15 +293,29 @@ mod tests {
         let f = failed_expect("batch", &nested).unwrap();
         assert_eq!(f.exit(), 1);
         let e = failed_expect_entry("batch", 3, &f);
-        assert_eq!((e["cmd"].as_str(), e["code"].as_str(), e["step"].as_u64()), (Some("batch"), Some("EXPECT_FAILED"), Some(3)));
+        assert_eq!(
+            (e["cmd"].as_str(), e["code"].as_str(), e["step"].as_u64()),
+            (Some("batch"), Some("EXPECT_FAILED"), Some(3))
+        );
     }
 
     #[test]
     fn bare_report_is_a_usage_error() {
-        let flags = |argv: &[&str]| args::parse(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()).flags;
-        assert_eq!(report_path(&flags(&["--report"])), Err("--report needs a file path".into()));
-        assert_eq!(report_path(&flags(&["--report", "--timeout", "5"])), Err("--report needs a file path".into()));
-        assert_eq!(report_path(&flags(&["--report", "/x.json"])), Ok(Some("/x.json".into())));
+        let flags = |argv: &[&str]| {
+            args::parse(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()).flags
+        };
+        assert_eq!(
+            report_path(&flags(&["--report"])),
+            Err("--report needs a file path".into())
+        );
+        assert_eq!(
+            report_path(&flags(&["--report", "--timeout", "5"])),
+            Err("--report needs a file path".into())
+        );
+        assert_eq!(
+            report_path(&flags(&["--report", "/x.json"])),
+            Ok(Some("/x.json".into()))
+        );
         assert_eq!(report_path(&flags(&[])), Ok(None));
         let p = args::parse(&["--report".to_string()]);
         assert_eq!(Report::from_flags(&p).err(), Some(EXIT_USAGE));

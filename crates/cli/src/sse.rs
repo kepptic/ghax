@@ -37,8 +37,8 @@
 
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SIGPIPE_EXIT: i32 = 141;
 const DATA_PREFIX: &str = "data: ";

@@ -23,16 +23,25 @@ pub fn cmd_cookies(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     // report "no cookie" after the first one landed).
     if parsed.positional.first().map(String::as_str) == Some("delete") {
         let rest: Vec<String> = parsed.positional.iter().skip(1).cloned().collect();
-        let args = serde_json::Value::Array(rest.into_iter().map(serde_json::Value::String).collect());
+        let args =
+            serde_json::Value::Array(rest.into_iter().map(serde_json::Value::String).collect());
         let data = rpc::call(port, "cookies.delete", args, parsed.opts_without_json())?;
         output::print(&data, parsed.json());
         return Ok(EXIT_OK);
     }
 
-    let data = rpc::call(port, "cookies", parsed.positional_value(), parsed.opts_without_json())?;
+    let data = rpc::call(
+        port,
+        "cookies",
+        parsed.positional_value(),
+        parsed.opts_without_json(),
+    )?;
 
     if let Some(has_name) = parsed.flags.get("has").and_then(|v| v.as_str()) {
-        let exists = data.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+        let exists = data
+            .get("exists")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let line = json!({ "name": has_name, "exists": exists });
         println!("{}", serde_json::to_string(&line).unwrap_or_default());
         return Ok(if exists { EXIT_OK } else { EXIT_USAGE });

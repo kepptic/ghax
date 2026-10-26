@@ -76,7 +76,11 @@ pub fn parse(argv: &[String]) -> Parsed {
         }
         i += 1;
     }
-    Parsed { positional, flags, raw: argv.to_vec() }
+    Parsed {
+        positional,
+        flags,
+        raw: argv.to_vec(),
+    }
 }
 
 /// Split off the global `--trace` flag. Only tokens before a `--`
@@ -89,7 +93,11 @@ pub fn take_trace(rest: &[String]) -> (bool, Vec<String>) {
     if !traced {
         return (false, rest.to_vec());
     }
-    let mut out: Vec<String> = rest[..end].iter().filter(|a| *a != "--trace").cloned().collect();
+    let mut out: Vec<String> = rest[..end]
+        .iter()
+        .filter(|a| *a != "--trace")
+        .cloned()
+        .collect();
     out.extend(rest[end..].iter().cloned());
     (true, out)
 }
@@ -107,7 +115,10 @@ pub fn parse_snapshot(argv: &[String]) -> Parsed {
         }
         if let Some(rest) = a.strip_prefix("--") {
             if let Some(eq) = rest.find('=') {
-                flags.insert(rest[..eq].to_string(), Value::String(rest[eq + 1..].to_string()));
+                flags.insert(
+                    rest[..eq].to_string(),
+                    Value::String(rest[eq + 1..].to_string()),
+                );
             } else {
                 let key = rest.to_string();
                 if let Some(next) = argv.get(i + 1) {
@@ -143,7 +154,11 @@ pub fn parse_snapshot(argv: &[String]) -> Parsed {
         }
         i += 1;
     }
-    Parsed { positional, flags, raw: argv.to_vec() }
+    Parsed {
+        positional,
+        flags,
+        raw: argv.to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -157,14 +172,23 @@ mod tests {
     #[test]
     fn trace_is_taken_as_a_flag_anywhere_before_the_terminator() {
         assert_eq!(take_trace(&v(&["@e3", "--trace"])), (true, v(&["@e3"])));
-        assert_eq!(take_trace(&v(&["--trace", "@e3", "x"])), (true, v(&["@e3", "x"])));
+        assert_eq!(
+            take_trace(&v(&["--trace", "@e3", "x"])),
+            (true, v(&["@e3", "x"]))
+        );
         assert_eq!(take_trace(&v(&["@e3", "x"])), (false, v(&["@e3", "x"])));
     }
 
     #[test]
     fn trace_after_the_terminator_is_a_value() {
-        assert_eq!(take_trace(&v(&["--", "--trace"])), (false, v(&["--", "--trace"])));
-        assert_eq!(take_trace(&v(&["--trace", "--", "--trace"])), (true, v(&["--", "--trace"])));
+        assert_eq!(
+            take_trace(&v(&["--", "--trace"])),
+            (false, v(&["--", "--trace"]))
+        );
+        assert_eq!(
+            take_trace(&v(&["--trace", "--", "--trace"])),
+            (true, v(&["--", "--trace"]))
+        );
         let p = parse(&v(&["--", "--trace"]));
         assert_eq!(p.positional, v(&["--trace"]));
         assert!(p.flags.is_empty());

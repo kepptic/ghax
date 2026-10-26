@@ -31,7 +31,11 @@ fn try_print(data: &Value, json: bool) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     if json {
-        writeln!(out, "{}", serde_json::to_string_pretty(data).unwrap_or_else(|_| "null".into()))?;
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(data).unwrap_or_else(|_| "null".into())
+        )?;
         return Ok(());
     }
     match data {
@@ -66,7 +70,11 @@ fn try_print(data: &Value, json: bool) -> io::Result<()> {
                 }
                 return Ok(());
             }
-            writeln!(out, "{}", serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".into()))?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".into())
+            )?;
         }
     }
     Ok(())
