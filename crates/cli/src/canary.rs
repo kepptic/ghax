@@ -23,9 +23,9 @@ use crate::rpc;
 use crate::state::{self, Config};
 use anyhow::Result;
 use serde::Serialize;
-use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 // ── JSON report types ──────────────────────────────────────────────────────
@@ -64,10 +64,19 @@ use crate::time_util::{iso_now, now_ms};
 fn hostname_of(url: &str) -> String {
     // Find ://, then take everything up to the first / ? or end.
     let after_scheme = url.split_once("://").map(|(_, a)| a).unwrap_or(url);
-    let host = after_scheme.split(&['/', '?', '#'][..]).next().unwrap_or(after_scheme);
+    let host = after_scheme
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or(after_scheme);
     // Sanitise non-alphanumeric (matches TS `.replace(/[^a-z0-9.-]/gi, '_')`).
     host.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -77,20 +86,30 @@ pub fn cmd_canary(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     let url = match parsed.positional.first() {
         Some(u) => u.clone(),
         None => {
-            eprintln!("Usage: ghax canary <url> [--interval 60] [--max 3600] [--out <report.json>] [--fail-fast]");
+            eprintln!(
+                "Usage: ghax canary <url> [--interval 60] [--max 3600] [--out <report.json>] [--fail-fast]"
+            );
             return Ok(EXIT_USAGE);
         }
     };
 
-    let interval_sec: u64 = parsed.flags.get("interval")
+    let interval_sec: u64 = parsed
+        .flags
+        .get("interval")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
         .unwrap_or(60);
-    let max_sec: u64 = parsed.flags.get("max")
+    let max_sec: u64 = parsed
+        .flags
+        .get("max")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
         .unwrap_or(3600);
-    let out_path = parsed.flags.get("out").and_then(|v| v.as_str()).map(str::to_string);
+    let out_path = parsed
+        .flags
+        .get("out")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let fail_fast = matches!(parsed.flags.get("fail-fast"), Some(Value::Bool(true)));
 
     // ── Daemon ──
@@ -142,7 +161,11 @@ pub fn cmd_canary(cfg: &Config, parsed: &Parsed) -> Result<i32> {
                 load_ms = now_ms() - cycle_start;
 
                 // Check for redirect (matches TS: `nav.url !== url && !nav.url.startsWith(url)`).
-                let final_url = nav.get("url").and_then(|v| v.as_str()).unwrap_or(url.as_str()).to_string();
+                let final_url = nav
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(url.as_str())
+                    .to_string();
                 if final_url != url && !final_url.starts_with(url.as_str()) {
                     notes = Some(vec![format!("redirected to {final_url}")]);
                 }
@@ -165,7 +188,11 @@ pub fn cmd_canary(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         println!("{line}");
 
         // Append to log file (best-effort, matching TS try/catch).
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
             use std::io::Write;
             let _ = writeln!(f, "{line}");
         }
@@ -216,7 +243,14 @@ pub fn cmd_canary(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         std::fs::write(path, &json_str)?;
         println!("report → {path}");
     }
-    println!("canary done — {ok_cycles}/{} cycles ok", report.cycles.len());
+    println!(
+        "canary done — {ok_cycles}/{} cycles ok",
+        report.cycles.len()
+    );
 
-    Ok(if fail_cycles > 0 { EXIT_CDP_ERROR } else { EXIT_OK })
+    Ok(if fail_cycles > 0 {
+        EXIT_CDP_ERROR
+    } else {
+        EXIT_OK
+    })
 }

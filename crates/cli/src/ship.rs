@@ -18,16 +18,8 @@ use std::process::Command;
 /// Run a command, capture stdout+stderr. Returns (success, stdout, stderr).
 /// On non-zero exit with `silent_fail=false`, prints the standard failure
 /// message that mirrors the TS `sh()` helper's error output.
-fn sh(
-    program: &str,
-    args: &[&str],
-    cwd: &str,
-    silent_fail: bool,
-) -> (bool, String, String) {
-    let out = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output();
+fn sh(program: &str, args: &[&str], cwd: &str, silent_fail: bool) -> (bool, String, String) {
+    let out = Command::new(program).args(args).current_dir(cwd).output();
     match out {
         Err(e) => {
             if !silent_fail {
@@ -40,7 +32,12 @@ fn sh(
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let ok = o.status.success();
             if !ok && !silent_fail {
-                eprintln!("ghax ship: {} {} failed ({})", program, args.join(" "), o.status);
+                eprintln!(
+                    "ghax ship: {} {} failed ({})",
+                    program,
+                    args.join(" "),
+                    o.status
+                );
                 if !stderr.is_empty() {
                     eprintln!("{stderr}");
                 }
@@ -70,10 +67,22 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
         .get("message")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let skip_check = matches!(parsed.flags.get("no-check"), Some(serde_json::Value::Bool(true)));
-    let skip_build = matches!(parsed.flags.get("no-build"), Some(serde_json::Value::Bool(true)));
-    let skip_pr = matches!(parsed.flags.get("no-pr"), Some(serde_json::Value::Bool(true)));
-    let dry = matches!(parsed.flags.get("dry-run"), Some(serde_json::Value::Bool(true)));
+    let skip_check = matches!(
+        parsed.flags.get("no-check"),
+        Some(serde_json::Value::Bool(true))
+    );
+    let skip_build = matches!(
+        parsed.flags.get("no-build"),
+        Some(serde_json::Value::Bool(true))
+    );
+    let skip_pr = matches!(
+        parsed.flags.get("no-pr"),
+        Some(serde_json::Value::Bool(true))
+    );
+    let dry = matches!(
+        parsed.flags.get("dry-run"),
+        Some(serde_json::Value::Bool(true))
+    );
 
     // Locate repo root.
     let root_out = Command::new("git")
@@ -105,10 +114,8 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
         if dirty {
             println!(
                 "  {step}. git add -A && git commit --message \"{}\"",
-                msg.as_deref().unwrap_or(&format!(
-                    "ghax ship {}",
-                    chrono_like_ts()
-                ))
+                msg.as_deref()
+                    .unwrap_or(&format!("ghax ship {}", chrono_like_ts()))
             );
             step += 1;
         }
@@ -151,10 +158,18 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
         let commit_msg = msg
             .clone()
             .unwrap_or_else(|| format!("ghax ship {}", chrono_like_ts()));
-        let (commit_ok, commit_stdout, commit_stderr) =
-            sh("git", &["commit", "--message", &commit_msg], &repo_root, false);
+        let (commit_ok, commit_stdout, commit_stderr) = sh(
+            "git",
+            &["commit", "--message", &commit_msg],
+            &repo_root,
+            false,
+        );
         if !commit_ok {
-            let out = if commit_stderr.is_empty() { &commit_stdout } else { &commit_stderr };
+            let out = if commit_stderr.is_empty() {
+                &commit_stdout
+            } else {
+                &commit_stderr
+            };
             eprintln!("{out}");
             return Ok(EXIT_USAGE);
         }
@@ -178,7 +193,11 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
     let (push_ok, push_stdout, push_stderr) =
         sh("git", &["push", "-u", "origin", &branch], &repo_root, false);
     if !push_ok {
-        let out = if push_stderr.is_empty() { &push_stdout } else { &push_stderr };
+        let out = if push_stderr.is_empty() {
+            &push_stdout
+        } else {
+            &push_stderr
+        };
         eprintln!("{out}");
         return Ok(EXIT_CDP_ERROR);
     }
@@ -212,7 +231,11 @@ pub fn cmd_ship(parsed: &Parsed) -> Result<i32> {
                         println!("PR already exists: {}", view_stdout.trim());
                     }
                 } else {
-                    let out = if pr_stderr.is_empty() { &pr_stdout } else { &pr_stderr };
+                    let out = if pr_stderr.is_empty() {
+                        &pr_stdout
+                    } else {
+                        &pr_stderr
+                    };
                     eprintln!("{out}");
                     return Ok(EXIT_CDP_ERROR);
                 }

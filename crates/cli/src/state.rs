@@ -15,7 +15,7 @@
 //! under `~/.ghax/daemons/` decides — exactly one live daemon is used (one
 //! stderr line says which), more than one is refused with the list.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,15 +56,22 @@ pub fn resolve_config() -> Config {
         let project_dir = home_dir().unwrap_or_else(|| PathBuf::from("."));
         let state_dir = project_dir.join(".ghax");
         let state_file = state_dir.join("ghax.json");
-        return Config { project_dir, state_dir, state_file };
+        return Config {
+            project_dir,
+            state_dir,
+            state_file,
+        };
     }
 
-    let project_dir = git_root().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let project_dir = git_root()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let state_dir = project_dir.join(".ghax");
     let state_file = state_dir.join("ghax.json");
-    Config { project_dir, state_dir, state_file }
+    Config {
+        project_dir,
+        state_dir,
+        state_file,
+    }
 }
 
 /// A daemon's discovery entry, `~/.ghax/daemons/<pid>.json`. Written by the
@@ -136,7 +143,10 @@ pub struct RegistryScan {
 }
 
 pub fn scan_registry(dir: &Path) -> RegistryScan {
-    let mut scan = RegistryScan { live: Vec::new(), unreadable: Vec::new() };
+    let mut scan = RegistryScan {
+        live: Vec::new(),
+        unreadable: Vec::new(),
+    };
     let Ok(read) = std::fs::read_dir(dir) else {
         return scan;
     };
@@ -245,7 +255,9 @@ pub fn unreadable_message(files: &[PathBuf]) -> String {
     for f in files {
         msg.push_str(&format!("\n  {}", f.display()));
     }
-    msg.push_str("\n  Set GHAX_STATE_FILE to the daemon you want, or delete the file if its daemon is gone.");
+    msg.push_str(
+        "\n  Set GHAX_STATE_FILE to the daemon you want, or delete the file if its daemon is gone.",
+    );
     msg
 }
 
@@ -285,7 +297,9 @@ pub fn resolve_config_with_origin() -> Result<(Config, Option<RegistryEntry>)> {
         || std::env::var("GHAX_GLOBAL").as_deref() == Ok("1");
     match discover(&cfg, registry_dir().as_deref(), explicit) {
         Discovery::Own | Discovery::NoneLive => Ok((cfg, None)),
-        Discovery::Adopt(entry) => Ok((config_for_state_file(entry.state_file.clone()), Some(entry))),
+        Discovery::Adopt(entry) => {
+            Ok((config_for_state_file(entry.state_file.clone()), Some(entry)))
+        }
         Discovery::Ambiguous(live) => Err(anyhow!(ambiguous_message(&cfg, &live))),
         Discovery::Unreadable(files) => Err(anyhow!(unreadable_message(&files))),
     }
@@ -314,7 +328,11 @@ pub fn note_adoption(entry: &RegistryEntry) {
     eprintln!(
         "ghax: no daemon here, using the one attached from {} ({}, pid {}). Set GHAX_STATE_FILE={} to pin it.",
         entry.cwd,
-        if entry.browser_kind.is_empty() { "?" } else { &entry.browser_kind },
+        if entry.browser_kind.is_empty() {
+            "?"
+        } else {
+            &entry.browser_kind
+        },
         entry.pid,
         entry.state_file.display()
     );
@@ -356,13 +374,14 @@ pub fn is_process_alive(pid: i32) -> bool {
 }
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
 #[cfg(unix)]
 unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
-    kill(pid, sig)
+    // SAFETY: plain POSIX kill(2); the caller picks pid and signal.
+    unsafe { kill(pid, sig) }
 }
 
 #[cfg(not(unix))]
@@ -631,21 +650,26 @@ mod tests {
         write_entry(&reg, std::process::id() as i32, "/work/a");
         let prev_reg = std::env::var_os("GHAX_DAEMON_REGISTRY");
         let prev_state = std::env::var_os("GHAX_STATE_FILE");
-        std::env::set_var("GHAX_DAEMON_REGISTRY", &reg);
-        std::env::remove_var("GHAX_STATE_FILE");
-        std::env::set_var("GHAX_GLOBAL", "1");
-        let cfg = resolve_config_for_use().unwrap();
-        std::env::remove_var("GHAX_GLOBAL");
-        match prev_reg {
-            Some(v) => std::env::set_var("GHAX_DAEMON_REGISTRY", v),
-            None => std::env::remove_var("GHAX_DAEMON_REGISTRY"),
+        // SAFETY: every test that touches the environment holds ENV_LOCK.
+        unsafe {
+            std::env::set_var("GHAX_DAEMON_REGISTRY", &reg);
+            std::env::remove_var("GHAX_STATE_FILE");
+            std::env::set_var("GHAX_GLOBAL", "1");
         }
-        if let Some(v) = prev_state {
-            std::env::set_var("GHAX_STATE_FILE", v);
+        let cfg = resolve_config_for_use().unwrap();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("GHAX_GLOBAL");
+            match prev_reg {
+                Some(v) => std::env::set_var("GHAX_DAEMON_REGISTRY", v),
+                None => std::env::remove_var("GHAX_DAEMON_REGISTRY"),
+            }
+            if let Some(v) = prev_state {
+                std::env::set_var("GHAX_STATE_FILE", v);
+            }
         }
         assert!(
-            cfg.state_file.ends_with(".ghax/ghax.json")
-                && !cfg.state_file.starts_with("/work/a"),
+            cfg.state_file.ends_with(".ghax/ghax.json") && !cfg.state_file.starts_with("/work/a"),
             "GHAX_GLOBAL must not adopt the registered daemon: {}",
             cfg.state_file.display()
         );

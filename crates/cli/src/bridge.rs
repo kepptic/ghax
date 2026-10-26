@@ -8,7 +8,7 @@
 //! the wire protocol.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::args::{self, Parsed};
 use crate::dispatch::{EXIT_OK, EXIT_USAGE};
@@ -57,10 +57,16 @@ fn cmd_bridge_instances(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         return Ok(EXIT_OK);
     }
 
-    let state = data.get("state").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+    let state = data
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN");
     println!("session  {state}");
     let empty = vec![];
-    let instances = data.get("instances").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let instances = data
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
     if instances.is_empty() {
         println!("(no extension has connected yet)");
         return Ok(EXIT_OK);
@@ -80,23 +86,43 @@ fn cmd_bridge_instances(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         } else {
             " "
         };
-        let browser = inst.get("browser").and_then(|v| v.as_str()).unwrap_or("browser");
-        let id = inst.get("instanceId").and_then(|v| v.as_str()).unwrap_or("");
+        let browser = inst
+            .get("browser")
+            .and_then(|v| v.as_str())
+            .unwrap_or("browser");
+        let id = inst
+            .get("instanceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let short: String = id.chars().take(6).collect();
         let label = inst.get("label").and_then(|v| v.as_str()).unwrap_or("");
-        let connected = inst.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+        let connected = inst
+            .get("connected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let tab = inst
             .get("controlledTabId")
             .and_then(|v| v.as_i64())
             .map(|t| format!("tab {t}"))
             .unwrap_or_else(|| "no tab".into());
         let hellos = inst.get("helloCount").and_then(|v| v.as_i64()).unwrap_or(0);
-        let replaced = inst.get("replacedCount").and_then(|v| v.as_i64()).unwrap_or(0);
-        let label_part = if label.is_empty() { String::new() } else { format!(" \"{label}\"") };
+        let replaced = inst
+            .get("replacedCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let label_part = if label.is_empty() {
+            String::new()
+        } else {
+            format!(" \"{label}\"")
+        };
         println!(
             "{marker} {role:<6} {browser}·{short}{label_part}  {tab}  {}  hello×{hellos}{}",
             if connected { "connected" } else { "offline" },
-            if replaced > 0 { format!(" replaced×{replaced}") } else { String::new() },
+            if replaced > 0 {
+                format!(" replaced×{replaced}")
+            } else {
+                String::new()
+            },
         );
     }
     if data.get("livelockSuspected").and_then(|v| v.as_bool()) == Some(true) {
@@ -124,8 +150,14 @@ fn cmd_bridge_use(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     if parsed.json() {
         output::print(&data, true);
     } else {
-        let browser = data.get("browser").and_then(|v| v.as_str()).unwrap_or("browser");
-        let id = data.get("instanceId").and_then(|v| v.as_str()).unwrap_or("");
+        let browser = data
+            .get("browser")
+            .and_then(|v| v.as_str())
+            .unwrap_or("browser");
+        let id = data
+            .get("instanceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let short: String = id.chars().take(6).collect();
         println!("bound → {browser}·{short}");
     }
@@ -229,7 +261,10 @@ fn cmd_bridge_reload(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         return Ok(EXIT_OK);
     }
 
-    println!("bridge extension reloaded: {}", format_extension_identity(&after));
+    println!(
+        "bridge extension reloaded: {}",
+        format_extension_identity(&after)
+    );
     Ok(EXIT_OK)
 }
 
@@ -256,7 +291,11 @@ fn cmd_bridge_stats(cfg: &Config, parsed: &Parsed) -> Result<i32> {
             "method", "calls", "errors", "total ms", "avg ms", "max ms"
         );
         for (method, calls, errors, total, max) in &rows {
-            let avg = if *calls > 0 { total / *calls as f64 } else { 0.0 };
+            let avg = if *calls > 0 {
+                total / *calls as f64
+            } else {
+                0.0
+            };
             println!("{method:<36} {calls:>7} {errors:>6} {total:>10.1} {avg:>8.1} {max:>8.1}");
         }
     }
@@ -276,7 +315,13 @@ fn stats_rows(data: &Value) -> Vec<(String, u64, u64, f64, f64)> {
         .map(|m| {
             m.iter()
                 .map(|(k, v)| {
-                    (k.clone(), u(v, "calls"), u(v, "errors"), f(v, "totalMs"), f(v, "maxMs"))
+                    (
+                        k.clone(),
+                        u(v, "calls"),
+                        u(v, "errors"),
+                        f(v, "totalMs"),
+                        f(v, "maxMs"),
+                    )
                 })
                 .collect()
         })
@@ -286,7 +331,10 @@ fn stats_rows(data: &Value) -> Vec<(String, u64, u64, f64, f64)> {
 }
 
 fn format_extension_identity(info: &Value) -> String {
-    let agent = info.get("agent").and_then(|v| v.as_str()).unwrap_or("ghax-ext");
+    let agent = info
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ghax-ext");
     let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("?");
     let sha = info.get("gitSha").and_then(|v| v.as_str());
     let date = info.get("buildDate").and_then(|v| v.as_str());
@@ -380,7 +428,10 @@ mod tests {
     #[test]
     fn format_extension_identity_includes_provenance_when_present() {
         let info = json!({ "agent": "ghax-ext", "version": "0.8.0", "gitSha": "abc1234", "buildDate": "2026-09-22" });
-        assert_eq!(format_extension_identity(&info), "ghax-ext v0.8.0 (abc1234 2026-09-22)");
+        assert_eq!(
+            format_extension_identity(&info),
+            "ghax-ext v0.8.0 (abc1234 2026-09-22)"
+        );
     }
 
     #[test]

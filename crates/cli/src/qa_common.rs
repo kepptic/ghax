@@ -5,7 +5,7 @@
 
 use crate::rpc;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +40,11 @@ pub fn console_errors_since(port: u16, since_ms: u64, last: u64) -> Vec<ConsoleE
         .unwrap_or_default()
         .into_iter()
         .map(|e| ConsoleErrorEntry {
-            text: e.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            text: e
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             url: e.get("url").and_then(|v| v.as_str()).map(str::to_string),
         })
         .collect()
@@ -60,9 +64,17 @@ pub fn failed_requests_since(port: u16, since_ms: u64, last: u64) -> Vec<FailedR
         .into_iter()
         .filter(|e| e.get("status").and_then(|v| v.as_u64()).unwrap_or(0) >= 400)
         .map(|e| FailedRequestEntry {
-            url: e.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            url: e
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             status: e.get("status").and_then(|v| v.as_u64()).map(|n| n as u16),
-            method: e.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string(),
+            method: e
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("GET")
+                .to_string(),
         })
         .collect()
 }

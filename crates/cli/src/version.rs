@@ -22,7 +22,7 @@
 //! exposes both as `daemonVersionMismatch` / `extensionVersionMismatch`.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::args::Parsed;
@@ -53,7 +53,10 @@ const BUILD_DATE: &str = match option_env!("GHAX_BUILD_DATE") {
 /// before and after a rebuild that changed nothing but the commit — you
 /// couldn't tell a fresh binary from a week-old one without `--full`.
 pub fn banner() -> String {
-    format!("ghax {} ({GIT_SHA} {BUILD_DATE})", env!("CARGO_PKG_VERSION"))
+    format!(
+        "ghax {} ({GIT_SHA} {BUILD_DATE})",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
@@ -101,10 +104,15 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     // `npm run build`, or a bridge extension not reloaded in
     // edge://extensions since. Distinct from `bundleMismatch` above, which
     // is about the daemon's *executable bytes*, not the semver it reports.
-    let daemon_version = daemon.as_ref().and_then(|d| d.get("version")).and_then(|v| v.as_str());
+    let daemon_version = daemon
+        .as_ref()
+        .and_then(|d| d.get("version"))
+        .and_then(|v| v.as_str());
     let daemon_version_mismatch = daemon_version.is_some_and(|v| v != cli_version);
     let extension_info = daemon.as_ref().and_then(|d| d.get("extensionInfo"));
-    let extension_version = extension_info.and_then(|e| e.get("version")).and_then(|v| v.as_str());
+    let extension_version = extension_info
+        .and_then(|e| e.get("version"))
+        .and_then(|v| v.as_str());
     let extension_version_mismatch = extension_version.is_some_and(|v| v != cli_version);
 
     if parsed.json() {
@@ -129,7 +137,10 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     println!("{}", banner());
     println!();
     println!("daemon bundle (resolves now):");
-    println!("  path   {}", resolved_path.as_deref().unwrap_or("<none found>"));
+    println!(
+        "  path   {}",
+        resolved_path.as_deref().unwrap_or("<none found>")
+    );
     println!("  tier   {resolved_tier}");
     println!("  sha256 {}", short_sha(&resolved_sha));
     println!();
@@ -142,8 +153,14 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
             println!("  path   {running_path}");
             println!("  sha256 {}", short_sha(running_sha));
             if let Some(v) = daemon_version {
-                let sha = d.get("gitSha").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let date = d.get("buildDate").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let sha = d
+                    .get("gitSha")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let date = d
+                    .get("buildDate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 println!("  version ghax-daemon {v} ({sha} {date})");
             }
             if d.get("bridgeMode").and_then(|v| v.as_bool()) == Some(true) {
@@ -156,7 +173,9 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 match ext_ver {
                     Some(v) => {
                         let sha = ext.and_then(|e| e.get("gitSha")).and_then(|v| v.as_str());
-                        let date = ext.and_then(|e| e.get("buildDate")).and_then(|v| v.as_str());
+                        let date = ext
+                            .and_then(|e| e.get("buildDate"))
+                            .and_then(|v| v.as_str());
                         let provenance = match (sha, date) {
                             (Some(s), Some(d)) => format!(" ({s} {d})"),
                             _ => String::new(),

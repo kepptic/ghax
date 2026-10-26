@@ -28,10 +28,16 @@ fn emit_git_sha() {
         println!("cargo:rerun-if-changed={}", head.display());
         if let Ok(contents) = std::fs::read_to_string(&head) {
             if let Some(ref_path) = contents.trim().strip_prefix("ref: ") {
-                println!("cargo:rerun-if-changed={}", git_dir.join(ref_path).display());
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    git_dir.join(ref_path).display()
+                );
             }
         }
-        println!("cargo:rerun-if-changed={}", git_dir.join("packed-refs").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join("packed-refs").display()
+        );
     }
 
     // Respect an explicit override (e.g. a release pipeline that builds from
@@ -40,7 +46,10 @@ fn emit_git_sha() {
         return;
     }
 
-    if let Ok(out) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output() {
+    if let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+    {
         if out.status.success() {
             if let Ok(sha) = String::from_utf8(out.stdout) {
                 let sha = sha.trim();
@@ -73,7 +82,10 @@ fn emit_build_date() {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or_else(now_epoch_secs);
 
-    println!("cargo:rustc-env=GHAX_BUILD_DATE={}", format_date(epoch_secs));
+    println!(
+        "cargo:rustc-env=GHAX_BUILD_DATE={}",
+        format_date(epoch_secs)
+    );
 }
 
 fn now_epoch_secs() -> i64 {

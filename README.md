@@ -61,7 +61,7 @@ Stay current: `ghax update` installs the latest release in place; `ghax update -
 
 ### From source (for contributors)
 
-Needs Rust 1.80+ and Node 20+.
+Needs the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it on first build) and Node 20+.
 
 ```bash
 git clone https://github.com/kepptic/ghax.git

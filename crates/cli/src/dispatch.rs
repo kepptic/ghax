@@ -6,7 +6,7 @@ use crate::rpc::{self, RpcError};
 use crate::state::{self, Config};
 use crate::{attach, canary, qa, review, ship, small, update};
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
@@ -26,7 +26,9 @@ fn empty_target(verb: &str, parsed: &Parsed) -> Option<i32> {
     match parsed.positional.first() {
         Some(t) if !t.trim().is_empty() => None,
         _ => {
-            eprintln!("ghax: {verb}: target is empty — pass an @ref or selector (unset shell variable?)");
+            eprintln!(
+                "ghax: {verb}: target is empty — pass an @ref or selector (unset shell variable?)"
+            );
             Some(EXIT_BAD_TARGET)
         }
     }
@@ -44,7 +46,9 @@ pub(crate) fn parse_switches(rest: &[String], names: &[&str]) -> Parsed {
     let mut seen: Vec<&str> = Vec::new();
     let mut kept: Vec<String> = Vec::with_capacity(rest.len());
     for (i, tok) in rest.iter().enumerate() {
-        let bare = tok.strip_prefix("--").filter(|n| i < end && names.contains(n));
+        let bare = tok
+            .strip_prefix("--")
+            .filter(|n| i < end && names.contains(n));
         match bare {
             Some(n) => seen.push(n),
             None => kept.push(tok.clone()),
@@ -54,7 +58,9 @@ pub(crate) fn parse_switches(rest: &[String], names: &[&str]) -> Parsed {
     for name in names {
         match parsed.flags.get(*name).cloned() {
             Some(Value::String(v)) if v == "true" || v == "false" => {
-                parsed.flags.insert((*name).to_string(), Value::Bool(v == "true"));
+                parsed
+                    .flags
+                    .insert((*name).to_string(), Value::Bool(v == "true"));
             }
             // `--name=x` with any other value, or a duplicate: leave it be.
             Some(_) => {}
@@ -209,7 +215,9 @@ mod local_only_tests {
         assert!(borrow_allowed("bridge", &v(&["instances"])));
         assert!(!borrow_allowed("bridge", &v(&["use", "edge"])));
         assert!(!borrow_allowed("bridge", &v(&["reload"])));
-        for verb in ["goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot"] {
+        for verb in [
+            "goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot",
+        ] {
             assert!(!borrow_allowed(verb, &v(&[])), "{verb}");
         }
     }
@@ -218,10 +226,16 @@ mod local_only_tests {
     fn borrowed_console_and_network_refuse_writing_flags() {
         assert!(!borrow_allowed("network", &v(&["--har", "/tmp/x.har"])));
         assert!(!borrow_allowed("network", &v(&["--har=/tmp/x.har"])));
-        assert!(!borrow_allowed("network", &v(&["--pattern", "api", "--export", "x"])));
+        assert!(!borrow_allowed(
+            "network",
+            &v(&["--pattern", "api", "--export", "x"])
+        ));
         assert!(!borrow_allowed("console", &v(&["--clear"])));
         assert!(!borrow_allowed("console", &v(&["--source-maps"])));
-        assert!(borrow_allowed("network", &v(&["--pattern", "api", "--last", "5"])));
+        assert!(borrow_allowed(
+            "network",
+            &v(&["--pattern", "api", "--last", "5"])
+        ));
         assert!(borrow_allowed("console", &v(&["--errors", "--follow"])));
         // A value that merely mentions a flag is not that flag.
         assert!(borrow_allowed("network", &v(&["--pattern", "x--har"])));
@@ -279,9 +293,8 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, "tab", parsed)
         }
 
-        "find" | "goto" | "try" | "xpath" | "box" | "click" | "press"
-        | "type" | "html" | "wait" | "viewport" | "responsive" | "diff"
-        | "storage" | "perf" | "profile" => {
+        "find" | "goto" | "try" | "xpath" | "box" | "click" | "press" | "type" | "html"
+        | "wait" | "viewport" | "responsive" | "diff" | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
         }
@@ -305,7 +318,12 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
                 return simple(cfg, "screenshot", parsed);
             }
             let port = state::require_daemon(cfg)?;
-            let data = rpc::call(port, "screenshot", parsed.positional_value(), parsed.opts_without_json())?;
+            let data = rpc::call(
+                port,
+                "screenshot",
+                parsed.positional_value(),
+                parsed.opts_without_json(),
+            )?;
             match data.get("path").and_then(|v| v.as_str()) {
                 Some(p) => println!("{p}"),
                 None => output::print(&data, false),
@@ -375,8 +393,16 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "is" => {
             let parsed = args::parse(rest);
             let port = state::require_daemon(cfg)?;
-            let data = rpc::call(port, "is", parsed.positional_value(), parsed.opts_without_json())?;
-            let result = data.get("result").and_then(|v| v.as_bool()).unwrap_or(false);
+            let data = rpc::call(
+                port,
+                "is",
+                parsed.positional_value(),
+                parsed.opts_without_json(),
+            )?;
+            let result = data
+                .get("result")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if parsed.json() {
                 output::print(&data, true);
             } else {
@@ -407,7 +433,12 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
 
 fn simple(cfg: &Config, cmd: &str, parsed: Parsed) -> Result<i32> {
     let port = state::require_daemon(cfg)?;
-    let data = rpc::call(port, cmd, parsed.positional_value(), parsed.opts_without_json())?;
+    let data = rpc::call(
+        port,
+        cmd,
+        parsed.positional_value(),
+        parsed.opts_without_json(),
+    )?;
     output::print(&data, parsed.json());
     Ok(EXIT_OK)
 }
@@ -421,7 +452,9 @@ fn simple_no_args(cfg: &Config, cmd: &str, parsed: Parsed) -> Result<i32> {
 
 fn dispatch_ext(cfg: &Config, rest: &[String]) -> Result<i32> {
     let Some(sub) = rest.first() else {
-        eprintln!("Usage: ghax ext <list|targets|reload|sw|panel|popup|options|storage|message> [...]");
+        eprintln!(
+            "Usage: ghax ext <list|targets|reload|sw|panel|popup|options|storage|message> [...]"
+        );
         return Ok(EXIT_USAGE);
     };
     let parsed = args::parse(&rest[1..]);
@@ -431,7 +464,12 @@ fn dispatch_ext(cfg: &Config, rest: &[String]) -> Result<i32> {
         "targets" => simple(cfg, "ext.targets", parsed),
         "reload" => {
             let port = state::require_daemon(cfg)?;
-            let data = rpc::call(port, "ext.reload", parsed.positional_value(), parsed.opts_without_json())?;
+            let data = rpc::call(
+                port,
+                "ext.reload",
+                parsed.positional_value(),
+                parsed.opts_without_json(),
+            )?;
             if parsed.json() {
                 output::print(&data, true);
             } else {
@@ -474,7 +512,12 @@ fn dispatch_ext_sw(cfg: &Config, rest: &[String]) -> Result<i32> {
             let port = state::require_daemon(cfg)?;
             let mut positional = vec![Value::String(ext_id.clone())];
             positional.extend(parsed.positional.iter().cloned().map(Value::String));
-            let data = rpc::call(port, "ext.sw.eval", Value::Array(positional), parsed.opts_without_json())?;
+            let data = rpc::call(
+                port,
+                "ext.sw.eval",
+                Value::Array(positional),
+                parsed.opts_without_json(),
+            )?;
             output::print(&data, parsed.json());
             Ok(EXIT_OK)
         }
@@ -510,14 +553,21 @@ fn dispatch_ext_inner(cfg: &Config, surface: &str, rest: &[String]) -> Result<i3
     let cmd = format!("ext.{surface}.eval");
     let mut positional = vec![Value::String(ext_id.clone())];
     positional.extend(parsed.positional.iter().cloned().map(Value::String));
-    let data = rpc::call(port, &cmd, Value::Array(positional), parsed.opts_without_json())?;
+    let data = rpc::call(
+        port,
+        &cmd,
+        Value::Array(positional),
+        parsed.opts_without_json(),
+    )?;
     output::print(&data, parsed.json());
     Ok(EXIT_OK)
 }
 
 fn dispatch_gesture(cfg: &Config, rest: &[String]) -> Result<i32> {
     let Some(sub) = rest.first() else {
-        eprintln!("Usage: ghax gesture <click|dblclick|tripleclick|rightclick|hover|scroll|key> [args...]");
+        eprintln!(
+            "Usage: ghax gesture <click|dblclick|tripleclick|rightclick|hover|scroll|key> [args...]"
+        );
         return Ok(EXIT_USAGE);
     };
     let parsed = args::parse(&rest[1..]);
@@ -546,18 +596,31 @@ fn dispatch_record(cfg: &Config, rest: &[String]) -> Result<i32> {
     match sub.as_str() {
         "start" => {
             let port = state::require_daemon(cfg)?;
-            let data = rpc::call(port, "record.start", parsed.positional_value(), parsed.opts_without_json())?;
+            let data = rpc::call(
+                port,
+                "record.start",
+                parsed.positional_value(),
+                parsed.opts_without_json(),
+            )?;
             if parsed.json() {
                 output::print(&data, true);
             } else {
-                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("recording");
+                let name = data
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("recording");
                 println!("recording → {name}");
             }
             Ok(EXIT_OK)
         }
         "stop" => {
             let port = state::require_daemon(cfg)?;
-            let data = rpc::call(port, "record.stop", parsed.positional_value(), parsed.opts_without_json())?;
+            let data = rpc::call(
+                port,
+                "record.stop",
+                parsed.positional_value(),
+                parsed.opts_without_json(),
+            )?;
             if parsed.json() {
                 output::print(&data, true);
             } else {
@@ -616,7 +679,10 @@ mod tests {
 
     #[test]
     fn switch_does_not_disturb_valued_flags() {
-        let p = parse_switches(&v(&["#src", "--force", "#dst", "--steps", "5", "--mode=html5"]), &["force"]);
+        let p = parse_switches(
+            &v(&["#src", "--force", "#dst", "--steps", "5", "--mode=html5"]),
+            &["force"],
+        );
         assert_eq!(p.positional, v(&["#src", "#dst"]));
         assert_eq!(p.flags.get("steps"), Some(&Value::String("5".into())));
         assert_eq!(p.flags.get("mode"), Some(&Value::String("html5".into())));

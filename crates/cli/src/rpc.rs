@@ -3,7 +3,7 @@
 //! All daemon traffic is HTTP+JSON to `127.0.0.1:<port>/rpc` with the body
 //! `{cmd, args, opts}`. The daemon answers with `{ok, data?, error?, exitCode?}`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -161,7 +161,11 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
         }
     }
     if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()) {
-        return if secs == 0 { None } else { Some(Duration::from_secs(secs)) };
+        return if secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(secs))
+        };
     }
     let base = Duration::from_secs(DEFAULT_RPC_TIMEOUT_SECS);
     Some(match cmd {
@@ -180,7 +184,9 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
                         / 1000
                 })
                 .unwrap_or(0);
-            Duration::from_secs((DEFAULT_RPC_TIMEOUT_SECS * steps as u64 + polling).min(BATCH_CAP_SECS))
+            Duration::from_secs(
+                (DEFAULT_RPC_TIMEOUT_SECS * steps as u64 + polling).min(BATCH_CAP_SECS),
+            )
         }
         // perf --wait <ms>
         "perf" => base + Duration::from_millis(num(opts.get("wait")).unwrap_or(0)),
@@ -195,13 +201,18 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
 pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
     let env = std::env::var("GHAX_RPC_TIMEOUT").ok();
     let timeout = timeout_for(cmd, &args, &opts, env.as_deref());
-    let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()?;
     call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
 }
 
 /// Turn a bare reqwest timeout into an error that says what to do.
 fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> anyhow::Error {
-    let timed_out = err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false);
+    let timed_out = err
+        .downcast_ref::<reqwest::Error>()
+        .map(|e| e.is_timeout())
+        .unwrap_or(false);
     match (timed_out, timeout) {
         (true, Some(t)) => anyhow!(RpcError {
             message: format!("daemon did not answer `{cmd}` within {}s", t.as_secs()),
@@ -244,7 +255,11 @@ fn call_once(
     opts: &Value,
 ) -> Result<Value> {
     let url = format!("http://127.0.0.1:{port}/rpc");
-    let marked = marked_opts(opts, TRACE.load(Ordering::Relaxed), BORROWED.load(Ordering::Relaxed));
+    let marked = marked_opts(
+        opts,
+        TRACE.load(Ordering::Relaxed),
+        BORROWED.load(Ordering::Relaxed),
+    );
     let opts = marked.as_ref().unwrap_or(opts);
     let body = Request { cmd, args, opts };
     let resp = client.post(&url).json(&body).send()?;
@@ -253,16 +268,29 @@ fn call_once(
         eprintln!("{}", format_trace(trace));
     }
 
-    let ok = envelope.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = envelope
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !ok {
         let message = envelope
             .get("error")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| format!("RPC {cmd} failed"));
-        let exit_code = envelope.get("exitCode").and_then(|v| v.as_i64()).map(|n| n as i32);
-        let hint = envelope.get("hint").and_then(|v| v.as_str()).map(str::to_string);
-        return Err(anyhow!(RpcError { message, exit_code, hint }));
+        let exit_code = envelope
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let hint = envelope
+            .get("hint")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        return Err(anyhow!(RpcError {
+            message,
+            exit_code,
+            hint
+        }));
     }
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
 }
@@ -294,7 +322,10 @@ fn should_retry(err: &anyhow::Error, class: RetryClass) -> bool {
 pub fn format_trace(trace: &Value) -> String {
     let num = |k: &str| trace.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
     let calls = trace.get("cdpCalls").and_then(|v| v.as_u64()).unwrap_or(0);
-    let transport = trace.get("transport").and_then(|v| v.as_str()).unwrap_or("?");
+    let transport = trace
+        .get("transport")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
     let mut top: Vec<(String, u64, f64)> = trace
         .get("byMethod")
         .and_then(|v| v.as_object())
@@ -315,8 +346,11 @@ pub fn format_trace(trace: &Value) -> String {
         num("handlerMs"),
     );
     if !top.is_empty() {
-        let parts: Vec<String> =
-            top.iter().take(3).map(|(m, c, ms)| format!("{m} x{c} ({ms:.1} ms)")).collect();
+        let parts: Vec<String> = top
+            .iter()
+            .take(3)
+            .map(|(m, c, ms)| format!("{m} x{c} ({ms:.1} ms)"))
+            .collect();
         line.push_str("; top: ");
         line.push_str(&parts.join(", "));
     }
@@ -332,8 +366,8 @@ mod tests {
     use serde_json::json;
     use std::io::Read;
     use std::net::TcpListener;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn borrowed_marker_rides_in_opts() {
@@ -350,19 +384,53 @@ mod tests {
 
     #[test]
     fn retry_classes() {
-        for cmd in ["status", "tabs", "snapshot", "findEl", "text", "bridge.stats", "ext.sw.logs"] {
-            assert_eq!(retry_class_for(cmd, &json!({})), RetryClass::Idempotent, "{cmd}");
+        for cmd in [
+            "status",
+            "tabs",
+            "snapshot",
+            "findEl",
+            "text",
+            "bridge.stats",
+            "ext.sw.logs",
+        ] {
+            assert_eq!(
+                retry_class_for(cmd, &json!({})),
+                RetryClass::Idempotent,
+                "{cmd}"
+            );
         }
-        for cmd in ["click", "fill", "goto", "eval", "batch", "box", "press", "brand-new-verb"] {
-            assert_eq!(retry_class_for(cmd, &json!({})), RetryClass::Mutating, "{cmd}");
+        for cmd in [
+            "click",
+            "fill",
+            "goto",
+            "eval",
+            "batch",
+            "box",
+            "press",
+            "brand-new-verb",
+        ] {
+            assert_eq!(
+                retry_class_for(cmd, &json!({})),
+                RetryClass::Mutating,
+                "{cmd}"
+            );
         }
     }
 
     #[test]
     fn a_resetting_stats_call_is_mutating() {
-        assert_eq!(retry_class_for("bridge.stats", &json!({})), RetryClass::Idempotent);
-        assert_eq!(retry_class_for("bridge.stats", &json!({ "reset": false })), RetryClass::Idempotent);
-        assert_eq!(retry_class_for("bridge.stats", &json!({ "reset": true })), RetryClass::Mutating);
+        assert_eq!(
+            retry_class_for("bridge.stats", &json!({})),
+            RetryClass::Idempotent
+        );
+        assert_eq!(
+            retry_class_for("bridge.stats", &json!({ "reset": false })),
+            RetryClass::Idempotent
+        );
+        assert_eq!(
+            retry_class_for("bridge.stats", &json!({ "reset": true })),
+            RetryClass::Mutating
+        );
     }
 
     #[test]
@@ -374,12 +442,20 @@ mod tests {
             .unwrap();
         let reset = json!({ "reset": true });
         let _ = call_with(&client, port, "bridge.stats", &json!([]), &reset).unwrap_err();
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "stats --reset must be sent once");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "stats --reset must be sent once"
+        );
     }
 
     #[test]
     fn rpc_error_is_never_retried() {
-        let err = anyhow!(RpcError { message: "nope".into(), exit_code: Some(4), hint: None });
+        let err = anyhow!(RpcError {
+            message: "nope".into(),
+            exit_code: Some(4),
+            hint: None
+        });
         assert!(!should_retry(&err, RetryClass::Idempotent));
         assert!(!should_retry(&err, RetryClass::Mutating));
     }
@@ -421,34 +497,82 @@ mod tests {
     fn timeouts_default_env_own_and_per_verb() {
         let none = json!({});
         let no_args = json!([]);
-        let t = |cmd: &str, args: &Value, opts: &Value, env: Option<&str>| timeout_for(cmd, args, opts, env);
-        assert_eq!(t("click", &no_args, &none, None), Some(Duration::from_secs(120)));
-        assert_eq!(t("eval", &no_args, &none, Some("5")), Some(Duration::from_secs(5)));
+        let t = |cmd: &str, args: &Value, opts: &Value, env: Option<&str>| {
+            timeout_for(cmd, args, opts, env)
+        };
+        assert_eq!(
+            t("click", &no_args, &none, None),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            t("eval", &no_args, &none, Some("5")),
+            Some(Duration::from_secs(5))
+        );
         assert_eq!(t("eval", &no_args, &none, Some("0")), None);
-        assert_eq!(t("eval", &no_args, &none, Some("junk")), Some(Duration::from_secs(120)));
+        assert_eq!(
+            t("eval", &no_args, &none, Some("junk")),
+            Some(Duration::from_secs(120))
+        );
         // Own --timeout wins, with a margin.
         let own = json!({ "timeout": "600000" });
-        assert_eq!(t("wait", &no_args, &own, None), Some(Duration::from_secs(630)));
+        assert_eq!(
+            t("wait", &no_args, &own, None),
+            Some(Duration::from_secs(630))
+        );
         // eval --timeout grows the CLI's budget too, so the daemon's answer wins.
         let eval_own = json!({ "timeout": "90000" });
-        assert_eq!(t("eval", &json!(["x"]), &eval_own, None), Some(Duration::from_secs(120)));
-        assert_eq!(t("eval", &json!(["x"]), &eval_own, Some("5")), Some(Duration::from_secs(120)));
+        assert_eq!(
+            t("eval", &json!(["x"]), &eval_own, None),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            t("eval", &json!(["x"]), &eval_own, Some("5")),
+            Some(Duration::from_secs(120))
+        );
         let own_ms = json!({ "timeoutMs": 45000 });
-        assert_eq!(t("bridge.reload", &no_args, &own_ms, Some("1")), Some(Duration::from_secs(75)));
+        assert_eq!(
+            t("bridge.reload", &no_args, &own_ms, Some("1")),
+            Some(Duration::from_secs(75))
+        );
         // Formerly unbounded verbs are bounded, and GHAX_RPC_TIMEOUT caps them.
         let three = json!([[{ "cmd": "a" }, { "cmd": "b" }, { "cmd": "c" }]]);
-        assert_eq!(t("batch", &three, &none, None), Some(Duration::from_secs(360)));
+        assert_eq!(
+            t("batch", &three, &none, None),
+            Some(Duration::from_secs(360))
+        );
         let many = json!([vec![json!({ "cmd": "a" }); 100]]);
-        assert_eq!(t("batch", &many, &none, None), Some(Duration::from_secs(1800)));
-        assert_eq!(t("batch", &three, &none, Some("10")), Some(Duration::from_secs(10)));
+        assert_eq!(
+            t("batch", &many, &none, None),
+            Some(Duration::from_secs(1800))
+        );
+        assert_eq!(
+            t("batch", &three, &none, Some("10")),
+            Some(Duration::from_secs(10))
+        );
         // An expect step's own polling window is added to the batch budget.
         let with_expect = json!([[{ "cmd": "goto" }, { "cmd": "expect", "opts": { "timeout": 60000 } }, { "cmd": "expect" }]]);
-        assert_eq!(t("batch", &with_expect, &none, None), Some(Duration::from_secs(360 + 65)));
-        assert_eq!(t("perf", &no_args, &json!({ "wait": "5000" }), None), Some(Duration::from_secs(125)));
-        assert_eq!(t("profile", &no_args, &json!({ "duration": "30" }), None), Some(Duration::from_secs(630)));
-        assert_eq!(t("ext.hot-reload", &no_args, &none, None), Some(Duration::from_secs(125)));
+        assert_eq!(
+            t("batch", &with_expect, &none, None),
+            Some(Duration::from_secs(360 + 65))
+        );
+        assert_eq!(
+            t("perf", &no_args, &json!({ "wait": "5000" }), None),
+            Some(Duration::from_secs(125))
+        );
+        assert_eq!(
+            t("profile", &no_args, &json!({ "duration": "30" }), None),
+            Some(Duration::from_secs(630))
+        );
+        assert_eq!(
+            t("ext.hot-reload", &no_args, &none, None),
+            Some(Duration::from_secs(125))
+        );
         for cmd in ["perf", "profile", "batch", "ext.hot-reload"] {
-            assert_eq!(t(cmd, &no_args, &none, Some("7")), Some(Duration::from_secs(7)), "{cmd} honours GHAX_RPC_TIMEOUT");
+            assert_eq!(
+                t(cmd, &no_args, &none, Some("7")),
+                Some(Duration::from_secs(7)),
+                "{cmd} honours GHAX_RPC_TIMEOUT"
+            );
         }
     }
 
@@ -460,12 +584,31 @@ mod tests {
             .build()
             .unwrap();
         let err = call_with(&client, port, "fill", &json!(["@e1", "x"]), &json!({})).unwrap_err();
-        assert!(err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false));
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "a timed-out fill must not be re-sent");
+        assert!(
+            err.downcast_ref::<reqwest::Error>()
+                .map(|e| e.is_timeout())
+                .unwrap_or(false)
+        );
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "a timed-out fill must not be re-sent"
+        );
         let explained = explain_timeout(err, "fill", Some(Duration::from_millis(200)));
-        let rpc = explained.downcast_ref::<RpcError>().expect("typed timeout error");
-        assert!(rpc.message.contains("did not answer `fill`"), "{}", rpc.message);
-        assert!(rpc.hint.as_deref().unwrap_or("").contains("GHAX_RPC_TIMEOUT"));
+        let rpc = explained
+            .downcast_ref::<RpcError>()
+            .expect("typed timeout error");
+        assert!(
+            rpc.message.contains("did not answer `fill`"),
+            "{}",
+            rpc.message
+        );
+        assert!(
+            rpc.hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("GHAX_RPC_TIMEOUT")
+        );
     }
 
     #[test]
@@ -489,8 +632,16 @@ mod tests {
                 .build()
                 .unwrap();
             let err = call_with(&client, port, cmd, &json!([]), &json!({})).unwrap_err();
-            assert!(err.downcast_ref::<reqwest::Error>().map(|e| e.is_timeout()).unwrap_or(false));
-            assert_eq!(seen.load(Ordering::SeqCst), 1, "{cmd} must not be re-sent after a timeout");
+            assert!(
+                err.downcast_ref::<reqwest::Error>()
+                    .map(|e| e.is_timeout())
+                    .unwrap_or(false)
+            );
+            assert_eq!(
+                seen.load(Ordering::SeqCst),
+                1,
+                "{cmd} must not be re-sent after a timeout"
+            );
         }
     }
 
@@ -517,10 +668,18 @@ mod tests {
         let client = reqwest::blocking::Client::new();
         let (port, seen) = hangup_daemon();
         let _ = call_with(&client, port, "tabs", &json!([]), &json!({})).unwrap_err();
-        assert_eq!(seen.load(Ordering::SeqCst), 2, "tabs gets exactly one retry after a hangup");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "tabs gets exactly one retry after a hangup"
+        );
         let (port, seen) = hangup_daemon();
         let _ = call_with(&client, port, "click", &json!(["@e1"]), &json!({})).unwrap_err();
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "click is never re-sent after a hangup");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "click is never re-sent after a hangup"
+        );
     }
 
     #[test]
@@ -528,7 +687,11 @@ mod tests {
         let got = timeout_for("wait", &json!(["300000"]), &json!({}), None);
         assert_eq!(got, Some(Duration::from_secs(330)));
         let sel = timeout_for("wait", &json!(["#ready"]), &json!({}), None);
-        assert_eq!(sel, Some(Duration::from_secs(120)), "a selector wait keeps the default");
+        assert_eq!(
+            sel,
+            Some(Duration::from_secs(120)),
+            "a selector wait keeps the default"
+        );
     }
 
     #[test]

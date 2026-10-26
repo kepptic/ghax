@@ -95,8 +95,7 @@ fn nested_batch_steps_are_scanned_and_substituted() {
 #[test]
 fn missing_vars_are_reported_together() {
     let stored: Map<String, Value> =
-        serde_json::from_value(json!({"a": {"required": true}, "b": {"default": "B"}}))
-            .unwrap();
+        serde_json::from_value(json!({"a": {"required": true}, "b": {"default": "B"}})).unwrap();
     let scanned: BTreeSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
     let err = resolve_vars(&stored, &scanned, &[]).unwrap_err();
     assert!(err.contains("missing value for a, c"), "{err}");
@@ -195,8 +194,7 @@ fn never_save_matches_the_daemon_never_record_set() {
 
 #[test]
 fn steps_are_cleaned_to_cmd_args_opts() {
-    let s =
-        clean_step(&json!({"cmd": "goto", "args": ["x"], "at": 12345, "note": "n"})).unwrap();
+    let s = clean_step(&json!({"cmd": "goto", "args": ["x"], "at": 12345, "note": "n"})).unwrap();
     assert_eq!(s, json!({"cmd": "goto", "args": ["x"]}));
     assert!(clean_step(&json!({"args": []})).is_err());
 }
@@ -234,7 +232,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn temp_file_never_follows_a_planted_symlink() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = scratch_dir("symlink");
     let victim = dir.join("victim.txt");
     std::fs::write(&victim, "keep").unwrap();
@@ -244,12 +242,18 @@ fn temp_file_never_follows_a_planted_symlink() {
     write_private_atomic(&dir, "a", &path, "{}\n").unwrap();
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     // The exclusive create itself refuses a path that already exists, even a
     // symlink, and leaves its target alone.
     let planted = dir.join("planted");
     symlink(&victim, &planted).unwrap();
-    let r = std::fs::OpenOptions::new().write(true).create_new(true).open(&planted);
+    let r = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&planted);
     assert!(r.is_err());
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     // No temp files are left behind besides the planted one.
@@ -272,7 +276,10 @@ fn saving_over_a_0644_file_leaves_0600() {
     std::fs::write(&path, "old").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     write_private_atomic(&dir, "a", &path, "new").unwrap();
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -298,25 +305,34 @@ fn save_refuses_an_existing_name_until_forced() {
     // The only test that sets GHAX_SHORTCUTS_DIR; it is process-global.
     let base = scratch_dir("save");
     let store = base.join("store");
-    std::env::set_var("GHAX_SHORTCUTS_DIR", &store);
+    // SAFETY: this is the only test that touches GHAX_SHORTCUTS_DIR, and no
+    // other test in this module reads or sets environment variables.
+    unsafe { std::env::set_var("GHAX_SHORTCUTS_DIR", &store) };
     let rec = base.join("rec.json");
-    let argv = |n: &str| -> Parsed {
-        args::parse(&[n.to_string(), rec.display().to_string()])
-    };
+    let argv = |n: &str| -> Parsed { args::parse(&[n.to_string(), rec.display().to_string()]) };
 
     std::fs::write(&rec, r#"[{"cmd":"goto","args":["a"]}]"#).unwrap();
     assert_eq!(cmd_save(&argv("one"), false).unwrap(), EXIT_OK);
     let f = store.join("one.json");
     let first = std::fs::read_to_string(&f).unwrap();
 
-    std::fs::write(&rec, r#"[{"cmd":"goto","args":["a"]},{"cmd":"goto","args":["b"]}]"#).unwrap();
+    std::fs::write(
+        &rec,
+        r#"[{"cmd":"goto","args":["a"]},{"cmd":"goto","args":["b"]}]"#,
+    )
+    .unwrap();
     assert_eq!(cmd_save(&argv("one"), false).unwrap(), EXIT_USAGE);
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), first, "refused save must not touch the file");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        first,
+        "refused save must not touch the file"
+    );
 
     assert_eq!(cmd_save(&argv("one"), true).unwrap(), EXIT_OK);
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
     assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
 
-    std::env::remove_var("GHAX_SHORTCUTS_DIR");
+    // SAFETY: see the set_var above.
+    unsafe { std::env::remove_var("GHAX_SHORTCUTS_DIR") };
     let _ = std::fs::remove_dir_all(&base);
 }

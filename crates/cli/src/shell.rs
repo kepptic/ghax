@@ -15,8 +15,9 @@
 //!   - History is saved to `~/.ghax/history` (best-effort).
 
 use anyhow::Result;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// Entry point for `ghax shell`.
@@ -34,7 +35,7 @@ pub fn cmd_shell() -> Result<i32> {
         let _ = rl.load_history(path);
     }
 
-    let is_tty = atty::is(atty::Stream::Stdin);
+    let is_tty = std::io::stdin().is_terminal();
 
     if is_tty {
         println!("ghax shell — type commands, `exit` to quit, Ctrl-D to EOF.");
@@ -211,14 +212,26 @@ mod tests {
 
     #[test]
     fn bare_words() {
-        assert_eq!(tokenize_shell_line("goto https://example.com"), vec!["goto", "https://example.com"]);
+        assert_eq!(
+            tokenize_shell_line("goto https://example.com"),
+            vec!["goto", "https://example.com"]
+        );
     }
 
     #[test]
     fn single_quoted_with_spaces() {
         // "try --css 'body { color: red }'" → 4 tokens, not 6.
         let tokens = tokenize_shell_line("try --css 'body { color: red }' --shot /tmp/x.png");
-        assert_eq!(tokens, vec!["try", "--css", "body { color: red }", "--shot", "/tmp/x.png"]);
+        assert_eq!(
+            tokens,
+            vec![
+                "try",
+                "--css",
+                "body { color: red }",
+                "--shot",
+                "/tmp/x.png"
+            ]
+        );
     }
 
     #[test]

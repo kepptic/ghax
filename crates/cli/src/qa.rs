@@ -22,12 +22,14 @@ use crate::rpc;
 use crate::state::{self, Config};
 use anyhow::Result;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::qa_common::{console_errors_since, failed_requests_since, ConsoleErrorEntry, FailedRequestEntry};
+use crate::qa_common::{
+    ConsoleErrorEntry, FailedRequestEntry, console_errors_since, failed_requests_since,
+};
 
 // ── JSON report types ──────────────────────────────────────────────────────
 
@@ -85,10 +87,18 @@ use crate::time_util::{iso_now, now_ms};
 
 /// Sanitise a URL for use as a PNG filename (matches TS impl).
 fn safe_filename(url: &str) -> String {
-    let stripped = url.trim_start_matches("https://").trim_start_matches("http://");
+    let stripped = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     let sanitised: String = stripped
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     sanitised.chars().take(80).collect()
 }
@@ -99,7 +109,9 @@ fn fetch_sitemap(url: &str) -> Vec<String> {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_default();
-    let Ok(resp) = client.get(url).send() else { return vec![] };
+    let Ok(resp) = client.get(url).send() else {
+        return vec![];
+    };
     if !resp.status().is_success() {
         return vec![];
     }
@@ -129,7 +141,9 @@ fn scrape_links(url: &str, origin: &str) -> Vec<String> {
         .user_agent("ghax-qa-crawler/0.4")
         .build()
         .unwrap_or_default();
-    let Ok(resp) = client.get(url).send() else { return vec![] };
+    let Ok(resp) = client.get(url).send() else {
+        return vec![];
+    };
     if !resp.status().is_success() {
         return vec![];
     }
@@ -182,7 +196,11 @@ fn extract_href(tag: &str) -> Option<String> {
 }
 
 fn resolve_url(base: &str, href: &str) -> Option<String> {
-    url::Url::parse(base).ok()?.join(href).ok().map(|u| u.to_string())
+    url::Url::parse(base)
+        .ok()?
+        .join(href)
+        .ok()
+        .map(|u| u.to_string())
 }
 
 /// Crawl URLs under `root`: sitemap first, BFS fallback.
@@ -221,7 +239,10 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
         d: usize,
     }
     let mut queue: std::collections::VecDeque<QueueItem> = std::collections::VecDeque::new();
-    queue.push_back(QueueItem { url: root.to_string(), d: 0 });
+    queue.push_back(QueueItem {
+        url: root.to_string(),
+        d: 0,
+    });
     let mut visited: HashSet<String> = HashSet::new();
     let mut found: Vec<String> = Vec::new();
 
@@ -239,7 +260,10 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
             let links = scrape_links(&item.url, &origin);
             for link in links {
                 if !visited.contains(&link) {
-                    queue.push_back(QueueItem { url: link, d: item.d + 1 });
+                    queue.push_back(QueueItem {
+                        url: link,
+                        d: item.d + 1,
+                    });
                 }
                 if found.len() + queue.len() >= limit {
                     break;
@@ -279,9 +303,23 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     }
 
     // 4. --crawl <root>
-    let crawl_root = parsed.flags.get("crawl").and_then(|v| v.as_str()).map(str::to_string);
-    let crawl_depth = parsed.flags.get("depth").and_then(|v| v.as_str()).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-    let crawl_limit = parsed.flags.get("limit").and_then(|v| v.as_str()).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+    let crawl_root = parsed
+        .flags
+        .get("crawl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let crawl_depth = parsed
+        .flags
+        .get("depth")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+    let crawl_limit = parsed
+        .flags
+        .get("limit")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(20);
 
     if let Some(ref root) = crawl_root {
         let crawled = crawl_urls(root, crawl_depth, crawl_limit);
@@ -290,7 +328,9 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     }
 
     if urls.is_empty() {
-        eprintln!("Usage: ghax qa --url <u> [--url <u> ...] [--out <report.json>] [--screenshots <dir>]");
+        eprintln!(
+            "Usage: ghax qa --url <u> [--url <u> ...] [--out <report.json>] [--screenshots <dir>]"
+        );
         eprintln!("       ghax qa --urls a.com,b.com");
         eprintln!("       ghax qa --crawl https://example.com [--depth 1] [--limit 20]");
         return Ok(EXIT_USAGE);
@@ -304,20 +344,31 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         .collect();
 
     // ── Options ──
-    let out_path = parsed.flags.get("out").and_then(|v| v.as_str()).unwrap_or("/tmp/ghax-qa-report.json").to_string();
+    let out_path = parsed
+        .flags
+        .get("out")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/tmp/ghax-qa-report.json")
+        .to_string();
     let no_screenshots = matches!(parsed.flags.get("no-screenshots"), Some(Value::Bool(true)));
     let shots_dir: Option<String> = if no_screenshots {
         None
     } else {
         Some(
-            parsed.flags.get("screenshots")
+            parsed
+                .flags
+                .get("screenshots")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("/tmp/ghax-qa-shots-{}", now_ms())),
         )
     };
     let annotate = matches!(parsed.flags.get("annotate"), Some(Value::Bool(true)));
-    let gif_out = parsed.flags.get("gif").and_then(|v| v.as_str()).map(str::to_string);
+    let gif_out = parsed
+        .flags
+        .get("gif")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     if let Some(ref dir) = shots_dir {
         std::fs::create_dir_all(dir).ok();
@@ -352,7 +403,10 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
                     load_ms: now_ms() - page_start,
                     screenshot_path: None,
                     ref_count: 0,
-                    console_errors: vec![ConsoleErrorEntry { text: format!("[qa] {e}"), url: None }],
+                    console_errors: vec![ConsoleErrorEntry {
+                        text: format!("[qa] {e}"),
+                        url: None,
+                    }],
                     failed_requests: vec![],
                 }
             }
@@ -360,31 +414,54 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
                 // Wait 500 ms for SPA hydration (matches TS).
                 std::thread::sleep(Duration::from_millis(500));
 
-                let final_url = nav.get("url").and_then(|v| v.as_str()).unwrap_or(url.as_str()).to_string();
-                let title = nav.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let final_url = nav
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(url.as_str())
+                    .to_string();
+                let title = nav
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 // ── Snapshot ──
-                let snap_opts = if annotate { json!({ "interactive": true, "annotate": true }) } else { json!({ "interactive": true }) };
-                let snap_res = rpc::call(port, "snapshot", json!([]), snap_opts).unwrap_or(Value::Null);
+                let snap_opts = if annotate {
+                    json!({ "interactive": true, "annotate": true })
+                } else {
+                    json!({ "interactive": true })
+                };
+                let snap_res =
+                    rpc::call(port, "snapshot", json!([]), snap_opts).unwrap_or(Value::Null);
                 // `totalRefs` since the snapshot cap: `count` is only what was printed.
                 let ref_count = snap_res
                     .get("totalRefs")
                     .or_else(|| snap_res.get("count"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let annotated_path = snap_res.get("annotatedPath").and_then(|v| v.as_str()).map(str::to_string);
+                let annotated_path = snap_res
+                    .get("annotatedPath")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
 
                 // ── Screenshot ──
                 let mut screenshot_path: Option<String> = None;
                 if let Some(ref dir) = shots_dir {
                     let safe = safe_filename(url);
                     let path = if annotate {
-                        annotated_path.clone().unwrap_or_else(|| format!("{dir}/{safe}.png"))
+                        annotated_path
+                            .clone()
+                            .unwrap_or_else(|| format!("{dir}/{safe}.png"))
                     } else {
                         format!("{dir}/{safe}.png")
                     };
                     if !annotate {
-                        let _ = rpc::call(port, "screenshot", json!([]), json!({ "path": path, "fullPage": true }));
+                        let _ = rpc::call(
+                            port,
+                            "screenshot",
+                            json!([]),
+                            json!({ "path": path, "fullPage": true }),
+                        );
                     }
                     screenshot_path = Some(path);
                 }
@@ -392,8 +469,16 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
                 let console_errors = console_errors_since(port, page_start, 200);
                 let failed_requests = failed_requests_since(port, page_start, 500);
 
-                let err_tag = if console_errors.is_empty() { String::new() } else { format!(", {} console errors", console_errors.len()) };
-                let net_tag = if failed_requests.is_empty() { String::new() } else { format!(", {} failed requests", failed_requests.len()) };
+                let err_tag = if console_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} console errors", console_errors.len())
+                };
+                let net_tag = if failed_requests.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} failed requests", failed_requests.len())
+                };
                 eprintln!("  ✓ {ref_count} refs{err_tag}{net_tag}");
 
                 QaPageReport {
@@ -412,7 +497,10 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         // Mirror TS: `report.urlsOk++` inside the try block (only on nav success).
         // The error branch inserts a `[qa] <message>` console error — use that
         // as the sentinel, matching exactly what the TS `catch` block does.
-        let had_nav_error = page_entry.console_errors.iter().any(|e| e.text.starts_with("[qa] "));
+        let had_nav_error = page_entry
+            .console_errors
+            .iter()
+            .any(|e| e.text.starts_with("[qa] "));
         if !had_nav_error {
             report.urls_ok += 1;
         }
@@ -425,11 +513,26 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
     let json_str = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
     std::fs::write(&out_path, &json_str)?;
     eprintln!("\nReport → {out_path}");
-    eprintln!("  {}/{} pages ok, {}ms total", report.urls_ok, report.urls_attempted, report.duration_ms);
-    let total_console = report.pages.iter().map(|p| p.console_errors.len()).sum::<usize>();
-    let total_net = report.pages.iter().map(|p| p.failed_requests.len()).sum::<usize>();
-    if total_console > 0 { eprintln!("  {total_console} console errors across all pages"); }
-    if total_net > 0 { eprintln!("  {total_net} failed requests across all pages"); }
+    eprintln!(
+        "  {}/{} pages ok, {}ms total",
+        report.urls_ok, report.urls_attempted, report.duration_ms
+    );
+    let total_console = report
+        .pages
+        .iter()
+        .map(|p| p.console_errors.len())
+        .sum::<usize>();
+    let total_net = report
+        .pages
+        .iter()
+        .map(|p| p.failed_requests.len())
+        .sum::<usize>();
+    if total_console > 0 {
+        eprintln!("  {total_console} console errors across all pages");
+    }
+    if total_net > 0 {
+        eprintln!("  {total_net} failed requests across all pages");
+    }
 
     // ── Optional GIF ──
     if let (Some(gif_path), Some(dir)) = (&gif_out, &shots_dir) {
@@ -441,29 +544,46 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         if !ffmpeg_ok {
             eprintln!("  (skipping --gif: ffmpeg not on PATH)");
         } else {
-                let pattern = format!("{dir}/*.png");
-                let result = Command::new("ffmpeg")
-                    .args([
-                        "-y",
-                        "-framerate", "1",
-                        "-pattern_type", "glob",
-                        "-i", &pattern,
-                        "-vf", "scale=1024:-1:flags=lanczos",
-                        "-loop", "0",
-                        gif_path.as_str(),
-                    ])
-                    .output();
-                match result {
-                    Ok(out) if out.status.success() => eprintln!("  GIF → {gif_path}"),
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ");
-                        eprintln!("  ffmpeg failed: {tail}");
-                    }
-                    Err(e) => eprintln!("  ffmpeg error: {e}"),
+            let pattern = format!("{dir}/*.png");
+            let result = Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-framerate",
+                    "1",
+                    "-pattern_type",
+                    "glob",
+                    "-i",
+                    &pattern,
+                    "-vf",
+                    "scale=1024:-1:flags=lanczos",
+                    "-loop",
+                    "0",
+                    gif_path.as_str(),
+                ])
+                .output();
+            match result {
+                Ok(out) if out.status.success() => eprintln!("  GIF → {gif_path}"),
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let tail: String = stderr
+                        .lines()
+                        .rev()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    eprintln!("  ffmpeg failed: {tail}");
                 }
+                Err(e) => eprintln!("  ffmpeg error: {e}"),
+            }
         }
     }
 
-    Ok(if report.urls_ok == report.urls_attempted { EXIT_OK } else { EXIT_CDP_ERROR })
+    Ok(if report.urls_ok == report.urls_attempted {
+        EXIT_OK
+    } else {
+        EXIT_CDP_ERROR
+    })
 }
