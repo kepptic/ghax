@@ -22,6 +22,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -91,7 +92,7 @@ pub fn maybe_show_banner() {
     if std::env::var("GHAX_NO_UPDATE_CHECK").ok().as_deref() == Some("1") {
         return;
     }
-    if !atty::is(atty::Stream::Stderr) {
+    if !std::io::stderr().is_terminal() {
         return;
     }
     let needs_refresh = match read_cache() {

@@ -356,13 +356,14 @@ pub fn is_process_alive(pid: i32) -> bool {
 }
 
 #[cfg(unix)]
-extern "C" {
+unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
 #[cfg(unix)]
 unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
-    kill(pid, sig)
+    // SAFETY: plain POSIX kill(2); the caller picks pid and signal.
+    unsafe { kill(pid, sig) }
 }
 
 #[cfg(not(unix))]
@@ -631,17 +632,23 @@ mod tests {
         write_entry(&reg, std::process::id() as i32, "/work/a");
         let prev_reg = std::env::var_os("GHAX_DAEMON_REGISTRY");
         let prev_state = std::env::var_os("GHAX_STATE_FILE");
-        std::env::set_var("GHAX_DAEMON_REGISTRY", &reg);
-        std::env::remove_var("GHAX_STATE_FILE");
-        std::env::set_var("GHAX_GLOBAL", "1");
-        let cfg = resolve_config_for_use().unwrap();
-        std::env::remove_var("GHAX_GLOBAL");
-        match prev_reg {
-            Some(v) => std::env::set_var("GHAX_DAEMON_REGISTRY", v),
-            None => std::env::remove_var("GHAX_DAEMON_REGISTRY"),
+        // SAFETY: every test that touches the environment holds ENV_LOCK.
+        unsafe {
+            std::env::set_var("GHAX_DAEMON_REGISTRY", &reg);
+            std::env::remove_var("GHAX_STATE_FILE");
+            std::env::set_var("GHAX_GLOBAL", "1");
         }
-        if let Some(v) = prev_state {
-            std::env::set_var("GHAX_STATE_FILE", v);
+        let cfg = resolve_config_for_use().unwrap();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("GHAX_GLOBAL");
+            match prev_reg {
+                Some(v) => std::env::set_var("GHAX_DAEMON_REGISTRY", v),
+                None => std::env::remove_var("GHAX_DAEMON_REGISTRY"),
+            }
+            if let Some(v) = prev_state {
+                std::env::set_var("GHAX_STATE_FILE", v);
+            }
         }
         assert!(
             cfg.state_file.ends_with(".ghax/ghax.json")

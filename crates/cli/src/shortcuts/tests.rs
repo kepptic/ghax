@@ -298,7 +298,9 @@ fn save_refuses_an_existing_name_until_forced() {
     // The only test that sets GHAX_SHORTCUTS_DIR; it is process-global.
     let base = scratch_dir("save");
     let store = base.join("store");
-    std::env::set_var("GHAX_SHORTCUTS_DIR", &store);
+    // SAFETY: this is the only test that touches GHAX_SHORTCUTS_DIR, and no
+    // other test in this module reads or sets environment variables.
+    unsafe { std::env::set_var("GHAX_SHORTCUTS_DIR", &store) };
     let rec = base.join("rec.json");
     let argv = |n: &str| -> Parsed {
         args::parse(&[n.to_string(), rec.display().to_string()])
@@ -317,6 +319,7 @@ fn save_refuses_an_existing_name_until_forced() {
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
     assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
 
-    std::env::remove_var("GHAX_SHORTCUTS_DIR");
+    // SAFETY: see the set_var above.
+    unsafe { std::env::remove_var("GHAX_SHORTCUTS_DIR") };
     let _ = std::fs::remove_dir_all(&base);
 }

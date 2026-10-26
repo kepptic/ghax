@@ -17,6 +17,7 @@
 use anyhow::Result;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 /// Entry point for `ghax shell`.
@@ -34,7 +35,7 @@ pub fn cmd_shell() -> Result<i32> {
         let _ = rl.load_history(path);
     }
 
-    let is_tty = atty::is(atty::Stream::Stdin);
+    let is_tty = std::io::stdin().is_terminal();
 
     if is_tty {
         println!("ghax shell — type commands, `exit` to quit, Ctrl-D to EOF.");

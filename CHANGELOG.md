@@ -7,6 +7,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Rust edition 2024 with a pinned toolchain.** `rust-toolchain.toml` pins
+  stable 1.99.1 (rustfmt and clippy included), `rust-version` is gone, and the
+  workspace uses resolver 3. Building from source needs that toolchain; rustup
+  installs it on the first `cargo` run in the repo. `atty` is replaced by
+  `std::io::IsTerminal` (so the device picker now prompts on Windows terminals
+  too), `extern` blocks are `unsafe extern`, and `ghax attach --name` reaches the
+  daemon through `Command::env` instead of a process-wide `set_var`. The code is
+  formatted once with `cargo fmt` (edition 2024 style; the old `rustfmt.toml` is
+  gone, its `max_width = 100` is the default); `.git-blame-ignore-revs` skips
+  that commit. CI now runs `cargo fmt --all --check` and
+  `cargo clippy -p ghax --all-targets` (warnings only for now).
 - Breaking: the bridge extension requires Chrome/Edge 120+ (`minimum_chrome_version`).
   The 0.5-minute `chrome.alarms` keepalive needs 120, `chrome.storage.session`
   needs 102, and `chrome.scripting` needs 88. Older browsers refuse to load it.

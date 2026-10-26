@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use serde::Deserialize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -949,12 +949,13 @@ fn detach_session(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                extern "C" {
+                unsafe extern "C" {
                     fn setsid() -> i32;
                 }
                 // -1 only when the caller is already a process-group leader,
                 // which a freshly-forked child never is. Ignore the return
                 // rather than abort the spawn.
+                // SAFETY: setsid(2) takes no arguments and is async-signal-safe.
                 setsid();
                 Ok(())
             });
@@ -981,11 +982,16 @@ fn spawn_daemon(
     kind: &BrowserKind,
     capture_bodies: Option<&str>,
     downloads_dir: Option<&str>,
+    agent_name: Option<&str>,
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        build_daemon_cmd(cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file)
+        let mut cmd = build_daemon_cmd(
+            cfg, endpoint, kind, capture_bodies, downloads_dir, &bundle, stderr_file,
+        );
+        set_agent_name(&mut cmd, agent_name);
+        cmd
     })
 }
 
@@ -1002,15 +1008,25 @@ fn spawn_daemon_bridge(
     control_active: bool,
     bind_filter: Option<&str>,
     pair_code: Option<&str>,
+    agent_name: Option<&str>,
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        build_daemon_cmd_bridge(
+        let mut cmd = build_daemon_cmd_bridge(
             cfg, bridge_port, port_explicit, control_active, bind_filter, pair_code, &bundle,
             stderr_file,
-        )
+        );
+        set_agent_name(&mut cmd, agent_name);
+        cmd
     })
+}
+
+/// `ghax attach --name <label>` reaches the daemon as GHAX_AGENT.
+fn set_agent_name(cmd: &mut std::process::Command, agent_name: Option<&str>) {
+    if let Some(name) = agent_name {
+        cmd.env("GHAX_AGENT", name);
+    }
 }
 
 /// An 8-digit pairing code from the OS CSPRNG.
@@ -1159,7 +1175,7 @@ fn pick_endpoint(endpoints: Vec<CdpEndpoint>, prefer_kind: Option<&BrowserKind>)
     }
 
     // Check if stdin is a TTY.
-    let is_tty = unsafe { libc_isatty(0) == 1 };
+    let is_tty = io::stdin().is_terminal();
 
     if !is_tty {
         // Non-interactive: print note to stderr, return first.
@@ -1187,22 +1203,6 @@ fn pick_endpoint(endpoints: Vec<CdpEndpoint>, prefer_kind: Option<&BrowserKind>)
     endpoints.into_iter().next().unwrap()
 }
 
-#[cfg(unix)]
-extern "C" {
-    fn isatty(fd: i32) -> i32;
-}
-
-#[cfg(unix)]
-unsafe fn libc_isatty(fd: i32) -> i32 {
-    isatty(fd)
-}
-
-#[cfg(not(unix))]
-unsafe fn libc_isatty(_fd: i32) -> i32 {
-    // On Windows, fall through to non-interactive path.
-    0
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Public command entrypoints
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1212,12 +1212,11 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     crate::update::maybe_show_banner();
 
     // `--name <label>`: how this agent shows up as a tab owner in every other
-    // agent's `ghax tabs`. The daemon reads GHAX_AGENT (inherited from this
-    // process) and stores it in its ~/.ghax/daemons entry; setting the env
-    // var directly works the same.
-    if let Some(name) = parsed.flags.get("name").and_then(|v| v.as_str()) {
-        std::env::set_var("GHAX_AGENT", name);
-    }
+    // agent's `ghax tabs`. The daemon reads GHAX_AGENT and stores it in its
+    // ~/.ghax/daemons entry; the spawn functions pass it through `Command::env`
+    // (process-wide `set_var` is unsafe in edition 2024), and exporting the env
+    // var yourself works the same.
+    let agent_name: Option<&str> = parsed.flags.get("name").and_then(|v| v.as_str());
 
     let explicit_port: Option<u16> = parsed
         .flags
@@ -1380,7 +1379,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 let inuse_kind = browser_opt
                     .clone()
                     .unwrap_or_else(|| infer_kind_from_ua(&inuse.version.user_agent));
-                let state = spawn_daemon(cfg, &inuse, &inuse_kind, capture_bodies_ref, downloads_dir_ref)?;
+                let state = spawn_daemon(cfg, &inuse, &inuse_kind, capture_bodies_ref, downloads_dir_ref, agent_name)?;
                 println!(
                     "attached (port race resolved) — pid {}, port {}, browser {}",
                     state.pid, state.port, state.browser_kind
@@ -1436,7 +1435,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     let ep = endpoint.unwrap(); // always Some at this point
-    let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref, downloads_dir_ref)?;
+    let state = spawn_daemon(cfg, &ep, &kind, capture_bodies_ref, downloads_dir_ref, agent_name)?;
     // POSIX convention — stay quiet on fresh success. `--verbose` restores
     // the pid/port/browser one-liner for humans; the `already attached`
     // branch above still prints because that's informational, not success.
@@ -1519,6 +1518,7 @@ fn cmd_attach_extension(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         control_active,
         bind_filter,
         pair_code.as_deref(),
+        parsed.flags.get("name").and_then(|v| v.as_str()),
     )?;
 
     // The daemon may have auto-picked a higher port because another agent's
@@ -1871,10 +1871,11 @@ pub fn cmd_restart(parsed: &Parsed, cfg: &Config) -> Result<i32> {
 // Reuse the kill shim from state.rs (already compiled in the same crate).
 #[cfg(unix)]
 unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
-    extern "C" {
+    unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
-    kill(pid, sig)
+    // SAFETY: plain POSIX kill(2); the caller picks pid and signal.
+    unsafe { kill(pid, sig) }
 }
 
 #[cfg(not(unix))]
