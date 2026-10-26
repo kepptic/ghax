@@ -306,7 +306,7 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
 /// Mirrors `probeCdp()` in browser-launch.ts.
 fn probe_cdp(port: u16) -> Option<CdpEndpoint> {
     let http_url = format!("http://127.0.0.1:{port}");
-    let client = crate::http::client_builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()?;
@@ -836,7 +836,7 @@ fn wait_for_daemon(
     stderr_path: Option<&std::path::Path>,
 ) -> Result<DaemonState> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let client = crate::http::client_builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
 
@@ -1368,7 +1368,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         if state::is_process_alive(existing.pid) {
             // Quick health check.
             let url = format!("http://127.0.0.1:{}/health", existing.port);
-            let alive = crate::http::client_builder()
+            let alive = crate::http::local_client_builder()
                 .timeout(Duration::from_millis(1500))
                 .build()
                 .ok()
@@ -1744,7 +1744,7 @@ fn wait_for_extension(
     require_control: bool,
 ) -> Result<(Option<ExtensionInfo>, Option<i64>)> {
     let deadline = Instant::now() + timeout;
-    let client = crate::http::client_builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
     let url = format!("http://127.0.0.1:{port}/bridge-status");
@@ -1956,7 +1956,7 @@ pub fn cmd_detach(cfg: &Config) -> Result<i32> {
     }
 
     // POST /shutdown — ignore errors (fall through to SIGTERM).
-    let _ = crate::http::client_builder()
+    let _ = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()

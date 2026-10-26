@@ -441,7 +441,7 @@ pub fn require_daemon(cfg: &Config) -> Result<u16> {
 fn probe_live_daemon_ports() -> Option<u16> {
     for port in 9222..=9230 {
         let url = format!("http://127.0.0.1:{port}/health");
-        let client = crate::http::client_builder()
+        let client = crate::http::local_client_builder()
             .timeout(std::time::Duration::from_millis(200))
             .build()
             .ok()?;
@@ -458,7 +458,7 @@ fn probe_live_daemon_ports() -> Option<u16> {
 
 fn health_check(port: u16, expected_pid: i32) -> Result<()> {
     let url = format!("http://127.0.0.1:{port}/health");
-    let client = crate::http::client_builder()
+    let client = crate::http::local_client_builder()
         .timeout(std::time::Duration::from_millis(1500))
         .build()?;
     let resp = client.get(&url).send()?;

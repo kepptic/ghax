@@ -52,9 +52,15 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rustyline 15 to 18 (18.0.1 is the newest release), sha2 0.10 to 0.11 and
   getrandom 0.2 to 0.4 (`getrandom::fill`), plus a `cargo update` for the rest.
   TLS is rustls with the **ring** provider: reqwest 0.13 defaults to aws-lc-rs,
-  so ghax takes `rustls-no-provider` and installs ring itself in `http.rs`
-  (every HTTP client is built there now). `aws-lc-rs` and `openssl-sys` are not
-  in `Cargo.lock`, so the cross-compile targets don't need aws-lc's cmake/NASM toolchain.
+  so ghax takes `rustls-no-provider` and passes reqwest a finished ring
+  `ClientConfig` from `http.rs` (every HTTP client is built there now).
+  `aws-lc-rs` and `openssl-sys` are not in `Cargo.lock`, so the cross-compile
+  targets don't need aws-lc's cmake/NASM toolchain.
+- **TLS roots and proxies are unchanged from 0.12.** TLS uses the bundled
+  Mozilla roots (`webpki-roots`) as before, so a host with no OS CA store still
+  works (reqwest 0.13's default platform verifier fails `Client::build()` there).
+  Proxies come from `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` only (no
+  `system-proxy`), and daemon and CDP calls on 127.0.0.1 never use a proxy.
 - **Clippy is clean and enforced.** All warnings are fixed (mostly `if` chains
   collapsed into let-chains, `build_daemon_cmd_bridge` takes an options struct),
   and the CI lint job runs clippy with `-D warnings`. The shortcuts test that

@@ -217,7 +217,7 @@ fn query_daemon(cfg: &Config) -> Option<Value> {
         return None;
     }
     let url = format!("http://127.0.0.1:{}/version", state.port);
-    let client = crate::http::client_builder()
+    let client = crate::http::local_client_builder()
         .timeout(std::time::Duration::from_millis(1500))
         .build()
         .ok()?;
