@@ -1188,8 +1188,8 @@ fn run_spawn_retry_loop(
 ///
 /// Versions are read from a sibling `package.json` if one exists (release
 /// archives ship one); otherwise we fall back to compile-time constants
-/// matching the build's `package.json`. The constants are kept in sync via
-/// a CI check (see CONTRIBUTING.md "Cutting a release").
+/// matching the build's `package.json`. The unit test
+/// `bootstrap_versions_match_package_json` fails when they drift.
 fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
     if !dir.join("package.json").exists() {
         let pkg = format!(
@@ -1233,9 +1233,9 @@ fn bootstrap_daemon_runtime(dir: &std::path::Path) -> Result<()> {
 // Daemon runtime dep versions. Keep in sync with package.json — the build
 // wedges these into the auto-bootstrap fallback when no sibling
 // package.json is present in the install dir.
-const PLAYWRIGHT_VERSION: &str = "1.63.0";
-const SOURCE_MAP_VERSION: &str = "^0.7.6";
-const WS_VERSION: &str = "^8.18.1";
+const PLAYWRIGHT_VERSION: &str = "1.64.1";
+const SOURCE_MAP_VERSION: &str = "^0.8.0";
+const WS_VERSION: &str = "^8.22.0";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // pickEndpoint — mirrors `pickEndpoint` in cli.ts
@@ -2022,6 +2022,29 @@ unsafe fn libc_kill(_pid: i32, _sig: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_versions_match_package_json() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../package.json");
+        let raw = std::fs::read_to_string(path).expect("read package.json");
+        let pkg: serde_json::Value = serde_json::from_str(&raw).expect("parse package.json");
+        let dep = |name: &str| pkg["dependencies"][name].as_str().unwrap_or("").to_string();
+        assert_eq!(
+            PLAYWRIGHT_VERSION,
+            dep("playwright"),
+            "PLAYWRIGHT_VERSION drifted from package.json"
+        );
+        assert_eq!(
+            SOURCE_MAP_VERSION,
+            dep("source-map"),
+            "SOURCE_MAP_VERSION drifted from package.json"
+        );
+        assert_eq!(
+            WS_VERSION,
+            dep("ws"),
+            "WS_VERSION drifted from package.json"
+        );
+    }
 
     fn state_with_browser_url(browser_url: &str) -> DaemonState {
         DaemonState {

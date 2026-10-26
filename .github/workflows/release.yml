@@ -18,7 +18,7 @@
 # tag (e.g. git tag v0.4.1-rc1 && git push origin v0.4.1-rc1).
 #
 # RUNTIME DEPENDENCY: The ghax daemon (dist/ghax-daemon.mjs, included in each
-# release archive) requires Node >= 20 to be installed on the end user's
+# release archive) requires Node >= 24 to be installed on the end user's
 # machine. ghax will check for `node` in PATH at `ghax attach` time and print
 # a clear error if Node is missing or too old.
 #
@@ -169,10 +169,10 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
-      - name: Setup Node 20 for daemon bundle
-        uses: actions/setup-node@v4
+      - name: Setup Node 24 for daemon bundle
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Build daemon bundle (esbuild)
         # cargo-dist's `include` directive copies dist/ghax-daemon.mjs into each
         # release archive but doesn't build it. The daemon is a Node ESM bundle
