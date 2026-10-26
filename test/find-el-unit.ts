@@ -268,4 +268,7 @@ try { findEl(PAGE, 'the'); assert(false, 'stop-words-only query must throw'); } 
   const plain = (await mk(null)({}, ['delete button'], { top: 3 })) as FindElResult;
 assert(refs(plain).join() === '@e10,@e11,@e12' && flipped.results.length === 3 && flipped.results[0].ref !== '@e10', 'a reranker reorders the pool; without one the order is the scorer\'s');
   console.log(`✓ ${n} find-el checks passed`);
-})();
+})().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

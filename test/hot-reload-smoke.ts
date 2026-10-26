@@ -71,7 +71,11 @@ async function run(
 function fail(msg: string): never {
   console.error(`\n✗ ${msg}`);
   // Best-effort cleanup.
-  cleanup().finally(() => process.exit(1));
+  // fail() must return `never` synchronously, so the exit is deferred behind the
+  // cleanup. The chain cannot reject: cleanup errors are logged, then we exit.
+  void cleanup()
+    .catch((e: unknown) => console.error('cleanup failed:', e))
+    .finally(() => process.exit(1));
   throw new Error(msg); // for the type checker
 }
 

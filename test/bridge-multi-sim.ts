@@ -1311,6 +1311,8 @@ async function main(): Promise<void> {
 
   await test('sanitizeLabel strips controls and newlines, caps at 40', async () => {
     const s = sanitizeLabel('Wo\nrk\x00\u202e\u200b ' + 'x'.repeat(80));
+    // The control characters are the point: this asserts they are stripped.
+    // oxlint-disable-next-line no-control-regex
     assert(!/[\n\x00\u202e\u200b]/.test(s) && s.length <= 40 && s.startsWith('Work x'), JSON.stringify(s));
     assert(sanitizeLabel('Zoë') === 'Zoë', 'letters survive');
   });
@@ -1841,13 +1843,13 @@ async function main(): Promise<void> {
   // ─── Multi-bind surface (plan 12, brief C): a REAL daemon, two fake browsers ───
 
   interface DaemonHarness {
-    rpc(cmd: string, args?: unknown[], opts?: Record<string, unknown>): Promise<{ ok: boolean; data?: any; error?: string }>;
+    rpc: (cmd: string, args?: unknown[], opts?: Record<string, unknown>) => Promise<{ ok: boolean; data?: any; error?: string }>;
     bridgePort: number;
     edge: FakeConnection;
     chrome: FakeConnection;
     edgeExt: FakeExtension;
     chromeExt: FakeExtension;
-    alias(instanceId: string): Promise<string>;
+    alias: (instanceId: string) => Promise<string>;
   }
 
   /** `bind: false` starts the daemon with no browser connected; the test connects them via edgeExt/chromeExt. */

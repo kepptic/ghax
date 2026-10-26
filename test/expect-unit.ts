@@ -121,4 +121,7 @@ const probes = (over: Partial<ExpectProbes> = {}): ExpectProbes => ({
   assert(String(r.actual).length < 400, 'actual clipped');
 
   console.log(`✓ expect-unit: ${n} assertions`);
-})();
+})().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

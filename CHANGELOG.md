@@ -6,6 +6,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Type-aware lint.** `npm run lint` runs Oxlint with type information
+  (`oxlint` 1.87.0 and `oxlint-tsgolint` 7.0.2003, pinned) over `src/`, `test/`
+  and `scripts/`, with the correctness category on and
+  `no-floating-promises`, `no-misused-promises` and `await-thenable` as errors.
+  It runs in `scripts/check.sh` and in the CI typecheck job. The daemon's HTTP
+  handler and its shutdown paths (idle timer, SIGINT, SIGTERM, `/shutdown`) now
+  catch and log a rejection instead of leaving it to the global
+  `unhandledRejection` hook; a failing request gets a 500 instead of a hung
+  socket.
+
 ### Changed
 - **Rust edition 2024 with a pinned toolchain.** `rust-toolchain.toml` pins
   stable 1.99.1 (rustfmt and clippy included), `rust-version` is gone, and the

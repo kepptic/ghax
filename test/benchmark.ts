@@ -216,7 +216,7 @@ function median(nums: number[]): number {
   console.log('-'.repeat(header.length));
   for (const r of rows) {
     const stepTimes = r.perStep.map((ms) => `${ms.toFixed(0)}ms`);
-    const slots: string[] = new Array(stepLabels.length).fill('-');
+    const slots: string[] = Array.from({ length: stepLabels.length }, () => '-');
     if (r.perStep.length === 7) {
       for (let i = 0; i < 7; i++) slots[i] = stepTimes[i];
     } else if (r.perStep.length === 6) {
@@ -341,4 +341,7 @@ function median(nums: number[]): number {
   for (const r of warmResults) {
     console.log(`  ${r.name.padEnd(18)} ${r.perCmdMs.toFixed(0)}ms/cmd  (${r.totalCmds} cmds sampled)`);
   }
-})();
+})().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

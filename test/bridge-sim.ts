@@ -731,7 +731,7 @@ async function main(): Promise<void> {
     attachStrippingForeignFrames: (o: {
       attach: () => Promise<unknown>;
       strip: () => Promise<string[]>;
-      detach?: () => Promise<unknown> | unknown;
+      detach?: () => unknown;
       stillWanted?: () => boolean;
       sleep?: (ms: number) => Promise<void>;
       log?: (hosts: string[]) => void;

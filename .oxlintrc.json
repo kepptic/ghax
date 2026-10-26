@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "import", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    // Off on purpose. Both rules flag String(x) / `${x}` on `unknown`, and the
+    // daemon's RPC args/opts are unknown by design (CLI JSON: strings, numbers,
+    // booleans), so ~150 sites coerce at that untyped boundary. Rewriting them
+    // would change what a bad argument prints, for no safety gain. Revisit if
+    // the RPC arg types are ever narrowed.
+    "typescript/no-base-to-string": "off",
+    "typescript/restrict-template-expressions": "off"
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", "target/**", "extension/**", "test/fixtures/**"]
+}

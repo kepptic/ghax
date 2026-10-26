@@ -134,7 +134,7 @@ export async function bridgeWindowSize(
   const before = size ? await readInner().catch(() => null) : null;
   let result: Record<string, unknown> | undefined;
   try {
-    const ack = await conn.sendControl({ action: 'window-bounds', ...(size ?? {}), ...(windowId === undefined ? {} : { windowId }) }, ackTimeoutMs);
+    const ack = await conn.sendControl({ action: 'window-bounds', ...size, ...(windowId === undefined ? {} : { windowId }) }, ackTimeoutMs);
     result = ack.result as Record<string, unknown> | undefined;
   } catch (err) {
     // A pre-PR-D extension either answers `unknown control action` at once
