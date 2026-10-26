@@ -77,7 +77,6 @@ import {
   type BridgeEvent,
   type ControlAck,
   type ControlledReason,
-  type BridgeExtensionInfo,
   type BridgeRef,
   type BridgeTab,
   type ControlTarget,
@@ -454,7 +453,9 @@ function acquireBodySlot(): Promise<() => void> {
  * hundreds of large responses in RAM during a traffic spike.
  */
 function captureBodyAsync(entry: NetworkEntry, resp: import('playwright').Response): void {
-  acquireBodySlot().then((release) => {
+  // Genuine fire-and-forget: the caller is a sync event handler. acquireBodySlot
+  // only ever resolves, and the inner chain below swallows read failures itself.
+  void acquireBodySlot().then((release) => {
     resp
       .text()
       .then((body) => {
@@ -2684,6 +2685,8 @@ register('fill', async (ctx, args, opts) => {
     }
     const input = e as HTMLInputElement | HTMLTextAreaElement;
     const proto = Object.getPrototypeOf(input);
+    // Invoked as setter.call(input, v) below, so the unbound reference is intended.
+    // oxlint-disable-next-line typescript/unbound-method
     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
     input.focus();
     if (setter) setter.call(input, v);
@@ -5035,7 +5038,7 @@ async function main() {
       req.on('error', reject);
     });
 
-  const server = http.createServer(async (req, res) => {
+  const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     const url = req.url || '/';
     if (url === '/health' && req.method === 'GET') {
       json(res, 200, {
@@ -5098,7 +5101,7 @@ async function main() {
     }
     if (url === '/shutdown' && req.method === 'POST') {
       json(res, 200, { ok: true });
-      setTimeout(() => shutdown('shutdown-request'), 20);
+      setTimeout(() => requestShutdown('shutdown-request'), 20);
       return;
     }
 
@@ -5195,7 +5198,7 @@ async function main() {
       // delta beside `data`, so stdout (which prints `data`) never changes.
       // Concurrent RPCs on the same daemon would bleed into each other's
       // numbers; one agent per daemon is the supported shape anyway.
-      const rpcOpts = { ...(body.opts ?? {}) };
+      const rpcOpts = { ...body.opts };
       const wantTrace = rpcOpts.trace === true;
       delete rpcOpts.trace;
       const stats = ctx.bridge ? ctx.bridge.cdpStats : daemonCdpStats;
@@ -5236,6 +5239,13 @@ async function main() {
     }
     res.writeHead(404);
     res.end('Not Found');
+  };
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch((err: unknown) => {
+      log(`http handler failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      if (!res.headersSent) json(res, 500, { ok: false, error: 'internal daemon error, see the daemon log' });
+      else res.end();
+    });
   });
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -5274,9 +5284,19 @@ async function main() {
   const idleTimer = setInterval(() => {
     if (Date.now() - lastActivity > IDLE_MS) {
       log(`idle for ${IDLE_MS / 1000}s — shutting down`);
-      shutdown('idle');
+      requestShutdown('idle');
     }
   }, 60_000);
+
+  // Sync entry point for timers and signal handlers. shutdown() ends in
+  // process.exit(0); if it throws first, log and exit non-zero instead of
+  // leaving the daemon half torn down.
+  function requestShutdown(reason: string): void {
+    shutdown(reason).catch((err: unknown) => {
+      log(`shutdown failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      process.exit(1);
+    });
+  }
 
   let shuttingDown = false;
   async function shutdown(reason: string) {
@@ -5306,8 +5326,8 @@ async function main() {
     process.exit(0);
   }
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => requestShutdown('SIGINT'));
+  process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 }
 
 main().catch((err) => {

@@ -294,7 +294,7 @@ export class PeerRegistry {
 
   /** Resolves once every profile scan started so far has been applied. Tests. */
   async profileLookupsSettled(): Promise<void> {
-    while (this.pendingLookups.size > 0) await Promise.all([...this.pendingLookups]);
+    while (this.pendingLookups.size > 0) await Promise.all(this.pendingLookups);
   }
 
   /** browser / profile / alias of one instance, for tab listings. */

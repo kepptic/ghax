@@ -93,7 +93,7 @@ function step(name: string) {
 function parseJson<T = unknown>(out: string): T {
   try {
     return JSON.parse(out) as T;
-  } catch (err) {
+  } catch {
     fail(`expected JSON, got: ${out.slice(0, 200)}`);
   }
 }
@@ -812,7 +812,7 @@ c('snapshot caps at 250 refs by default and says what it cut', async () => {
   const def = parseJson<Snap>((await run(['snapshot', '-i', '--json'])).stdout);
   assert(def.count === 250 && def.totalRefs === 300, `default: count ${def.count} total ${def.totalRefs}`);
   assert(def.omitted?.refs === 50, `omitted: ${JSON.stringify(def.omitted)}`);
-  assert(/… 50 more refs omitted \(use --depth\/--selector\/--max-refs, or --no-cap\)$/.test(def.text), 'marker is the last line');
+  assert(def.text.endsWith('… 50 more refs omitted (use --depth/--selector/--max-refs, or --no-cap)'), 'marker is the last line');
   const ten = parseJson<Snap>((await run(['snapshot', '-i', '--max-refs', '10', '--json'])).stdout);
   assert(ten.count === 10 && ten.totalRefs === 300, `--max-refs 10: ${ten.count}`);
   const all = parseJson<Snap>((await run(['snapshot', '-i', '--no-cap', '--json'])).stdout);
@@ -2321,7 +2321,7 @@ c('new-tab opens a background tab, locks onto it, and tab --focus is a switch', 
   const created = parseJson<{ id: string; url: string; index: number }>(r.stdout);
   try {
     assert(typeof created.id === 'string' && created.id.length > 0, `new-tab should return an id: ${r.stdout}`);
-    assert(created.index === 0 && /^data:/.test(created.url), `new-tab shape: ${r.stdout}`);
+    assert(created.index === 0 && created.url.startsWith('data:'), `new-tab shape: ${r.stdout}`);
     const afterTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
     assert(afterTabs.length === beforeTabs.length + 1, `expected tab count +1, got ${afterTabs.length - beforeTabs.length}`);
     assert(afterTabs.find((t) => t.active)?.id === created.id, 'the new tab should be the daemon\'s active tab');
@@ -3200,4 +3200,7 @@ c('detach shuts the daemon', async () => {
     process.exit(1);
   }
   console.log(`\n✓ ${passed}/${checks.length} checks passed in ${secs}s`);
-})();
+})().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

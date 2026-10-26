@@ -26,6 +26,8 @@ echo "── ghax check ──"
 if [ -f package.json ]; then
   echo "▸ npm run typecheck"
   npm run typecheck
+  echo "▸ npm run lint"
+  npm run lint
 fi
 
 # 2. Rust — matches CI `build` job's compile step. `cargo check` is much

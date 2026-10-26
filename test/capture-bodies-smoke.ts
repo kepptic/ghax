@@ -46,7 +46,7 @@ interface RunResult { stdout: string; stderr: string; exitCode: number; }
 
 async function run(args: string[], opts: { allowFailure?: boolean; env?: Record<string, string> } = {}): Promise<RunResult> {
   const proc = spawn(ghax, args, {
-    env: { ...process.env, GHAX_STATE_FILE: stateFile, ...(opts.env ?? {}) },
+    env: { ...process.env, GHAX_STATE_FILE: stateFile, ...opts.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';

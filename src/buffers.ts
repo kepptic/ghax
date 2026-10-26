@@ -16,7 +16,7 @@ export class CircularBuffer<T> {
 
   constructor(capacity: number) {
     this.capacity = capacity;
-    this.buffer = new Array(capacity);
+    this.buffer = Array.from<T | undefined>({ length: capacity });
   }
 
   push(entry: T): void {

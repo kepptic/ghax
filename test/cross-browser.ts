@@ -173,4 +173,7 @@ async function runOne(kind: BrowserKind, label: string, port: number): Promise<R
 
   const allOk = results.every((r) => r.ok);
   process.exit(allOk ? 0 : 1);
-})();
+})().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});
