@@ -28,7 +28,7 @@ ghax fill @e5 "hello"
 
 ## Install
 
-Requires **Node 20+** (the daemon that drives the browser runs on Node). The first `ghax attach` finishes the rest of the setup automatically — it fetches its small browser-driver bundle if it's missing and installs the one runtime dependency (Playwright) it needs — so there's nothing else to run by hand.
+Requires **Node 24+** (the daemon that drives the browser runs on Node). The first `ghax attach` finishes the rest of the setup automatically — it fetches its small browser-driver bundle if it's missing and installs the one runtime dependency (Playwright) it needs — so there's nothing else to run by hand.
 
 ### macOS (Apple Silicon or Intel)
 
@@ -61,7 +61,7 @@ Stay current: `ghax update` installs the latest release in place; `ghax update -
 
 ### From source (for contributors)
 
-Needs the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it on first build) and Node 20+.
+Needs the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it on first build) and Node 24+.
 
 ```bash
 git clone https://github.com/kepptic/ghax.git

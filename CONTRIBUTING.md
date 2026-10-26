@@ -47,7 +47,7 @@ ghax/
 
 ## Dev loop
 
-Prerequisites: **Rust 1.80+**, **Node 20+**, git.
+Prerequisites: **Rust 1.80+**, **Node 24+**, git.
 
 ```bash
 npm install
