@@ -105,7 +105,7 @@ fn safe_filename(url: &str) -> String {
 
 /// Fetch and parse `<loc>...</loc>` entries from a sitemap.xml.
 fn fetch_sitemap(url: &str) -> Vec<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_default();
@@ -136,7 +136,7 @@ fn fetch_sitemap(url: &str) -> Vec<String> {
 
 /// BFS link crawl from `root`, staying within `origin`. Fallback when no sitemap.
 fn scrape_links(url: &str, origin: &str) -> Vec<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(8))
         .user_agent("ghax-qa-crawler/0.4")
         .build()

@@ -23,7 +23,6 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::args::Parsed;
 use crate::attach;
@@ -222,7 +221,7 @@ fn query_daemon(cfg: &Config) -> Option<Value> {
         return None;
     }
     let url = format!("http://127.0.0.1:{}/version", state.port);
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(std::time::Duration::from_millis(1500))
         .build()
         .ok()?;
@@ -239,9 +238,7 @@ fn query_daemon(cfg: &Config) -> Option<Value> {
 
 fn sha256_file(path: &std::path::Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Some(format!("{:x}", hasher.finalize()))
+    Some(crate::attach::sha256_hex(&bytes))
 }
 
 fn short_sha(sha: &str) -> String {

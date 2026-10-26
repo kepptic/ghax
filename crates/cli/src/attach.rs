@@ -306,7 +306,7 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
 /// Mirrors `probeCdp()` in browser-launch.ts.
 fn probe_cdp(port: u16) -> Option<CdpEndpoint> {
     let http_url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()?;
@@ -690,7 +690,7 @@ fn target_triple() -> Option<&'static str> {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -720,7 +720,7 @@ fn self_heal_daemon_bundle(share_dir: &Path) -> Result<PathBuf> {
 
     eprintln!("ghax: ghax-daemon.mjs not found — fetching {archive_name} from release {tag}...");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(60))
         .user_agent(concat!("ghax/", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -836,7 +836,7 @@ fn wait_for_daemon(
     stderr_path: Option<&std::path::Path>,
 ) -> Result<DaemonState> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
 
@@ -1118,7 +1118,7 @@ fn set_agent_name(cmd: &mut std::process::Command, agent_name: Option<&str>) {
 fn mint_pair_code() -> String {
     loop {
         let mut buf = [0u8; 4];
-        getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+        getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
         let n = u32::from_le_bytes(buf);
         // Largest multiple of 1e8 that fits in u32 (4.29e9): 4_200_000_000.
         // Discard the biased tail so every 8-digit code is equally likely.
@@ -1357,7 +1357,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         if state::is_process_alive(existing.pid) {
             // Quick health check.
             let url = format!("http://127.0.0.1:{}/health", existing.port);
-            let alive = reqwest::blocking::Client::builder()
+            let alive = crate::http::client_builder()
                 .timeout(Duration::from_millis(1500))
                 .build()
                 .ok()
@@ -1730,7 +1730,7 @@ fn wait_for_extension(
     require_control: bool,
 ) -> Result<(Option<(String, String)>, Option<i64>)> {
     let deadline = Instant::now() + timeout;
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
     let url = format!("http://127.0.0.1:{port}/bridge-status");
@@ -1943,7 +1943,7 @@ pub fn cmd_detach(cfg: &Config) -> Result<i32> {
     }
 
     // POST /shutdown — ignore errors (fall through to SIGTERM).
-    let _ = reqwest::blocking::Client::builder()
+    let _ = crate::http::client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()

@@ -237,7 +237,7 @@ fn run_install_release(version: &str) -> Result<i32> {
     // script itself does SHA-256 verification of the actual artifact, so
     // we're trusting GitHub's TLS for the script bytes (standard self-update
     // model).
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(30))
         .user_agent(USER_AGENT)
         .build()?;
@@ -315,7 +315,7 @@ mod tests {
 }
 
 fn fetch_latest_tag() -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(10))
         .user_agent(USER_AGENT)
         .build()?;

@@ -12,6 +12,7 @@ mod dispatch;
 mod expect;
 mod find_el;
 mod help;
+mod http;
 mod output;
 mod qa;
 mod qa_common;
