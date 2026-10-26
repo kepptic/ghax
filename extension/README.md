@@ -61,6 +61,13 @@ extension's `hello` lands.
    `ghax snapshot -i`, then use its refs with commands such as
    `ghax click @e3` and `ghax fill @e7 'value'`.
 
+### Browser version
+
+The manifest sets `"minimum_chrome_version": "120"`. Chrome and Edge older than
+120 refuse to load the extension. The floor comes from the 0.5-minute
+`chrome.alarms` keepalive in `background.js` (needs 120); `chrome.storage.session`
+needs 102 and `chrome.scripting` needs 88.
+
 ### Staying connected (MV3 service-worker eviction)
 
 MV3 service workers are evicted after ~30s idle. The bridge keeps itself

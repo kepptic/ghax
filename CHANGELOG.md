@@ -6,7 +6,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Changed
+- Breaking: the bridge extension requires Chrome/Edge 120+ (`minimum_chrome_version`).
+  The 0.5-minute `chrome.alarms` keepalive needs 120, `chrome.storage.session`
+  needs 102, and `chrome.scripting` needs 88. Older browsers refuse to load it.
 
 ## [0.14.0] - 2026-10-25
 ### Added
