@@ -28,7 +28,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   formatted once with `cargo fmt` (edition 2024 style; the old `rustfmt.toml` is
   gone, its `max_width = 100` is the default); `.git-blame-ignore-revs` skips
   that commit. CI now runs `cargo fmt --all --check` and
-  `cargo clippy -p ghax --all-targets` (warnings only for now).
+  `cargo clippy -p ghax --all-targets -- -D warnings`.
 - Breaking: the bridge extension requires Chrome/Edge 120+ (`minimum_chrome_version`).
   The 0.5-minute `chrome.alarms` keepalive needs 120, `chrome.storage.session`
   needs 102, and `chrome.scripting` needs 88. Older browsers refuse to load it.
@@ -48,6 +48,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tsx 4.23, ws 8.22, source-map 0.8.0, @types/ws 8.18.2. The bootstrap script's
   fallback versions match. `source-map` 0.8 keeps the `SourceMapConsumer` API
   `src/source-maps.ts` uses, so no code change was needed there.
+- **Rust crates moved to their current majors.** reqwest 0.12 to 0.13,
+  rustyline 15 to 18 (18.0.1 is the newest release), sha2 0.10 to 0.11 and
+  getrandom 0.2 to 0.4 (`getrandom::fill`), plus a `cargo update` for the rest.
+  TLS is rustls with the **ring** provider: reqwest 0.13 defaults to aws-lc-rs,
+  so ghax takes `rustls-no-provider` and installs ring itself in `http.rs`
+  (every HTTP client is built there now). `aws-lc-rs` and `openssl-sys` are not
+  in `Cargo.lock`, so the cross-compile targets don't need aws-lc's cmake/NASM toolchain.
+- **Clippy is clean and enforced.** All warnings are fixed (mostly `if` chains
+  collapsed into let-chains, `build_daemon_cmd_bridge` takes an options struct),
+  and the CI lint job runs clippy with `-D warnings`. The shortcuts test that
+  sets `GHAX_SHORTCUTS_DIR` now takes the same env lock as the `state` tests.
 
 ## [0.14.0] - 2026-10-25
 ### Added

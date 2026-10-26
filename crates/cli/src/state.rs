@@ -445,14 +445,12 @@ fn probe_live_daemon_ports() -> Option<u16> {
             .timeout(std::time::Duration::from_millis(200))
             .build()
             .ok()?;
-        if let Ok(resp) = client.get(&url).send() {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                        return Some(port);
-                    }
-                }
-            }
+        if let Ok(resp) = client.get(&url).send()
+            && resp.status().is_success()
+            && let Ok(body) = resp.json::<serde_json::Value>()
+            && body.get("ok").and_then(|v| v.as_bool()) == Some(true)
+        {
+            return Some(port);
         }
     }
     None
@@ -471,15 +469,15 @@ fn health_check(port: u16, expected_pid: i32) -> Result<()> {
     // Defense against port collision: the daemon on this port MUST be the
     // one recorded in our state file. If the pid disagrees, treat this
     // health response as unrelated.
-    if let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) {
-        if pid != expected_pid as i64 {
-            return Err(anyhow!(
-                "port {} answered /health but with pid {} (expected {}) — stale state?",
-                port,
-                pid,
-                expected_pid
-            ));
-        }
+    if let Some(pid) = body.get("pid").and_then(|v| v.as_i64())
+        && pid != expected_pid as i64
+    {
+        return Err(anyhow!(
+            "port {} answered /health but with pid {} (expected {}) — stale state?",
+            port,
+            pid,
+            expected_pid
+        ));
     }
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err(anyhow!("daemon reported unhealthy"));
@@ -487,13 +485,17 @@ fn health_check(port: u16, expected_pid: i32) -> Result<()> {
     Ok(())
 }
 
+/// Serializes the tests that set or remove process environment variables
+/// (here and in `shortcuts`). A test that mutates the environment must hold it.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Unix-only: liveness is a real kill(pid, 0) there; the non-unix shim treats
 // every pid as alive, so the prune cases can't hold.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_dir(tag: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
@@ -650,7 +652,10 @@ mod tests {
         write_entry(&reg, std::process::id() as i32, "/work/a");
         let prev_reg = std::env::var_os("GHAX_DAEMON_REGISTRY");
         let prev_state = std::env::var_os("GHAX_STATE_FILE");
-        // SAFETY: every test that touches the environment holds ENV_LOCK.
+        // SAFETY: every test that mutates the environment holds ENV_LOCK, so
+        // none of them races another. A test that only reads the environment
+        // (e.g. reqwest's proxy lookup) does not take the lock and could still
+        // overlap; that residual race is accepted for tests.
         unsafe {
             std::env::set_var("GHAX_DAEMON_REGISTRY", &reg);
             std::env::remove_var("GHAX_STATE_FILE");

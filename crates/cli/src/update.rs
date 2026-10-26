@@ -273,44 +273,22 @@ fn find_local_install_script() -> Option<PathBuf> {
             // Only trust scripts inside a ghax checkout — gated on either
             // the Rust workspace's package name or the JS package name.
             let cargo = dir.join("Cargo.toml");
-            if let Ok(raw) = fs::read_to_string(&cargo) {
-                if raw.contains("name = \"ghax\"") {
-                    return Some(candidate);
-                }
+            if let Ok(raw) = fs::read_to_string(&cargo)
+                && raw.contains("name = \"ghax\"")
+            {
+                return Some(candidate);
             }
             let pkg = dir.join("package.json");
-            if let Ok(raw) = fs::read_to_string(&pkg) {
-                if raw.contains("\"@ghax/cli\"") {
-                    return Some(candidate);
-                }
+            if let Ok(raw) = fs::read_to_string(&pkg)
+                && raw.contains("\"@ghax/cli\"")
+            {
+                return Some(candidate);
             }
         }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return None,
+        {
+            let p = dir.parent()?;
+            dir = p
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn semver_parsing_handles_v_prefix_and_prerelease() {
-        assert_eq!(parse_semver("0.4.2"), Some((0, 4, 2)));
-        assert_eq!(parse_semver("v0.4.2"), Some((0, 4, 2)));
-        assert_eq!(parse_semver("v1.0.0-rc1"), Some((1, 0, 0)));
-        assert_eq!(parse_semver("not-a-version"), None);
-    }
-
-    #[test]
-    fn is_newer_rejects_equal_and_older() {
-        assert!(is_newer("v0.4.3", "0.4.2"));
-        assert!(is_newer("v1.0.0", "0.99.99"));
-        assert!(!is_newer("v0.4.2", "0.4.2"));
-        assert!(!is_newer("v0.4.1", "0.4.2"));
-        assert!(!is_newer("garbage", "0.4.2"));
     }
 }
 
@@ -336,4 +314,26 @@ fn fetch_latest_tag() -> Result<String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("tag_name missing in GitHub response"))?;
     Ok(tag.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_parsing_handles_v_prefix_and_prerelease() {
+        assert_eq!(parse_semver("0.4.2"), Some((0, 4, 2)));
+        assert_eq!(parse_semver("v0.4.2"), Some((0, 4, 2)));
+        assert_eq!(parse_semver("v1.0.0-rc1"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("not-a-version"), None);
+    }
+
+    #[test]
+    fn is_newer_rejects_equal_and_older() {
+        assert!(is_newer("v0.4.3", "0.4.2"));
+        assert!(is_newer("v1.0.0", "0.99.99"));
+        assert!(!is_newer("v0.4.2", "0.4.2"));
+        assert!(!is_newer("v0.4.1", "0.4.2"));
+        assert!(!is_newer("garbage", "0.4.2"));
+    }
 }

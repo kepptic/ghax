@@ -195,21 +195,17 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
             "         Run `ghax detach && ghax attach` to restart the daemon on the current bundle."
         );
     }
-    if daemon_version_mismatch {
-        if let Some(v) = daemon_version {
-            eprintln!();
-            eprintln!(
-                "WARNING: running daemon is v{v}, CLI is v{cli_version} — run 'ghax detach && ghax attach' (or reinstall) so they match."
-            );
-        }
+    if daemon_version_mismatch && let Some(v) = daemon_version {
+        eprintln!();
+        eprintln!(
+            "WARNING: running daemon is v{v}, CLI is v{cli_version} — run 'ghax detach && ghax attach' (or reinstall) so they match."
+        );
     }
-    if extension_version_mismatch {
-        if let Some(v) = extension_version {
-            eprintln!();
-            eprintln!(
-                "WARNING: bridge extension is v{v}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
-            );
-        }
+    if extension_version_mismatch && let Some(v) = extension_version {
+        eprintln!();
+        eprintln!(
+            "WARNING: bridge extension is v{v}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
+        );
     }
 
     Ok(EXIT_OK)

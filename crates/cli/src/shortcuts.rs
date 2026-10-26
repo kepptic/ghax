@@ -495,7 +495,7 @@ fn find_refs(steps: &[Value]) -> Vec<(usize, String, String)> {
                 let before_ok = at == 0 || !b[at - 1].is_ascii_alphanumeric();
                 let after_ok = b
                     .get(at + 2 + digits)
-                    .map_or(true, |c| !c.is_ascii_alphanumeric());
+                    .is_none_or(|c| !c.is_ascii_alphanumeric());
                 if digits > 0 && before_ok && after_ok {
                     out.push((i, cmd.clone(), s[at..at + 2 + digits].to_string()));
                 }
@@ -515,10 +515,10 @@ fn refused_cmds(steps: &[Value]) -> Vec<String> {
         if NEVER_SAVE.contains(&cmd) {
             out.push(cmd.to_string());
         }
-        if cmd == "batch" {
-            if let Some(Value::Array(inner)) = step.get("args").and_then(|a| a.get(0)) {
-                out.extend(refused_cmds(inner));
-            }
+        if cmd == "batch"
+            && let Some(Value::Array(inner)) = step.get("args").and_then(|a| a.get(0))
+        {
+            out.extend(refused_cmds(inner));
         }
     }
     out

@@ -68,12 +68,12 @@ pub(crate) fn collect_repeated_flag<'a>(raw: &'a [String], flag: &str) -> Vec<&'
     let mut i = 0;
     while i < raw.len() {
         if raw[i] == long {
-            if let Some(val) = raw.get(i + 1) {
-                if !val.starts_with('-') {
-                    out.push(val.as_str());
-                    i += 2;
-                    continue;
-                }
+            if let Some(val) = raw.get(i + 1)
+                && !val.starts_with('-')
+            {
+                out.push(val.as_str());
+                i += 2;
+                continue;
             }
         } else if let Some(val) = raw[i].strip_prefix(&prefix) {
             out.push(val);
@@ -155,15 +155,15 @@ fn scrape_links(url: &str, origin: &str) -> Vec<String> {
         rest = &rest[a_pos + 3..];
         let tag_end = rest.find('>').unwrap_or(rest.len());
         let tag = &rest[..tag_end];
-        if let Some(href) = extract_href(tag) {
-            if !href.starts_with('#') {
-                // Resolve relative href against base URL.
-                if let Some(abs) = resolve_url(url, &href) {
-                    // Only keep same-origin, strip fragments.
-                    let no_frag = abs.split('#').next().unwrap_or(&abs).to_string();
-                    if no_frag.starts_with(origin) {
-                        hrefs.insert(no_frag);
-                    }
+        if let Some(href) = extract_href(tag)
+            && !href.starts_with('#')
+        {
+            // Resolve relative href against base URL.
+            if let Some(abs) = resolve_url(url, &href) {
+                // Only keep same-origin, strip fragments.
+                let no_frag = abs.split('#').next().unwrap_or(&abs).to_string();
+                if no_frag.starts_with(origin) {
+                    hrefs.insert(no_frag);
                 }
             }
         }
@@ -183,12 +183,10 @@ fn extract_href(tag: &str) -> Option<String> {
     let lower = tag.to_lowercase();
     let pos = lower.find("href=")?;
     let after = &tag[pos + 5..];
-    let (quote, after) = if after.starts_with('"') {
-        ('"', &after[1..])
-    } else if after.starts_with('\'') {
-        ('\'', &after[1..])
+    let (quote, after) = if let Some(rest) = after.strip_prefix('"') {
+        ('"', rest)
     } else {
-        return None;
+        ('\'', after.strip_prefix('\'')?)
     };
     let end = after.find(quote).unwrap_or(after.len());
     let href = after[..end].trim().to_string();
@@ -221,10 +219,8 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         for u in sitemap {
             // Keep only same-origin URLs.
-            if u.starts_with(&origin) {
-                if seen.insert(u.clone()) {
-                    found.push(u);
-                }
+            if u.starts_with(&origin) && seen.insert(u.clone()) {
+                found.push(u);
             }
             if found.len() >= limit {
                 break;

@@ -59,12 +59,12 @@ pub fn parse(argv: &[String]) -> Parsed {
                 flags.insert(key.to_string(), Value::String(val.to_string()));
             } else {
                 let key = rest;
-                if let Some(next) = argv.get(i + 1) {
-                    if !next.starts_with('-') {
-                        flags.insert(key.to_string(), Value::String(next.clone()));
-                        i += 2;
-                        continue;
-                    }
+                if let Some(next) = argv.get(i + 1)
+                    && !next.starts_with('-')
+                {
+                    flags.insert(key.to_string(), Value::String(next.clone()));
+                    i += 2;
+                    continue;
                 }
                 flags.insert(key.to_string(), Value::Bool(true));
             }
@@ -121,12 +121,12 @@ pub fn parse_snapshot(argv: &[String]) -> Parsed {
                 );
             } else {
                 let key = rest.to_string();
-                if let Some(next) = argv.get(i + 1) {
-                    if !next.starts_with('-') {
-                        flags.insert(key, Value::String(next.clone()));
-                        i += 2;
-                        continue;
-                    }
+                if let Some(next) = argv.get(i + 1)
+                    && !next.starts_with('-')
+                {
+                    flags.insert(key, Value::String(next.clone()));
+                    i += 2;
+                    continue;
                 }
                 flags.insert(key, Value::Bool(true));
             }

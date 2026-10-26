@@ -155,10 +155,10 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
     }
     // `wait <ms>` IS its own duration: a 5-minute wait must not be cut at
     // the default budget.
-    if cmd == "wait" {
-        if let Some(ms) = num(args.get(0)) {
-            return Some(Duration::from_millis(ms) + margin);
-        }
+    if cmd == "wait"
+        && let Some(ms) = num(args.get(0))
+    {
+        return Some(Duration::from_millis(ms) + margin);
     }
     if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()) {
         return if secs == 0 {
