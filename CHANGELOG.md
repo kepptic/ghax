@@ -24,6 +24,14 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Bun commands remain outside history.
 
 ### Changed
+- **Release builds use cargo-dist 0.33, and archives carry build attestations.**
+  `release.yml` is regenerated from cargo-dist 0.33.0 (was 0.31.0) with the
+  hand edits re-applied. Each per-platform archive now gets a signed GitHub
+  build-provenance attestation; check a download with
+  `gh attestation verify ghax-<target>.tar.xz --repo kepptic/ghax`. Every
+  release job installs the pinned Rust toolchain explicitly, and every action in
+  `release.yml` is pinned to a commit SHA. Targets, archive contents and the
+  install path are unchanged.
 - **Rust edition 2024 with a pinned toolchain.** `rust-toolchain.toml` pins
   stable 1.99.1 (rustfmt and clippy included), `rust-version` is gone, and the
   workspace uses resolver 3. Building from source needs that toolchain; rustup
