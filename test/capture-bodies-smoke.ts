@@ -32,7 +32,7 @@ const root = path.resolve(here, '..');
 const ghax = path.join(root, 'dist', 'ghax');
 
 if (!fs.existsSync(ghax)) {
-  console.error("dist/ghax missing — run 'bun run build' first");
+  console.error("dist/ghax missing — run 'npm run build:all' first");
   process.exit(1);
 }
 

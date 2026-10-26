@@ -43,7 +43,7 @@ const attachArgs = (...extra: string[]): string[] =>
   smokePort ? ['attach', '--port', smokePort, ...extra] : ['attach', ...extra];
 
 if (!fs.existsSync(ghax)) {
-  fail(`${ghax} missing — run 'bun run build' first (or set GHAX_BIN to the correct binary path)`);
+  fail(`${ghax} missing — run 'npm run build:all' first (or set GHAX_BIN to the correct binary path)`);
 }
 
 interface RunResult {

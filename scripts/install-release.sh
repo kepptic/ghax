@@ -3,8 +3,8 @@
 # platform, verify its SHA-256, and install the binary + daemon bundle.
 #
 # Usage:
-#   bun run install-release            # latest release
-#   bun run install-release v0.4.2     # specific version
+#   npm run install-release            # latest release
+#   npm run install-release -- v0.4.2  # specific version
 #   curl -fsSL https://raw.githubusercontent.com/kepptic/ghax/main/scripts/install-release.sh | bash
 #
 # Installs the binary to the first of:
@@ -30,7 +30,7 @@ set -euo pipefail
 
 # Resolve SCRIPT_DIR before any `cd` happens — `$0` is often relative
 # (e.g. when invoked via `bash scripts/install-release.sh` or
-# `bun run install-release`), so deferring this until after we chdir
+# `npm run install-release`), so deferring this until after we chdir
 # into the temp dir breaks the bootstrap step below.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

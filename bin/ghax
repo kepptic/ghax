@@ -5,7 +5,7 @@
 #   2. target/release/ghax  — in-repo Rust build
 #   3. exit 10              — nothing usable found; print build hint
 #
-# For installed users (via `bun run install-link` or a release archive) the
+# For installed users (via `npm run install-link` or a release archive) the
 # binary is on PATH and this shim is never invoked. The precedence only
 # matters for in-repo use during development.
 
@@ -26,6 +26,6 @@ fi
 # 3. Nothing found.
 echo "ghax: no Rust binary at $DIR/target/release/ghax." >&2
 echo "" >&2
-echo "  Build it:  cd $DIR && bun run build:rust" >&2
+echo "  Build it:  cd $DIR && npm run build:rust" >&2
 echo "  Or set GHAX_BIN to point at a pre-built ghax binary." >&2
 exit 10

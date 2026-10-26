@@ -546,7 +546,7 @@ pub(crate) fn locate_daemon_bundle() -> Result<Option<(PathBuf, &'static str)>> 
                             return Ok(Some((bundle, "repo-dist")));
                         }
                         return Err(anyhow::anyhow!(
-                            "Found @ghax/cli at {} but dist/ghax-daemon.mjs is missing. Run `bun run build` first.",
+                            "Found @ghax/cli at {} but dist/ghax-daemon.mjs is missing. Run `npm run build` first.",
                             dir.display()
                         ));
                     }
@@ -589,7 +589,7 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
     Err(anyhow::anyhow!(
         "Cannot locate ghax-daemon.mjs. Tried $GHAX_DAEMON_BUNDLE, the binary's directory, \
          the install location ({hint}), and an automatic download. Run \
-         `bash scripts/install-link.sh` from a checkout, or `bun run install-release` to \
+         `bash scripts/install-link.sh` from a checkout, or `npm run install-release` to \
          install a published build, or set GHAX_DAEMON_BUNDLE to point at one directly."
     ))
 }
@@ -830,7 +830,7 @@ fn daemon_failure(stderr_path: Option<&std::path::Path>, what: &str) -> anyhow::
         msg.push_str("\n----------------------");
         if is_missing_module(s) {
             msg.push_str(
-                "\n\nThe daemon needs a playwright runtime beside it.\nFix: cd ~/.local/share/ghax && npm install\n(or re-run `bun run install-link` from the ghax repo)",
+                "\n\nThe daemon needs a playwright runtime beside it.\nFix: cd ~/.local/share/ghax && npm install\n(or re-run `npm run install-link` from the ghax repo)",
             );
         }
     } else {

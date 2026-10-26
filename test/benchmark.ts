@@ -11,8 +11,8 @@
  * action in practice, not comparable to CLI tools in ~100ms territory.
  *
  * Run:
- *   bun run build    # ghax needs its own dist binary
- *   bun run test/benchmark.ts [--iters=3]
+ *   npm run build:all    # ghax needs its own dist binary
+ *   npx tsx test/benchmark.ts [--iters=3]
  */
 
 import * as fs from 'fs';
@@ -26,7 +26,7 @@ const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax'
 const gstackBrowse = path.join(process.env.HOME!, '.claude/skills/gstack/browse/dist/browse');
 
 if (!fs.existsSync(ghax)) {
-  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
+  console.error(`ghax binary missing at ${ghax} — run 'npm run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 

@@ -9,7 +9,7 @@
  * avoid touching the user's daily-driver browser.
  *
  * Run:
- *   bun run test/perf-bench.ts
+ *   npx tsx test/perf-bench.ts
  *
  * Thresholds assume:
  *   - macOS M-series or recent x86 / Linux equivalent
@@ -31,7 +31,7 @@ const root = path.resolve(here, '..');
 const ghax = process.env.GHAX_BIN ?? path.join(root, 'target', 'release', 'ghax');
 
 if (!fs.existsSync(ghax)) {
-  console.error(`ghax binary missing at ${ghax} — run 'bun run build:rust' first (or set GHAX_BIN)`);
+  console.error(`ghax binary missing at ${ghax} — run 'npm run build:rust' first (or set GHAX_BIN)`);
   process.exit(1);
 }
 

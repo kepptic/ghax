@@ -10,6 +10,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Breaking: the bridge extension requires Chrome/Edge 120+ (`minimum_chrome_version`).
   The 0.5-minute `chrome.alarms` keepalive needs 120, `chrome.storage.session`
   needs 102, and `chrome.scripting` needs 88. Older browsers refuse to load it.
+- **Bun is no longer used.** `ghax ship` runs `npm run typecheck` and
+  `npm run build` (`npm.cmd` on Windows), `scripts/check.sh` runs through npm,
+  and the error hints in `ghax attach`, `bin/ghax` and `install-link.sh` name
+  npm commands. CI installs with `npm ci` and runs on Node 24 and 26, with
+  checkout v6, setup-node v6, cache v5 and upload-artifact v6.
 
 ## [0.14.0] - 2026-10-25
 ### Added

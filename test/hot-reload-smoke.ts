@@ -33,7 +33,7 @@ const ghax = path.join(root, 'dist', 'ghax');
 const fixture = path.join(here, 'fixtures', 'test-extension');
 const CDP_PORT = 9334;
 
-if (!fs.existsSync(ghax)) fail(`dist/ghax missing — run 'bun run build' first`);
+if (!fs.existsSync(ghax)) fail(`dist/ghax missing — run 'npm run build:all' first`);
 if (!fs.existsSync(fixture)) fail(`fixture missing at ${fixture}`);
 
 const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-hotreload-'));

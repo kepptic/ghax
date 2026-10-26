@@ -10,7 +10,7 @@
 //!   anything else    → pretty JSON, two-space indent
 //!
 //! Broken-pipe handling: when stdout is closed (e.g. piped into `head`), Rust
-//! panics by default. We catch it and exit silently like Bun does.
+//! panics by default. We catch it and exit silently like Node does.
 
 use serde_json::Value;
 use std::io::{self, Write};

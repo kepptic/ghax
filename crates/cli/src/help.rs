@@ -1,5 +1,5 @@
 //! Help text — kept byte-equivalent with `HELP` in `src/cli.ts` so `--help`
-//! parity tests don't drift between Bun and Rust.
+//! parity tests don't drift between the old TS CLI and Rust.
 
 pub const HELP: &str = r#"ghax — attach to your real Chrome/Edge via CDP and drive it.
 
