@@ -17,6 +17,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `unhandledRejection` hook; a failing request gets a 500 instead of a hung
   socket.
 
+### Docs
+- README, CONTRIBUTING, CLAUDE.md, AGENTS.md, SECURITY.md, ARCHITECTURE.md,
+  llms.txt, docs/BENCHMARK.md, TODOS.md and the ghax skill now say Node 24+, npm,
+  Oxlint, the pinned Rust toolchain (no MSRV) and the fmt and clippy gates. No
+  Bun commands remain outside history.
+
 ### Changed
 - **Rust edition 2024 with a pinned toolchain.** `rust-toolchain.toml` pins
   stable 1.99.1 (rustfmt and clippy included), `rust-version` is gone, and the

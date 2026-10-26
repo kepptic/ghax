@@ -134,7 +134,7 @@ cleaner git blame.
   function in daemon.ts then imports the handler modules for side
   effects, triggering all register() calls.
 - Cross-browser smoke already covers behavioral equivalence; after
-  the split, `bun run test:smoke` + `bun run test:cross-browser`
+  the split, `npm run test:smoke` + `npm run test:cross-browser`
   should catch any regression.
 
 **Depends on / blocked by:** Nothing. Land the simplify and

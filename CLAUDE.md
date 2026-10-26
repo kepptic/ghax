@@ -60,9 +60,9 @@ the tool in the past.
 
 4. **Daemon restart required after editing `src/daemon.ts`.** The daemon
    bundle is loaded once at attach time. Changes to `src/daemon.ts` don't
-   take effect until `ghax detach && bun run build && ghax attach`. Bit me
+   take effect until `ghax detach && npm run build && ghax attach`. Bit me
    once debugging LCP capture — daemon returned null because it was still
-   running the pre-fix code. `bun run build` / `npm run build` invoke
+   running the pre-fix code. `npm run build` invokes
    `scripts/build-daemon.mjs` (esbuild's JS API, not a shell one-liner —
    needed to stamp `{version, gitSha, buildDate}` into the bundle via
    `define`, cross-platform since this also runs in CI on Windows). The same
@@ -80,7 +80,7 @@ the tool in the past.
    `printResult()` for no benefit). When the daemon changes an RPC
    return shape, just update whatever Rust dispatch code reads
    `data.get("foo")` if the field name changed. Smoke (`test/smoke.ts`
-   via `GHAX_BIN=$PWD/target/release/ghax bun run test:smoke`) catches
+   via `GHAX_BIN=$PWD/target/release/ghax npm run test:smoke`) catches
    the breakage.
 
 ## Command patterns
@@ -105,9 +105,8 @@ Adding a new verb takes 3 steps:
    in `dispatch.rs::dispatch_inner` and declare `mod <verb>;` in
    `main.rs`. See `qa.rs`, `ship.rs`, `attach.rs` for templates.
 
-3. **Add a smoke check in `test/smoke.ts`.** Run it against both Bun
-   (irrelevant now — only the daemon is Bun-built) and Rust
-   (`GHAX_BIN=$PWD/target/release/ghax bun run test:smoke`).
+3. **Add a smoke check in `test/smoke.ts`.** Run it against the
+   Rust CLI (`GHAX_BIN=$PWD/target/release/ghax npm run test:smoke`).
 
 ## Common workflows
 
@@ -240,9 +239,12 @@ See `design/plan/09-bridge-multi-agent.md`.
 Every change must pass:
 
 ```bash
-# Rust CLI
+# Rust CLI (toolchain pinned in rust-toolchain.toml; rustup installs it)
 cargo build --release            # compile Rust CLI (crates/cli/)
-npm run typecheck                # tsc --noEmit (daemon TS + tests)
+cargo fmt --all --check          # CI gate
+cargo clippy -p ghax --all-targets -- -D warnings   # CI gate
+npm run typecheck                # tsc --noEmit (TypeScript 7, daemon TS + tests)
+npm run lint                     # Oxlint, type-aware (no-floating-promises is an error)
 npm run build                    # bundle daemon → dist/ghax-daemon.mjs (esbuild)
 npm run test:smoke               # 95-check smoke suite against a live Edge session
 ```
@@ -266,7 +268,7 @@ suite against the Rust binary — useful for verifying parity.
 
 ## Before committing
 
-1. Typecheck + smoke passes.
+1. Typecheck, lint, fmt, clippy and smoke pass.
 2. Every new flag / verb / RPC has a smoke check.
 3. `CHANGELOG.md` under `## [Unreleased]` has an entry for the change.
 4. If the change is user-facing: `README.md` command surface reflects it.

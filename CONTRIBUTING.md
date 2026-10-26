@@ -47,7 +47,7 @@ ghax/
 
 ## Dev loop
 
-Prerequisites: **Rust 1.80+**, **Node 24+**, git.
+Prerequisites: **Node 24+**, [rustup](https://rustup.rs), git. The Rust toolchain is pinned in `rust-toolchain.toml` (edition 2024, rustfmt and clippy included); rustup installs it on the first `cargo` run, so there is no minimum version to check.
 
 ```bash
 npm install
@@ -55,7 +55,10 @@ npm run build            # scripts/build-daemon.mjs (esbuild) → dist/ghax-daem
 npm run build:rust       # compiles Rust CLI → target/release/ghax
 ./target/release/ghax attach   # attach to a running Edge on :9222
 ./target/release/ghax --help   # command surface
-npm run typecheck              # tsc --noEmit
+npm run typecheck              # tsc --noEmit (TypeScript 7, the native compiler)
+npm run lint                   # Oxlint, type-aware; no-floating-promises is an error
+cargo fmt --all --check        # CI gate; drop --check to fix
+cargo clippy -p ghax --all-targets -- -D warnings   # CI gate
 ```
 
 During dev, editing `src/*.ts` requires `npm run build` again — the
@@ -70,7 +73,7 @@ the extension after it).
 ## Local checks (pre-commit)
 
 `scripts/check.sh` runs the same verifications GitHub Actions runs —
-TypeScript `tsc --noEmit`, `cargo check`, and the daemon bundle build —
+TypeScript `tsc --noEmit`, `npm run lint` (Oxlint), `cargo check`, and the daemon bundle build —
 and completes in ~3s on an incremental checkout. **Always run it (or
 let the pre-commit hook run it) before pushing.**
 
@@ -78,6 +81,9 @@ let the pre-commit hook run it) before pushing.**
 bash scripts/check.sh       # one-shot
 SKIP_CHECK=1 git commit     # bypass the hook (discouraged)
 ```
+
+CI runs those, plus `cargo fmt --all --check`, `cargo clippy -D warnings`, `cargo-deny`
+and `npm audit`, on Node 24 and 26. Third-party actions are pinned by SHA.
 
 The hook lives at `.githooks/pre-commit` (tracked in the repo). After
 cloning, wire it up once per clone:
@@ -194,8 +200,8 @@ Both scripts share the same install path. Idempotent — safe to re-run.
 ## Architecture invariants
 
 - **CLI = Rust. Daemon = Node (ESM bundle).** Playwright's
-  `connectOverCDP` is Node-only. Don't reach for `Bun.serve`
-  or `Bun.spawn` anywhere — use Node's `http` and `child_process`.
+  `connectOverCDP` is Node-only. Use Node's `http` and
+  `child_process`; Bun is not used anywhere. The daemon needs Node 24+.
 - **Single daemon per project.** State file at `.ghax/ghax.json` points
   at pid + port. Never write a second state file.
 - **Refs survive until re-snapshot.** `click @e3` resolves against the

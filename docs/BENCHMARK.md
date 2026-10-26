@@ -82,12 +82,12 @@ Warm:
 ```bash
 git clone https://github.com/kepptic/ghax
 cd ghax
-bun run build:all                                            # build daemon + Rust CLI
+npm run build:all                                            # build daemon + Rust CLI
 npx tsx test/benchmark.ts --iters=3                          # vs Wikipedia (default)
 npx tsx test/benchmark.ts --iters=3 --url=https://github.com # vs custom site
 ```
 
-You need: Rust 1.80+, Node 20+. Plus whichever competitors you want to
+You need: Node 24+ and rustup (it installs the toolchain pinned in `rust-toolchain.toml`). Plus whichever competitors you want to
 compare against on PATH (`gstack-browse`, `playwright-cli`, `agent-browser`).
 The script auto-skips any that aren't installed.
 

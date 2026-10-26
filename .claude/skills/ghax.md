@@ -55,7 +55,7 @@ Verify with `which ghax`. On this machine it's symlinked as
 
 ```bash
 cd /Users/gr/Documents/DevOps/kepptic/products/open-source/ghax
-bun run build && bun run install-link
+npm run build && npm run install-link
 ```
 
 ### 2. Browser listening on CDP

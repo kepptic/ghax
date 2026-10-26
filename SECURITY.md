@@ -124,17 +124,17 @@ issues get fixed on the next normal release cycle.
 
 ## Dependency security
 
-ghax runs under Bun (CLI binary) and Node (daemon bundle). Playwright
+ghax is a Rust binary (the CLI) plus a Node 24+ daemon bundle. Playwright
 is the primary runtime dependency — we track upstream advisories and
 bump on security releases.
 
-Everything else (`fs`, `http`, `url`, etc.) is Node/Bun standard
+Everything else (`fs`, `http`, `url`, etc.) is Node standard
 library, not third-party. We do not depend on any package that
 executes arbitrary code during install (no postinstall hooks, no
 native bindings that compile).
 
 Bundle sizes:
-- `dist/ghax` — 61MB Mach-O (Bun compiled, includes the Bun runtime)
+- `target/release/ghax` — ~3MB Rust binary (TLS is rustls with the ring provider and bundled webpki roots, no OpenSSL)
 - `dist/ghax-daemon.mjs` — ~70KB Node ESM (Playwright marked external)
 
 The daemon is reviewable in under an hour. Read it; you won't find
