@@ -26,6 +26,17 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the error hints in `ghax attach`, `bin/ghax` and `install-link.sh` name
   npm commands. CI installs with `npm ci` and runs on Node 24 and 26, with
   checkout v6, setup-node v6, cache v5 and upload-artifact v6.
+- **Breaking: the daemon requires Node 24+.** `engines.node` is `>=24`; Node 20
+  and 22 are no longer supported. `@types/node` is `^24` to match the floor.
+- **TypeScript 7 (the native compiler) and a modern tsconfig.** `tsc --noEmit`
+  now runs the TS 7 compiler. `moduleResolution` is `bundler` (TS 7 rejects
+  `node10`) and `verbatimModuleSyntax` is on; the unused
+  `allowImportingTsExtensions`, `esModuleInterop` and
+  `allowSyntheticDefaultImports` options are gone.
+- **Dependency bumps.** playwright 1.64.1 (still an exact pin), esbuild 0.28.2,
+  tsx 4.23, ws 8.22, source-map 0.8.0, @types/ws 8.18.2. The bootstrap script's
+  fallback versions match. `source-map` 0.8 keeps the `SourceMapConsumer` API
+  `src/source-maps.ts` uses, so no code change was needed there.
 
 ## [0.14.0] - 2026-10-25
 ### Added

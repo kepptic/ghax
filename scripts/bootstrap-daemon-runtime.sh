@@ -32,12 +32,12 @@ REPO_PKG="$SCRIPT_DIR/../package.json"
 if [ -z "$PW_VERSION" ] && [ -f "$REPO_PKG" ]; then
   read -r PW_VERSION SM_VERSION WS_VERSION < <(node -e '
     const p = require(process.argv[1]).dependencies || {};
-    process.stdout.write(`${p.playwright || "1.63.0"} ${p["source-map"] || "^0.7.6"} ${p.ws || "^8.18.1"}\n`);
+    process.stdout.write(`${p.playwright || "1.64.1"} ${p["source-map"] || "^0.8.0"} ${p.ws || "^8.22.0"}\n`);
   ' "$REPO_PKG")
 fi
-PW_VERSION="${PW_VERSION:-1.63.0}"
-SM_VERSION="${SM_VERSION:-^0.7.6}"
-WS_VERSION="${WS_VERSION:-^8.18.1}"
+PW_VERSION="${PW_VERSION:-1.64.1}"
+SM_VERSION="${SM_VERSION:-^0.8.0}"
+WS_VERSION="${WS_VERSION:-^8.22.0}"
 
 # Decide whether install is needed: directory missing, playwright version
 # mismatch, OR a required sibling (ws — added with the extension bridge, easy

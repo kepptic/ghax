@@ -15,7 +15,7 @@ history (why these choices were made, alternatives rejected, etc.) see
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  ghax daemon (Node ESM bundle — dist/ghax-daemon.mjs)           │
-│  Node 20+, unchanged from v0.4                                  │
+│  Node 24+, unchanged from v0.4                                  │
 │                                                                 │
 │   Playwright's chromium.connectOverCDP   — tab-level ops        │
 │   Raw CDP WebSocket pool (cdp-client.ts) — SW, side panels,     │
