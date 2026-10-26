@@ -26,11 +26,14 @@ If you just arrived and need to install: see [llms.txt](./llms.txt) for the inst
 
 ```bash
 # Daily dev loop
-npm install                  # Node deps (playwright + source-map)
+npm install                  # Node deps (Node 24+; playwright + source-map)
 npm run build                # bundles daemon → dist/ghax-daemon.mjs (esbuild, ~50 ms)
 npm run build:rust           # compiles Rust CLI → target/release/ghax
 npm run build:all            # both of the above
-npm run typecheck            # tsc --noEmit
+npm run typecheck            # tsc --noEmit (TypeScript 7, the native compiler)
+npm run lint                 # Oxlint, type-aware; part of scripts/check.sh and CI
+cargo fmt --all --check      # CI gate (edition 2024; toolchain pinned in rust-toolchain.toml)
+cargo clippy -p ghax --all-targets -- -D warnings   # CI gate
 
 # Install to ~/.local/bin (idempotent)
 npm run install-link
@@ -162,7 +165,7 @@ If you hit ambiguity with meaningful blast radius (two plausible architectures, 
 - **Don't claim `Co-Authored-By`** unless a human co-authored the change.
 - **No force-push to `main`.** Feature branches are fine to rebase.
 
-Before opening a PR: typecheck clean, daemon bundle builds, Rust builds release, smoke passes, CHANGELOG updated under `## [Unreleased]`. Details in [CONTRIBUTING.md](./CONTRIBUTING.md).
+Before opening a PR: typecheck and lint clean, fmt and clippy clean, daemon bundle builds, Rust builds release, smoke passes, CHANGELOG updated under `## [Unreleased]`. Details in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Secrets
 

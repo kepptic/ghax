@@ -11,8 +11,8 @@ This file is written for AI coding agents. If you just arrived and the user aske
 Prerequisites (check these first):
 
 ```bash
-node --version      # need v20.0 or newer
-cargo --version     # need Rust 1.80 or newer
+node --version      # need v24.0 or newer
+rustup --version    # rustup installs the toolchain pinned in rust-toolchain.toml
 git --version       # any recent version
 ```
 

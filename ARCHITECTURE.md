@@ -34,7 +34,7 @@ history (why these choices were made, alternatives rejected, etc.) see
                              │ HTTP (unchanged RPC protocol)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  ghax CLI (Rust 2021 edition — crates/cli/)                     │
+│  ghax CLI (Rust 2024 edition — crates/cli/)                     │
 │  ~2.6 MB stripped binary, ~20 ms cold start                     │
 │                                                                 │
 │   clap argv parsing → route to handler                          │
@@ -291,7 +291,7 @@ on those two instead of failing.
 Shadow DOM: the cursor-interactive pass walks open shadow roots and
 emits Playwright chain selectors (`host >> inner`). This is the only
 form of selector Playwright accepts for descending into shadow trees
-(checked against the pinned 1.63.0).
+(checked against the pinned 1.64.1).
 
 ## Extension internals
 
@@ -476,7 +476,7 @@ is a separate table, `BRIDGE_RETRY_SAFE` (see
 | `src/snapshot.ts` | ~500 | a11y tree walker, ref assignment, cursor-interactive + shadow-DOM pass |
 | `src/buffers.ts` | ~130 | CircularBuffer, entry types, parseStack |
 | `src/source-maps.ts` | ~120 | SourceMapCache + resolver (opt-in via --source-maps) |
-| `src/config.ts` | ~80 | State file resolution (uses Node child_process so it works under both Node and Bun) |
+| `src/config.ts` | ~80 | State file resolution (uses Node child_process) |
 
 ## Security model
 
