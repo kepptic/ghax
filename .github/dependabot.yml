@@ -1,0 +1,18 @@
+# Dependabot is on for GitHub Actions only, so the SHA pins in the workflows
+# don't go stale. There is deliberately no npm or cargo ecosystem here: nobody
+# triages those PRs, and `npm audit` plus cargo-deny in CI already flag
+# vulnerable dependencies.
+#
+# The "ci" commit prefix makes each PR's title `ci(...)`, a type the
+# auto-release classifier doesn't bump on.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

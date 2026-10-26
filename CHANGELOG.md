@@ -65,6 +65,13 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   collapsed into let-chains, `build_daemon_cmd_bridge` takes an options struct),
   and the CI lint job runs clippy with `-D warnings`. The shortcuts test that
   sets `GHAX_SHORTCUTS_DIR` now takes the same env lock as the `state` tests.
+- **Supply-chain checks in CI.** A `cargo-deny` job checks advisories, bans,
+  licenses and sources against the new `deny.toml` (permissive licenses only,
+  no OpenSSL or aws-lc, crates.io only). Every action in `ci.yml` and
+  `auto-release.yml` is pinned to a commit SHA with a version comment, and
+  Dependabot opens one monthly PR for GitHub Actions only (none for npm or
+  cargo). The CI typecheck job also runs `npm audit --omit=dev
+  --audit-level=high`.
 
 ## [0.14.0] - 2026-10-25
 ### Added
