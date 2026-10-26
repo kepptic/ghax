@@ -68,12 +68,12 @@ pub(crate) fn collect_repeated_flag<'a>(raw: &'a [String], flag: &str) -> Vec<&'
     let mut i = 0;
     while i < raw.len() {
         if raw[i] == long {
-            if let Some(val) = raw.get(i + 1) {
-                if !val.starts_with('-') {
-                    out.push(val.as_str());
-                    i += 2;
-                    continue;
-                }
+            if let Some(val) = raw.get(i + 1)
+                && !val.starts_with('-')
+            {
+                out.push(val.as_str());
+                i += 2;
+                continue;
             }
         } else if let Some(val) = raw[i].strip_prefix(&prefix) {
             out.push(val);
@@ -104,18 +104,19 @@ fn safe_filename(url: &str) -> String {
 }
 
 /// Fetch and parse `<loc>...</loc>` entries from a sitemap.xml.
-fn fetch_sitemap(url: &str) -> Vec<String> {
-    let client = reqwest::blocking::Client::builder()
+fn fetch_sitemap(url: &str) -> Result<Vec<String>> {
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
+        .build()?;
     let Ok(resp) = client.get(url).send() else {
-        return vec![];
+        return Ok(vec![]);
     };
     if !resp.status().is_success() {
-        return vec![];
+        return Ok(vec![]);
     }
-    let Ok(body) = resp.text() else { return vec![] };
+    let Ok(body) = resp.text() else {
+        return Ok(vec![]);
+    };
     // Regex-free extraction of <loc>...</loc> values (matches TS `body.matchAll`).
     let mut out = Vec::new();
     let mut rest = body.as_str();
@@ -131,23 +132,24 @@ fn fetch_sitemap(url: &str) -> Vec<String> {
             break;
         }
     }
-    out
+    Ok(out)
 }
 
 /// BFS link crawl from `root`, staying within `origin`. Fallback when no sitemap.
-fn scrape_links(url: &str, origin: &str) -> Vec<String> {
-    let client = reqwest::blocking::Client::builder()
+fn scrape_links(url: &str, origin: &str) -> Result<Vec<String>> {
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(8))
         .user_agent("ghax-qa-crawler/0.4")
-        .build()
-        .unwrap_or_default();
+        .build()?;
     let Ok(resp) = client.get(url).send() else {
-        return vec![];
+        return Ok(vec![]);
     };
     if !resp.status().is_success() {
-        return vec![];
+        return Ok(vec![]);
     }
-    let Ok(html) = resp.text() else { return vec![] };
+    let Ok(html) = resp.text() else {
+        return Ok(vec![]);
+    };
     // Extract href= attributes from <a> tags.
     let mut hrefs: HashSet<String> = HashSet::new();
     let mut rest = html.as_str();
@@ -155,21 +157,21 @@ fn scrape_links(url: &str, origin: &str) -> Vec<String> {
         rest = &rest[a_pos + 3..];
         let tag_end = rest.find('>').unwrap_or(rest.len());
         let tag = &rest[..tag_end];
-        if let Some(href) = extract_href(tag) {
-            if !href.starts_with('#') {
-                // Resolve relative href against base URL.
-                if let Some(abs) = resolve_url(url, &href) {
-                    // Only keep same-origin, strip fragments.
-                    let no_frag = abs.split('#').next().unwrap_or(&abs).to_string();
-                    if no_frag.starts_with(origin) {
-                        hrefs.insert(no_frag);
-                    }
+        if let Some(href) = extract_href(tag)
+            && !href.starts_with('#')
+        {
+            // Resolve relative href against base URL.
+            if let Some(abs) = resolve_url(url, &href) {
+                // Only keep same-origin, strip fragments.
+                let no_frag = abs.split('#').next().unwrap_or(&abs).to_string();
+                if no_frag.starts_with(origin) {
+                    hrefs.insert(no_frag);
                 }
             }
         }
         rest = &rest[tag_end..];
     }
-    hrefs.into_iter().collect()
+    Ok(hrefs.into_iter().collect())
 }
 
 fn find_ci(s: &str, needle: &str) -> Option<usize> {
@@ -183,12 +185,10 @@ fn extract_href(tag: &str) -> Option<String> {
     let lower = tag.to_lowercase();
     let pos = lower.find("href=")?;
     let after = &tag[pos + 5..];
-    let (quote, after) = if after.starts_with('"') {
-        ('"', &after[1..])
-    } else if after.starts_with('\'') {
-        ('\'', &after[1..])
+    let (quote, after) = if let Some(rest) = after.strip_prefix('"') {
+        ('"', rest)
     } else {
-        return None;
+        ('\'', after.strip_prefix('\'')?)
     };
     let end = after.find(quote).unwrap_or(after.len());
     let href = after[..end].trim().to_string();
@@ -204,33 +204,31 @@ fn resolve_url(base: &str, href: &str) -> Option<String> {
 }
 
 /// Crawl URLs under `root`: sitemap first, BFS fallback.
-fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
+fn crawl_urls(root: &str, depth: usize, limit: usize) -> Result<Vec<String>> {
     // Derive origin (scheme + host) from root.
     let origin = {
         let Some((before, after)) = root.split_once("://") else {
-            return vec![];
+            return Ok(vec![]);
         };
         let host = after.split('/').next().unwrap_or(after);
         format!("{before}://{host}")
     };
 
     let sitemap_url = format!("{origin}/sitemap.xml");
-    let sitemap = fetch_sitemap(&sitemap_url);
+    let sitemap = fetch_sitemap(&sitemap_url)?;
     if !sitemap.is_empty() {
         let mut found: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for u in sitemap {
             // Keep only same-origin URLs.
-            if u.starts_with(&origin) {
-                if seen.insert(u.clone()) {
-                    found.push(u);
-                }
+            if u.starts_with(&origin) && seen.insert(u.clone()) {
+                found.push(u);
             }
             if found.len() >= limit {
                 break;
             }
         }
-        return found;
+        return Ok(found);
     }
 
     // BFS fallback.
@@ -257,7 +255,7 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
         found.push(item.url.clone());
 
         if item.d < depth {
-            let links = scrape_links(&item.url, &origin);
+            let links = scrape_links(&item.url, &origin)?;
             for link in links {
                 if !visited.contains(&link) {
                     queue.push_back(QueueItem {
@@ -271,7 +269,7 @@ fn crawl_urls(root: &str, depth: usize, limit: usize) -> Vec<String> {
             }
         }
     }
-    found.into_iter().take(limit).collect()
+    Ok(found.into_iter().take(limit).collect())
 }
 
 // ── Main entry point ───────────────────────────────────────────────────────
@@ -322,7 +320,7 @@ pub fn cmd_qa(cfg: &Config, parsed: &Parsed) -> Result<i32> {
         .unwrap_or(20);
 
     if let Some(ref root) = crawl_root {
-        let crawled = crawl_urls(root, crawl_depth, crawl_limit);
+        let crawled = crawl_urls(root, crawl_depth, crawl_limit)?;
         println!("crawl discovered {} URLs under {}", crawled.len(), root);
         urls.extend(crawled);
     }

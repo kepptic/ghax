@@ -59,7 +59,7 @@ pub fn stream(port: u16, path: &str) -> Result<i32> {
     .unwrap_or_else(|e| eprintln!("ghax: could not set Ctrl-C handler: {e}"));
 
     // ── HTTP GET (no timeout — SSE streams indefinitely) ─────────────────────
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         // Disable connect/read timeouts; the stream lives as long as the user
         // wants it.  A 1.5 s timeout on /health is fine but would kill SSE.
         .build()?;

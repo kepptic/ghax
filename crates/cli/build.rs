@@ -26,13 +26,13 @@ fn emit_git_sha() {
     if let Some(git_dir) = find_git_dir(&manifest_dir) {
         let head = git_dir.join("HEAD");
         println!("cargo:rerun-if-changed={}", head.display());
-        if let Ok(contents) = std::fs::read_to_string(&head) {
-            if let Some(ref_path) = contents.trim().strip_prefix("ref: ") {
-                println!(
-                    "cargo:rerun-if-changed={}",
-                    git_dir.join(ref_path).display()
-                );
-            }
+        if let Ok(contents) = std::fs::read_to_string(&head)
+            && let Some(ref_path) = contents.trim().strip_prefix("ref: ")
+        {
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(ref_path).display()
+            );
         }
         println!(
             "cargo:rerun-if-changed={}",
@@ -49,14 +49,12 @@ fn emit_git_sha() {
     if let Ok(out) = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
+        && out.status.success()
+        && let Ok(sha) = String::from_utf8(out.stdout)
     {
-        if out.status.success() {
-            if let Ok(sha) = String::from_utf8(out.stdout) {
-                let sha = sha.trim();
-                if !sha.is_empty() {
-                    println!("cargo:rustc-env=GHAX_GIT_SHA={sha}");
-                }
-            }
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            println!("cargo:rustc-env=GHAX_GIT_SHA={sha}");
         }
     }
 }
@@ -131,13 +129,12 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         if candidate.is_dir() {
             return Some(candidate);
         }
-        if candidate.is_file() {
-            if let Ok(contents) = std::fs::read_to_string(&candidate) {
-                if let Some(rest) = contents.trim().strip_prefix("gitdir: ") {
-                    let p = PathBuf::from(rest);
-                    return Some(if p.is_absolute() { p } else { d.join(p) });
-                }
-            }
+        if candidate.is_file()
+            && let Ok(contents) = std::fs::read_to_string(&candidate)
+            && let Some(rest) = contents.trim().strip_prefix("gitdir: ")
+        {
+            let p = PathBuf::from(rest);
+            return Some(if p.is_absolute() { p } else { d.join(p) });
         }
         dir = d.parent().map(Path::to_path_buf);
     }

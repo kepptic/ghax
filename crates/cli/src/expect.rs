@@ -133,12 +133,12 @@ impl Report {
         e.insert("cmd".into(), json!(cmd));
         e.insert("ok".into(), json!(ok));
         e.insert("ms".into(), json!(ms as u64));
-        if cmd == "expect" {
-            if let Some(d) = data {
-                for k in ["expect", "expected", "actual"] {
-                    if let Some(v) = d.get(k) {
-                        e.insert(k.into(), v.clone());
-                    }
+        if cmd == "expect"
+            && let Some(d) = data
+        {
+            for k in ["expect", "expected", "actual"] {
+                if let Some(v) = d.get(k) {
+                    e.insert(k.into(), v.clone());
                 }
             }
         }

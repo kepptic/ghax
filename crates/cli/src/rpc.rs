@@ -155,10 +155,10 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
     }
     // `wait <ms>` IS its own duration: a 5-minute wait must not be cut at
     // the default budget.
-    if cmd == "wait" {
-        if let Some(ms) = num(args.get(0)) {
-            return Some(Duration::from_millis(ms) + margin);
-        }
+    if cmd == "wait"
+        && let Some(ms) = num(args.get(0))
+    {
+        return Some(Duration::from_millis(ms) + margin);
     }
     if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()) {
         return if secs == 0 {
@@ -201,7 +201,7 @@ pub fn timeout_for(cmd: &str, args: &Value, opts: &Value, env: Option<&str>) -> 
 pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
     let env = std::env::var("GHAX_RPC_TIMEOUT").ok();
     let timeout = timeout_for(cmd, &args, &opts, env.as_deref());
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         .timeout(timeout)
         .build()?;
     call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn a_lost_reply_to_stats_reset_is_not_retried() {
         let (port, seen) = silent_daemon();
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http::local_client_builder()
             .timeout(Duration::from_millis(200))
             .build()
             .unwrap();
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn refused_connection_is_retried_even_for_a_mutation() {
         // Nothing listens on port 1, so the request provably never landed.
-        let client = reqwest::blocking::Client::new();
+        let client = crate::http::client();
         let err = call_once(&client, 1, "click", &json!([]), &json!({})).unwrap_err();
         assert!(should_retry(&err, RetryClass::Mutating), "{err:?}");
         assert!(should_retry(&err, RetryClass::Idempotent), "{err:?}");
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn a_timed_out_mutation_is_not_retried_and_says_why() {
         let (port, seen) = silent_daemon();
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http::local_client_builder()
             .timeout(Duration::from_millis(200))
             .build()
             .unwrap();
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn a_mutation_is_sent_once_when_the_reply_is_lost() {
         let (port, seen) = silent_daemon();
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http::local_client_builder()
             .timeout(Duration::from_millis(200))
             .build()
             .unwrap();
@@ -627,7 +627,7 @@ mod tests {
     fn nothing_is_retried_after_a_timeout() {
         for cmd in ["tabs", "wait", "click"] {
             let (port, seen) = silent_daemon();
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http::local_client_builder()
                 .timeout(Duration::from_millis(200))
                 .build()
                 .unwrap();
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_read_is_retried_once_on_a_hangup_but_a_mutation_is_not() {
-        let client = reqwest::blocking::Client::new();
+        let client = crate::http::client();
         let (port, seen) = hangup_daemon();
         let _ = call_with(&client, port, "tabs", &json!([]), &json!({})).unwrap_err();
         assert_eq!(

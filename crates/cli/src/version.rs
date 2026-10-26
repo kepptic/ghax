@@ -23,7 +23,6 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::args::Parsed;
 use crate::attach;
@@ -196,21 +195,17 @@ pub fn cmd_version(parsed: &Parsed, cfg: &Config) -> Result<i32> {
             "         Run `ghax detach && ghax attach` to restart the daemon on the current bundle."
         );
     }
-    if daemon_version_mismatch {
-        if let Some(v) = daemon_version {
-            eprintln!();
-            eprintln!(
-                "WARNING: running daemon is v{v}, CLI is v{cli_version} — run 'ghax detach && ghax attach' (or reinstall) so they match."
-            );
-        }
+    if daemon_version_mismatch && let Some(v) = daemon_version {
+        eprintln!();
+        eprintln!(
+            "WARNING: running daemon is v{v}, CLI is v{cli_version} — run 'ghax detach && ghax attach' (or reinstall) so they match."
+        );
     }
-    if extension_version_mismatch {
-        if let Some(v) = extension_version {
-            eprintln!();
-            eprintln!(
-                "WARNING: bridge extension is v{v}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
-            );
-        }
+    if extension_version_mismatch && let Some(v) = extension_version {
+        eprintln!();
+        eprintln!(
+            "WARNING: bridge extension is v{v}, CLI is v{cli_version} — reload it in edge://extensions (or chrome://extensions)."
+        );
     }
 
     Ok(EXIT_OK)
@@ -222,7 +217,7 @@ fn query_daemon(cfg: &Config) -> Option<Value> {
         return None;
     }
     let url = format!("http://127.0.0.1:{}/version", state.port);
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         .timeout(std::time::Duration::from_millis(1500))
         .build()
         .ok()?;
@@ -239,9 +234,7 @@ fn query_daemon(cfg: &Config) -> Option<Value> {
 
 fn sha256_file(path: &std::path::Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Some(format!("{:x}", hasher.finalize()))
+    Some(crate::attach::sha256_hex(&bytes))
 }
 
 fn short_sha(sha: &str) -> String {

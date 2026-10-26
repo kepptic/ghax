@@ -25,7 +25,17 @@ path = "src/main.rs"
 # Hand-rolled argv parser mirrors TS cli.ts exactly — see args.rs. clap was
 # considered but its strict validation conflicts with the dynamic verb surface
 # (every verb takes a different flag set, and the daemon owns the schema).
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# TLS: rustls with the ring provider and the Mozilla roots compiled in
+# (webpki-roots). reqwest 0.13's default `rustls` feature pulls aws-lc-rs
+# (C/cmake toolchain, breaks the cargo-dist cross targets), so we take
+# `rustls-no-provider` and hand reqwest a finished ClientConfig in http.rs
+# (`tls_backend_preconfigured`). That also skips reqwest's rustls-platform-verifier
+# (it is still compiled in via that feature, but never constructed), which fails
+# at Client::build() on a host with no OS CA store. No `system-proxy`, `http2`
+# or `charset`: 0.12 had none of them. Proxies come from env vars only.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 serde = { version = "1", features = ["derive"] }
 # preserve_order keeps daemon-emitted object key order (matches JSON.stringify in Bun).
 # The parity test diffs byte-for-byte, so alphabetized keys would break it.
@@ -36,7 +46,7 @@ anyhow = "1"
 # 250 ms (same pattern as the TS canary which uses 250 ms setTimeout ticks).
 ctrlc = { version = "3", features = ["termination"] }
 # rustyline: shell-mode REPL — history + Ctrl-C handling. ~1MB binary cost.
-rustyline = "15"
+rustyline = "18"
 # url: standard URL parsing — used by qa.rs to resolve crawl-mode hrefs
 # against a base. Already in the tree transitively via reqwest, so pulling
 # it in directly adds no wall-clock cost to builds.
@@ -47,9 +57,9 @@ urlencoding = "2"
 # sha2: pure-Rust SHA-256 for verifying self-healed daemon-bundle downloads
 # in attach.rs (see resolve_daemon_bundle). No C toolchain/OpenSSL dependency,
 # so it doesn't disturb the cargo-dist cross-compile targets.
-sha2 = "0.10"
+sha2 = "0.11"
 # getrandom: OS CSPRNG for the bridge pairing code. That code is an auth secret
 # (it gates who can drive the browser), so it MUST be unpredictable — a clock/pid
 # mix is computable by a local attacker. Already in the tree via rustls; pinning
 # it directly keeps the intent explicit. Pure Rust, no C toolchain.
-getrandom = "0.2"
+getrandom = "0.4"

@@ -237,7 +237,7 @@ fn run_install_release(version: &str) -> Result<i32> {
     // script itself does SHA-256 verification of the actual artifact, so
     // we're trusting GitHub's TLS for the script bytes (standard self-update
     // model).
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(30))
         .user_agent(USER_AGENT)
         .build()?;
@@ -273,23 +273,47 @@ fn find_local_install_script() -> Option<PathBuf> {
             // Only trust scripts inside a ghax checkout — gated on either
             // the Rust workspace's package name or the JS package name.
             let cargo = dir.join("Cargo.toml");
-            if let Ok(raw) = fs::read_to_string(&cargo) {
-                if raw.contains("name = \"ghax\"") {
-                    return Some(candidate);
-                }
+            if let Ok(raw) = fs::read_to_string(&cargo)
+                && raw.contains("name = \"ghax\"")
+            {
+                return Some(candidate);
             }
             let pkg = dir.join("package.json");
-            if let Ok(raw) = fs::read_to_string(&pkg) {
-                if raw.contains("\"@ghax/cli\"") {
-                    return Some(candidate);
-                }
+            if let Ok(raw) = fs::read_to_string(&pkg)
+                && raw.contains("\"@ghax/cli\"")
+            {
+                return Some(candidate);
             }
         }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return None,
+        {
+            let p = dir.parent()?;
+            dir = p
         }
     }
+}
+
+fn fetch_latest_tag() -> Result<String> {
+    let client = crate::http::client_builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(USER_AGENT)
+        .build()?;
+    let resp = client
+        .get(GITHUB_API_LATEST)
+        .header("Accept", "application/vnd.github+json")
+        .send()?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "GitHub API {} returned {}",
+            REPO_SLUG,
+            resp.status(),
+        ));
+    }
+    let body: Value = resp.json()?;
+    let tag = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tag_name missing in GitHub response"))?;
+    Ok(tag.to_string())
 }
 
 #[cfg(test)]
@@ -312,28 +336,4 @@ mod tests {
         assert!(!is_newer("v0.4.1", "0.4.2"));
         assert!(!is_newer("garbage", "0.4.2"));
     }
-}
-
-fn fetch_latest_tag() -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent(USER_AGENT)
-        .build()?;
-    let resp = client
-        .get(GITHUB_API_LATEST)
-        .header("Accept", "application/vnd.github+json")
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(
-            "GitHub API {} returned {}",
-            REPO_SLUG,
-            resp.status(),
-        ));
-    }
-    let body: Value = resp.json()?;
-    let tag = body
-        .get("tag_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("tag_name missing in GitHub response"))?;
-    Ok(tag.to_string())
 }

@@ -259,18 +259,18 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
                 continue;
             }
             for name in *names {
-                if let Ok(out) = std::process::Command::new("which").arg(name).output() {
-                    if out.status.success() {
-                        let path =
-                            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-                        if is_executable(&path) {
-                            found.push(BrowserBinary {
-                                label: kind.label(),
-                                kind: kind.clone(),
-                                path,
-                            });
-                            break;
-                        }
+                if let Ok(out) = std::process::Command::new("which").arg(name).output()
+                    && out.status.success()
+                {
+                    let path =
+                        PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                    if is_executable(&path) {
+                        found.push(BrowserBinary {
+                            label: kind.label(),
+                            kind: kind.clone(),
+                            path,
+                        });
+                        break;
                     }
                 }
             }
@@ -306,7 +306,7 @@ pub fn detect_browsers() -> Vec<BrowserBinary> {
 /// Mirrors `probeCdp()` in browser-launch.ts.
 fn probe_cdp(port: u16) -> Option<CdpEndpoint> {
     let http_url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()?;
@@ -429,7 +429,7 @@ fn launch_instructions(port: u16, browsers: &[BrowserBinary]) -> String {
             ));
             lines.push(String::new());
         }
-        return lines.join("\n");
+        lines.join("\n")
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -542,10 +542,10 @@ fn launch_browser(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn stable_share_dir() -> Option<PathBuf> {
-    if let Ok(val) = std::env::var("XDG_DATA_HOME") {
-        if !val.is_empty() {
-            return Some(PathBuf::from(val).join("ghax"));
-        }
+    if let Ok(val) = std::env::var("XDG_DATA_HOME")
+        && !val.is_empty()
+    {
+        return Some(PathBuf::from(val).join("ghax"));
     }
     std::env::var("HOME")
         .ok()
@@ -569,12 +569,12 @@ pub(crate) fn locate_daemon_bundle() -> Result<Option<(PathBuf, &'static str)>> 
     }
 
     // 2. Adjacent to the running binary.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let adjacent = dir.join("ghax-daemon.mjs");
-            if adjacent.exists() {
-                return Ok(Some((adjacent, "binary-adjacent")));
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let adjacent = dir.join("ghax-daemon.mjs");
+        if adjacent.exists() {
+            return Ok(Some((adjacent, "binary-adjacent")));
         }
     }
 
@@ -592,19 +592,19 @@ pub(crate) fn locate_daemon_bundle() -> Result<Option<(PathBuf, &'static str)>> 
         let mut dir = cwd.as_path();
         loop {
             let pkg = dir.join("package.json");
-            if pkg.exists() {
-                if let Ok(raw) = std::fs::read_to_string(&pkg) {
-                    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-                    if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
-                        let bundle = dir.join("dist").join("ghax-daemon.mjs");
-                        if bundle.exists() {
-                            return Ok(Some((bundle, "repo-dist")));
-                        }
-                        return Err(anyhow::anyhow!(
-                            "Found @ghax/cli at {} but dist/ghax-daemon.mjs is missing. Run `npm run build` first.",
-                            dir.display()
-                        ));
+            if pkg.exists()
+                && let Ok(raw) = std::fs::read_to_string(&pkg)
+            {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
+                    let bundle = dir.join("dist").join("ghax-daemon.mjs");
+                    if bundle.exists() {
+                        return Ok(Some((bundle, "repo-dist")));
                     }
+                    return Err(anyhow::anyhow!(
+                        "Found @ghax/cli at {} but dist/ghax-daemon.mjs is missing. Run `npm run build` first.",
+                        dir.display()
+                    ));
                 }
             }
             match dir.parent() {
@@ -629,12 +629,12 @@ fn resolve_daemon_bundle() -> Result<PathBuf> {
     // 5. Self-heal — fetch it from GitHub Releases. Opt out with
     //    GHAX_NO_SELF_HEAL=1 (CI, offline boxes, or anyone who'd rather see
     //    the error below and install manually).
-    if std::env::var("GHAX_NO_SELF_HEAL").ok().as_deref() != Some("1") {
-        if let Some(share) = stable_share_dir() {
-            match self_heal_daemon_bundle(&share) {
-                Ok(bundle) => return Ok(bundle),
-                Err(e) => eprintln!("ghax: automatic daemon-bundle download failed: {e}"),
-            }
+    if std::env::var("GHAX_NO_SELF_HEAL").ok().as_deref() != Some("1")
+        && let Some(share) = stable_share_dir()
+    {
+        match self_heal_daemon_bundle(&share) {
+            Ok(bundle) => return Ok(bundle),
+            Err(e) => eprintln!("ghax: automatic daemon-bundle download failed: {e}"),
         }
     }
 
@@ -690,7 +690,7 @@ fn target_triple() -> Option<&'static str> {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -720,7 +720,7 @@ fn self_heal_daemon_bundle(share_dir: &Path) -> Result<PathBuf> {
 
     eprintln!("ghax: ghax-daemon.mjs not found — fetching {archive_name} from release {tag}...");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::client_builder()
         .timeout(Duration::from_secs(60))
         .user_agent(concat!("ghax/", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -811,7 +811,7 @@ fn ensure_state_dir(cfg: &Config) -> Result<()> {
                 .open(&gitignore)
                 .and_then(|mut f| {
                     use std::io::Write;
-                    write!(f, "{sep}.ghax/\n")
+                    writeln!(f, "{sep}.ghax/")
                 });
         }
     }
@@ -836,23 +836,21 @@ fn wait_for_daemon(
     stderr_path: Option<&std::path::Path>,
 ) -> Result<DaemonState> {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
 
     while Instant::now() < deadline {
-        if let Some(s) = state::read_state(cfg) {
-            if s.pid == expected_pid as i32 {
-                let url = format!("http://127.0.0.1:{}/health", s.port);
-                if let Ok(resp) = client.get(&url).send() {
-                    if resp.status().is_success() {
-                        if let Ok(body) = resp.json::<serde_json::Value>() {
-                            if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-                                return Ok(s);
-                            }
-                        }
-                    }
-                }
+        if let Some(s) = state::read_state(cfg)
+            && s.pid == expected_pid as i32
+        {
+            let url = format!("http://127.0.0.1:{}/health", s.port);
+            if let Ok(resp) = client.get(&url).send()
+                && resp.status().is_success()
+                && let Ok(body) = resp.json::<serde_json::Value>()
+                && body.get("ok").and_then(|v| v.as_bool()) == Some(true)
+            {
+                return Ok(s);
             }
         }
         // Daemon died before becoming healthy — surface its stderr immediately
@@ -957,6 +955,17 @@ fn build_daemon_cmd(
     cmd
 }
 
+/// What `spawn_daemon_bridge` hands `build_daemon_cmd_bridge`: the bridge-mode
+/// knobs that become `GHAX_BRIDGE_*` env vars on the daemon.
+#[derive(Clone, Copy)]
+struct BridgeSpawnOpts<'a> {
+    bridge_port: u16,
+    port_explicit: bool,
+    control_active: bool,
+    bind_filter: Option<&'a str>,
+    pair_code: Option<&'a str>,
+}
+
 /// `--extension` bridge-mode variant of `build_daemon_cmd`: no CDP endpoint
 /// env vars at all (there is no `connectOverCDP` in this mode) — just
 /// `GHAX_BRIDGE=1` + the port the daemon's WebSocket server should listen
@@ -964,14 +973,17 @@ fn build_daemon_cmd(
 /// mode is browser-agnostic; the daemon never launches or detects one).
 fn build_daemon_cmd_bridge(
     cfg: &Config,
-    bridge_port: u16,
-    port_explicit: bool,
-    control_active: bool,
-    bind_filter: Option<&str>,
-    pair_code: Option<&str>,
+    opts: &BridgeSpawnOpts<'_>,
     bundle: &std::path::Path,
     stderr_file: std::fs::File,
 ) -> std::process::Command {
+    let BridgeSpawnOpts {
+        bridge_port,
+        port_explicit,
+        control_active,
+        bind_filter,
+        pair_code,
+    } = *opts;
     let mut cmd = std::process::Command::new("node");
     cmd.arg("--enable-source-maps")
         .arg(bundle)
@@ -1084,17 +1096,15 @@ fn spawn_daemon_bridge(
 ) -> Result<DaemonState> {
     ensure_state_dir(cfg)?;
     let bundle = resolve_daemon_bundle()?;
+    let opts = BridgeSpawnOpts {
+        bridge_port,
+        port_explicit,
+        control_active,
+        bind_filter,
+        pair_code,
+    };
     run_spawn_retry_loop(cfg, &bundle, |stderr_file| {
-        let mut cmd = build_daemon_cmd_bridge(
-            cfg,
-            bridge_port,
-            port_explicit,
-            control_active,
-            bind_filter,
-            pair_code,
-            &bundle,
-            stderr_file,
-        );
+        let mut cmd = build_daemon_cmd_bridge(cfg, &opts, &bundle, stderr_file);
         set_agent_name(&mut cmd, agent_name);
         cmd
     })
@@ -1118,7 +1128,7 @@ fn set_agent_name(cmd: &mut std::process::Command, agent_name: Option<&str>) {
 fn mint_pair_code() -> String {
     loop {
         let mut buf = [0u8; 4];
-        getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+        getrandom::fill(&mut buf).expect("OS CSPRNG unavailable");
         let n = u32::from_le_bytes(buf);
         // Largest multiple of 1e8 that fits in u32 (4.29e9): 4_200_000_000.
         // Discard the biased tail so every 8-digit code is equally likely.
@@ -1287,10 +1297,11 @@ fn pick_endpoint(endpoints: Vec<CdpEndpoint>, prefer_kind: Option<&BrowserKind>)
 
     let mut line = String::new();
     let _ = io::stdin().read_line(&mut line);
-    if let Ok(n) = line.trim().parse::<usize>() {
-        if n >= 1 && n <= endpoints.len() {
-            return endpoints.swap_remove(n - 1);
-        }
+    if let Ok(n) = line.trim().parse::<usize>()
+        && n >= 1
+        && n <= endpoints.len()
+    {
+        return endpoints.swap_remove(n - 1);
     }
     endpoints.into_iter().next().unwrap()
 }
@@ -1357,7 +1368,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         if state::is_process_alive(existing.pid) {
             // Quick health check.
             let url = format!("http://127.0.0.1:{}/health", existing.port);
-            let alive = reqwest::blocking::Client::builder()
+            let alive = crate::http::local_client_builder()
                 .timeout(Duration::from_millis(1500))
                 .build()
                 .ok()
@@ -1416,7 +1427,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
 
         if !launch {
             // If --browser filtered out live CDPs, give a helpful error.
-            if browser_opt.is_some() && explicit_port.is_none() {
+            if let (Some(requested), None) = (browser_opt.as_ref(), explicit_port) {
                 let any_running = scan_cdp_ports(PORT_BASE, PORT_RANGE);
                 if !any_running.is_empty() {
                     let describe_list: Vec<String> = any_running
@@ -1431,9 +1442,9 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                         .collect();
                     eprintln!(
                         "--browser {} requested, but only {} running.\n  Pass --launch to start {}, or omit --browser to attach to a running one.",
-                        browser_opt.as_ref().unwrap().as_str(),
+                        requested.as_str(),
                         describe_list.join(", "),
-                        browser_opt.as_ref().unwrap().as_str(),
+                        requested.as_str(),
                     );
                     return Ok(EXIT_NOT_ATTACHED);
                 }
@@ -1717,6 +1728,9 @@ fn bridge_port_from_state(state: &DaemonState) -> Option<u16> {
         .ok()
 }
 
+/// The extension's `(agent, version)` from the bridge handshake.
+type ExtensionInfo = (String, String);
+
 /// Poll `GET /bridge-status` on the daemon until the extension's `hello`
 /// handshake lands (and, when `require_control` is set, until it reports a
 /// controlled tab), or `timeout` elapses. Returns the extension's
@@ -1728,9 +1742,9 @@ fn wait_for_extension(
     bridge_port: u16,
     timeout: Duration,
     require_control: bool,
-) -> Result<(Option<(String, String)>, Option<i64>)> {
+) -> Result<(Option<ExtensionInfo>, Option<i64>)> {
     let deadline = Instant::now() + timeout;
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()?;
     let url = format!("http://127.0.0.1:{port}/bridge-status");
@@ -1739,38 +1753,37 @@ fn wait_for_extension(
     // when the normal timeout ends. Ambiguity cannot fix itself: fail now.
     let mut no_candidate: Option<String> = None;
     loop {
-        if let Ok(resp) = client.get(&url).send() {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(msg) = selection_failure(&body) {
-                        if selection_state(&body) == Some("no-candidate") {
-                            no_candidate = Some(msg);
-                        } else {
-                            return Err(anyhow::anyhow!(msg));
-                        }
-                    } else {
-                        no_candidate = None;
-                    }
-                    if body.get("connected").and_then(|v| v.as_bool()) == Some(true) {
-                        let controlled = body.get("controlledTabId").and_then(|v| v.as_i64());
-                        // With --control-active, don't declare success until
-                        // the active tab is actually under control, or the
-                        // first `ghax goto` would race the control handshake.
-                        if !require_control || controlled.is_some() {
-                            let info = body.get("extensionInfo").and_then(|v| v.as_object());
-                            let agent = info
-                                .and_then(|m| m.get("agent"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let version = info
-                                .and_then(|m| m.get("version"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?")
-                                .to_string();
-                            return Ok((Some((agent, version)), controlled));
-                        }
-                    }
+        if let Ok(resp) = client.get(&url).send()
+            && resp.status().is_success()
+            && let Ok(body) = resp.json::<serde_json::Value>()
+        {
+            if let Some(msg) = selection_failure(&body) {
+                if selection_state(&body) == Some("no-candidate") {
+                    no_candidate = Some(msg);
+                } else {
+                    return Err(anyhow::anyhow!(msg));
+                }
+            } else {
+                no_candidate = None;
+            }
+            if body.get("connected").and_then(|v| v.as_bool()) == Some(true) {
+                let controlled = body.get("controlledTabId").and_then(|v| v.as_i64());
+                // With --control-active, don't declare success until
+                // the active tab is actually under control, or the
+                // first `ghax goto` would race the control handshake.
+                if !require_control || controlled.is_some() {
+                    let info = body.get("extensionInfo").and_then(|v| v.as_object());
+                    let agent = info
+                        .and_then(|m| m.get("agent"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let version = info
+                        .and_then(|m| m.get("version"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    return Ok((Some((agent, version)), controlled));
                 }
             }
         }
@@ -1887,12 +1900,12 @@ fn resolve_extension_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("extension");
-            if candidate.join("manifest.json").exists() {
-                return Some(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("extension");
+        if candidate.join("manifest.json").exists() {
+            return Some(candidate);
         }
     }
     if let Some(share) = stable_share_dir() {
@@ -1905,14 +1918,14 @@ fn resolve_extension_dir() -> Option<PathBuf> {
         let mut dir = cwd.as_path();
         loop {
             let pkg = dir.join("package.json");
-            if pkg.exists() {
-                if let Ok(raw) = std::fs::read_to_string(&pkg) {
-                    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-                    if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
-                        let candidate = dir.join("extension");
-                        if candidate.join("manifest.json").exists() {
-                            return Some(candidate);
-                        }
+            if pkg.exists()
+                && let Ok(raw) = std::fs::read_to_string(&pkg)
+            {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                if v.get("name").and_then(|n| n.as_str()) == Some("@ghax/cli") {
+                    let candidate = dir.join("extension");
+                    if candidate.join("manifest.json").exists() {
+                        return Some(candidate);
                     }
                 }
             }
@@ -1943,7 +1956,7 @@ pub fn cmd_detach(cfg: &Config) -> Result<i32> {
     }
 
     // POST /shutdown — ignore errors (fall through to SIGTERM).
-    let _ = reqwest::blocking::Client::builder()
+    let _ = crate::http::local_client_builder()
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()
