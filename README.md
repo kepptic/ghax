@@ -253,7 +253,7 @@ GHAX_STATE_FILE=/tmp/ghax-b.json ghax attach --extension
 GHAX_STATE_FILE=/tmp/ghax-b.json ghax new-tab https://target.example
 ```
 
-**Background by default.** ghax never takes focus unless you ask. `new-tab` opens an inactive tab in your current window (or `--window <windowId>` from `ghax tabs --json`), and `ghax tab <id>` switches the daemon without activating the tab or raising its window. Use `ghax tab <id> --focus` to bring it forward. A driven tab gets focus emulation, so `click`, `wait --stable`, `screenshot` and page code that waits on `requestAnimationFrame` behave as they would in a visible tab. You keep working in the front tab while several agents work in background tabs.
+**Background by default.** ghax never takes focus unless you ask. `new-tab` opens an inactive tab in your current window (or `--window <windowId>` from `ghax tabs --json`), and `ghax tab <id>` switches the daemon without activating the tab or raising its window. Use `ghax tab <id> --focus` to bring it forward. A driven tab gets focus emulation, so `click`, `wait --stable`, `screenshot` and page code that waits on `requestAnimationFrame` behave as they would in a visible tab. You keep working in the front tab while several agents work in background tabs. `ghax close-tab` closes the daemon's tab when you are done (or `close-tab '#n'|<id>`); it only closes tabs that daemon opened with `new-tab`/`new-window` unless you pass `--force`, never closes another agent's tab, and leaves no active tab so the next verb says so instead of driving some other tab.
 
 One tab, one agent. `ghax tabs --json` has `controlledBy` (`{port, pid, name, cwd, self}`, or `null` when free; name it with `ghax attach --name`), and pointing an agent at a tab another one already drives is refused with the port to go stop it on, rather than two sessions quietly sharing a page. Design notes: [`09-bridge-multi-agent.md`](docs/design/plan/09-bridge-multi-agent.md).
 
@@ -367,7 +367,7 @@ The same recipe works over the bridge — swap `ghax attach` for `ghax attach --
 
 ## Command reference
 
-74 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, downloads, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
+75 verbs across attach/detach, navigation, snapshot and interact, file uploads, real user gestures, MV3 extension internals, console and network capture, downloads, Core Web Vitals, screenshots, XPath, live injection, batch execution, recording and replay, and orchestrated flows.
 
 ```bash
 ghax --help           # full surface — authoritative

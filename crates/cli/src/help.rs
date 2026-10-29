@@ -74,6 +74,11 @@ Tab:
                                   #   (windowId from 'tabs --json'; bridge only),
                                   #   never focused; becomes the tab this
                                   #   daemon drives
+  close-tab ['#n' | id] [--force]  # close this daemon's tab (no arg) or the
+                                  #   given one; leaves no active tab. Only
+                                  #   tabs opened by new-tab/new-window
+                                  #   unless --force; another agent's tab is
+                                  #   always refused
   goto <url> [--stable]           # --stable also waits for the DOM to settle
   back | forward | reload
   eval <js> [--timeout <ms>] [--no-wait]

@@ -27,7 +27,7 @@
  *   -> daemon, a CDP event:  {"type":"event","method":"...","params":{...}}
  *   <> keepalive:            -> {"type":"ping"}   <- {"type":"pong"} (both ignored)
  *   <- daemon, control:      {"type":"control","id":<n>,"action":"control-active"|"control-tab"|"stop"|
- *                             "list-tabs"|"new-window"|"new-tab"|"reload"|"window-bounds","tabId?":N,
+ *                             "list-tabs"|"new-window"|"new-tab"|"close-tab"|"reload"|"window-bounds","tabId?":N,
  *                             "focus?":bool (control-tab only),"url?":"...","windowId?":N (new-tab,
  *                             window-bounds),"width?":N,"height?":N (window-bounds)}
  *   -> daemon, control ack:  {"type":"control-ack","id":<n>,"ok":bool,"tabId?":N,"error?":"..."}
@@ -1101,6 +1101,25 @@ class BridgeConnection {
       if (msg.action === 'stop') {
         await this.stopControl();
         this.send({ type: 'control-ack', id, ok: true, tabId: null });
+        return;
+      }
+      if (msg.action === 'close-tab') {
+        // `ghax close-tab`: window.close() is ignored for tabs a script did not
+        // open, so the daemon asks for it here. Another agent's tab is refused;
+        // our own controlled tab is detached and released first so nothing
+        // tries to reattach to a tab that is going away.
+        this.assertBound();
+        const tabId = msg.tabId;
+        if (typeof tabId !== 'number') throw new Error('close-tab requires a numeric tabId');
+        const owner = ownerOf(tabId);
+        if (owner && owner !== this) throw conflictError(tabId, owner);
+        const wasControlled = this.controlledTabId === tabId;
+        if (wasControlled) await this.stopControl();
+        // stopControl awaits: another connection may have claimed the tab meanwhile.
+        const ownerNow = ownerOf(tabId);
+        if (ownerNow && ownerNow !== this) throw conflictError(tabId, ownerNow);
+        await chrome.tabs.remove(tabId);
+        this.send({ type: 'control-ack', id, ok: true, tabId: this.controlledTabId, result: { closed: tabId } });
         return;
       }
       if (msg.action === 'list-tabs') {

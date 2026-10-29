@@ -83,6 +83,9 @@ export type ControlTarget =
   | { action: 'new-window'; url: string }
   | { action: 'new-tab'; url: string; windowId?: number }
   | { action: 'reload' }
+  // Detach (if this connection drives it) and chrome.tabs.remove the tab.
+  // Refused when another connection owns it.
+  | { action: 'close-tab'; tabId: number }
   // Read (no width/height) or set the OS window's outer size. `windowId`
   // defaults to the window of the controlled tab. Never recorded as desired
   // control: it changes the window, not which tab is driven.
