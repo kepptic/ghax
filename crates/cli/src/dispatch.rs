@@ -216,7 +216,16 @@ mod local_only_tests {
         assert!(!borrow_allowed("bridge", &v(&["use", "edge"])));
         assert!(!borrow_allowed("bridge", &v(&["reload"])));
         for verb in [
-            "goto", "click", "tab", "new-tab", "eval", "batch", "cookies", "expect", "snapshot",
+            "goto",
+            "click",
+            "tab",
+            "new-tab",
+            "close-tab",
+            "eval",
+            "batch",
+            "cookies",
+            "expect",
+            "snapshot",
         ] {
             assert!(!borrow_allowed(verb, &v(&[])), "{verb}");
         }
@@ -344,6 +353,11 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
         "new-tab" => {
             let parsed = args::parse(rest);
             simple(cfg, "newTab", parsed)
+        }
+
+        "close-tab" => {
+            let parsed = args::parse(rest);
+            simple(cfg, "closeTab", parsed)
         }
 
         "window" => {

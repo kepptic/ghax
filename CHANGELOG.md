@@ -5,8 +5,17 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Added
+- **`ghax close-tab ['#n' | id] [--force]`.** Agents could open tabs but not
+  close them (`window.close()` is ignored for tabs a script did not open). With
+  no argument it closes the daemon's own tab; with one it takes the same id
+  forms as `ghax tab`. It closes only tabs this daemon opened with
+  `new-tab`/`new-window` unless `--force`, refuses a tab another agent controls
+  (naming its bridge port), and leaves no active tab: it prints
+  `{closed, active: null}` and the next verb errors "no active tab" instead of
+  driving another tab. Over the bridge the extension detaches its debugger and
+  calls `chrome.tabs.remove` (new `close-tab` control action; reload the
+  extension with `ghax bridge reload`). Over CDP it calls `page.close()`.
 
 ## [0.15.0] - 2026-10-26
 ### Added

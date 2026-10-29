@@ -2339,6 +2339,28 @@ c('new-tab opens a background tab, locks onto it, and tab --focus is a switch', 
   }
 });
 
+c('close-tab closes its own tab, leaves no active tab, refuses an unowned tab', async () => {
+  const beforeTabs = parseJson<Array<{ id: string; active: boolean }>>((await run(['tabs', '--json'])).stdout);
+  const beforeActive = beforeTabs.find((t) => t.active)?.id;
+  assert(beforeActive, 'smoke needs an active tab before close-tab');
+  // A tab this daemon did not open is the user's: refused without --force.
+  const refused = await run(['close-tab', beforeActive!], { allowFailure: true });
+  assert(refused.exitCode !== 0 && /--force/.test(refused.stderr + refused.stdout), `unowned tab should be refused: ${refused.stderr || refused.stdout}`);
+  const created = parseJson<{ id: string }>((await run(['new-tab', 'about:blank', '--json'])).stdout);
+  try {
+    const r = await run(['close-tab', '--json']);
+    const out = parseJson<{ closed: string; active: string | null }>(r.stdout);
+    assert(out.closed === created.id && out.active === null, `close-tab result: ${r.stdout}`);
+    const afterTabs = parseJson<Array<{ id: string }>>((await run(['tabs', '--json'])).stdout);
+    assert(!afterTabs.some((t) => t.id === created.id), 'closed tab should be gone from tabs');
+    assert(afterTabs.some((t) => t.id === beforeActive), 'the unowned tab must survive');
+    const next = await run(['text'], { allowFailure: true });
+    assert(next.exitCode !== 0 && /no active tab/.test(next.stderr + next.stdout), `next verb should say no active tab: ${next.stderr || next.stdout}`);
+  } finally {
+    await run(['tab', beforeActive!], { allowFailure: true });
+  }
+});
+
 c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {
   // Need at least two tabs to exercise the switch path. If the smoke
   // session is running on a single-tab browser, spawn a second window

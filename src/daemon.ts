@@ -166,6 +166,12 @@ interface Ctx {
   captureBodiesRe: RegExp | null;  // null = don't capture; set = capture URLs matching
   // Bridge: `<alias>:<chromeTabId>` (src/tab-identity.ts); CDP: target id.
   activePageId: string | null;
+  // Tab ids this daemon opened with new-tab/new-window: the only tabs
+  // `close-tab` closes without --force (anything else is the user's).
+  openedTabs: Set<string>;
+  // True after `close-tab` closed the active tab, until a verb picks another:
+  // stops activePage() silently falling back to some other tab.
+  activeTabClosed: boolean;
   // The rows the last `ghax tabs` printed, unfiltered — what `#n` refers to.
   lastTabListing: TabIdentity[] | null;
   refs: Map<string, RefEntry>;
@@ -211,7 +217,7 @@ const handlers = new Map<string, Handler>();
 // depends on Playwright, /json/list, or browser-level CDP fails with a useful
 // message instead of leaking a cryptic URL/parser error from those paths.
 const BRIDGE_SUPPORTED_COMMANDS = new Set([
-  'status', 'tabs', 'tab', 'find', 'newWindow', 'newTab',
+  'status', 'tabs', 'tab', 'find', 'newWindow', 'newTab', 'closeTab',
   'goto', 'back', 'forward', 'reload', 'eval', 'text', 'html',
   'screenshot', 'snapshot', 'box', 'click', 'fill', 'press', 'type', 'upload',
   'console', 'network', 'wait', 'bridge.control', 'bridge.instances', 'bridge.use', 'bridge.reload',
@@ -405,6 +411,7 @@ async function evalWithNavRetry(page: Page, js: string, maxWaitMs = 3000): Promi
 async function activePage(ctx: Ctx): Promise<Page> {
   const pages = await allPages(ctx);
   if (pages.length === 0) throw new Error('No tabs open in attached browser.');
+  if (!ctx.activePageId && ctx.activeTabClosed) throw noActiveTabError();
   if (ctx.activePageId) {
     for (const p of pages) {
       const id = await pageTargetId(p);
@@ -1140,6 +1147,11 @@ async function listCdpTabs(ctx: Ctx): Promise<TabIdentity[]> {
 function setActiveTab(ctx: Ctx, id: string | null): void {
   if (ctx.activePageId !== id) clearSnapshotRefs(ctx);
   ctx.activePageId = id;
+  if (id !== null) ctx.activeTabClosed = false;
+}
+
+function noActiveTabError(): Error {
+  return new DaemonError("no active tab — run 'ghax tab' or 'new-tab'", 4);
 }
 
 /** `#2 work:42 "Inbox" (Edge · Work)` for the active tab, best effort. */
@@ -1517,6 +1529,81 @@ register('newTab', async (ctx, args, opts) => {
   return openBackgroundTab(ctx, 'newTab', url, windowId);
 });
 
+// ─── close-tab ──────────────────────────────────────────────────
+//
+// window.close() is ignored for tabs a script did not open, so agents had no
+// way to clean up after new-tab/new-window. Closing a tab this daemon did not
+// open needs --force (it is the user's); another agent's tab is always
+// refused. Closing the active tab leaves NO active tab: the next verb errors
+// instead of silently driving whatever tab happens to be first.
+register('closeTab', async (ctx, args, opts) => {
+  const selector = args[0] !== undefined ? String(args[0]) : '';
+  const force = opts.force === true || opts.force === 'true';
+  if (ctx.bridgeMode) {
+    const bridge = requireBridge(ctx);
+    let tab: TabIdentity | null = null;
+    let id: string;
+    let chromeTabId: number;
+    if (selector) {
+      tab = await resolveBridgeTab(ctx, selector);
+      id = tab.id;
+      chromeTabId = tab.chromeTabId!;
+    } else {
+      const controlled = bridge.controlledTabId;
+      if (controlled === null || !ctx.activePageId) throw noActiveTabError();
+      id = ctx.activePageId;
+      chromeTabId = controlled;
+    }
+    const owner = tab?.controlledBy;
+    if (owner && !owner.self) {
+      throw new DaemonError(`${describeTab(tab!)} is controlled by another ghax agent (bridge port ${owner.port}). Refusing to close it.`, 4);
+    }
+    if (!ctx.openedTabs.has(id) && !force) {
+      throw new DaemonError(`${tab ? describeTab(tab) : id} was not opened by this daemon (new-tab/new-window); it is the user's tab. Pass --force to close it anyway.`, 1);
+    }
+    const ownTab = chromeTabId === bridge.controlledTabId;
+    const conn = verbBridge(ctx);
+    try {
+      await conn.sendControl({ action: 'close-tab', tabId: chromeTabId });
+    } catch (err) {
+      if (err instanceof Error && /unknown control action/.test(err.message)) {
+        err.message += " — the bridge extension predates close-tab; run 'ghax bridge reload'";
+      }
+      if (tab) throw withTabIdentity(err, tab);
+      throw err;
+    }
+    // Nothing to re-assert on reconnect: the controlled tab is gone.
+    if (ownTab) conn.setDesiredControl({ action: 'stop' });
+    return afterClose(ctx, id);
+  }
+  let targetId: string;
+  if (selector) {
+    targetId = resolveTabSelector(selector, await listCdpTabs(ctx), ctx.lastTabListing).id;
+  } else {
+    if (!ctx.activePageId) throw noActiveTabError();
+    targetId = ctx.activePageId;
+  }
+  if (!ctx.openedTabs.has(targetId) && !force) {
+    throw new DaemonError(`tab ${targetId} was not opened by this daemon (new-tab/new-window); it is the user's tab. Pass --force to close it anyway.`, 1);
+  }
+  for (const p of await allPages(ctx)) {
+    if ((await pageTargetId(p)) === targetId) {
+      await p.close();
+      return afterClose(ctx, targetId);
+    }
+  }
+  throw new DaemonError(`tab ${targetId} is already closed. Run 'ghax tabs'.`, 3);
+});
+
+function afterClose(ctx: Ctx, id: string): { closed: string; active: string | null } {
+  ctx.openedTabs.delete(id);
+  if (ctx.activePageId === id) {
+    setActiveTab(ctx, null);
+    ctx.activeTabClosed = true;
+  }
+  return { closed: id, active: ctx.activePageId };
+}
+
 const NEW_TARGET_TIMEOUT_MS = 10_000;
 
 /**
@@ -1541,6 +1628,7 @@ async function openBackgroundTab(
     const who = bridgeIdentity(ctx, ack.instanceId ?? bridge.instanceId);
     const id = composeTabId(who.alias, tab.id);
     setActiveTab(ctx, id);
+    ctx.openedTabs.add(id);
     // index 0: a new tab is in no listing yet, so it has no `#n`.
     return tabResult({
       index: 0, id, chromeTabId: tab.id, browser: who.browser, profile: who.profile,
@@ -1577,6 +1665,7 @@ async function openBackgroundTab(
     // about:blank, when they read the returned object.
     await newPage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => undefined);
     const id = (await pageTargetId(newPage)) ?? '';
+    if (id) ctx.openedTabs.add(id);
     // Auto-lock this tab as the active one so subsequent commands land
     // in it without an extra `ghax tab` step.
     // Same refs-invalidation rule as the `tab` handler.
@@ -4934,6 +5023,8 @@ async function main() {
     sourceMapCache: new SourceMapCache(),
     captureBodiesRe: captureBodiesPattern !== null ? globToRegExp(captureBodiesPattern) : null,
     activePageId: null,
+    openedTabs: new Set(),
+    activeTabClosed: false,
     lastTabListing: null,
     refs: new Map(),
     bridgeRefs: new Map(),

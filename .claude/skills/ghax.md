@@ -120,7 +120,7 @@ ghax bridge control [--active | --tab-id '#n'|<id> | --stop]   # (re)point mid-s
 
 **Works over the bridge:** goto/back/forward/reload, eval/text/html,
 snapshot (`@e`/`@c` refs), click/fill/press/type, screenshot (+ `--region`/`--scale`)/box, `window size`, gestures,
-tabs/tab/new-window/new-tab, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
+tabs/tab/new-window/new-tab/close-tab, wait, console/network, batch, cookies (+ `cookies delete <name>`), storage (never paste cookie values or storage output into chat, commits or logs), `auth export --out <file> --domain <d>` (Playwright storageState for headless suites; file is 0600, never printed, must be gitignored if inside a repo; replaces `scripts/save-auth-state.mjs`, which needs CDP). **Not (yet) over the
 bridge** — these return a clear "not supported over the extension bridge
 yet": viewport/responsive, qa/perf/profile,
 and the `ext` family (SW/panel/hot-reload).
@@ -226,6 +226,8 @@ ghax tab edge-work:42                    # full id: <brand>-<profile>:<chrome ta
 ghax tab 42                              # only if exactly one tab has id 42, else refused
 ghax tab '#2' --focus                    # also raise it (default: background, no focus)
 ghax new-tab https://example.com         # background tab in the current window, now yours
+ghax close-tab                           # close my tab when done (window.close() is ignored); no active tab after
+ghax close-tab '#3' --force              # a tab I didn't open needs --force; another agent's is always refused
 ghax goto https://example.com
 ghax text                                # clean page text
 ghax html [<selector>]                   # innerHTML
@@ -375,6 +377,7 @@ ghax attach --extension --browser edge --name mysession   # --name shows in othe
 ghax tabs                                # pick by '#n'; read controlledBy first, never take a tab that is not `none`
 ghax new-tab https://target.example      # background tab, now yours, window not raised
 # ... work; `active` rows are the user's foreground tabs, leave them alone ...
+ghax close-tab                           # close the tab you opened before detaching
 ghax detach
 ```
 

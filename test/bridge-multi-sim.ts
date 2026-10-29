@@ -402,6 +402,20 @@ class FakeConnection {
         this.send({ type: 'control-ack', id, ok: true, tabId: null });
         return;
       }
+      if (msg.action === 'close-tab') {
+        // Mirrors extension/background.js: refuse another agent's tab, release
+        // our own controlled tab first, then remove it.
+        const tabId = Number(msg.tabId);
+        const owner = this.ext.ownerOf(tabId);
+        if (owner && owner !== this) this.ext.claim(this, tabId); // throws the conflict
+        if (this.controlledTabId === tabId) {
+          this.setControlled(null);
+          this.send({ type: 'controlled', tabId: null });
+        }
+        this.ext.tabs = this.ext.tabs.filter((t) => t.id !== tabId);
+        this.send({ type: 'control-ack', id, ok: true, tabId: this.controlledTabId, result: { closed: tabId } });
+        return;
+      }
       if (msg.action === 'list-tabs') {
         this.send({
           type: 'control-ack', id, ok: true, tabId: this.controlledTabId,
@@ -2207,6 +2221,32 @@ async function main(): Promise<void> {
       }
       const bad: any = await rpc('newTab', [], { window: 'abc' });
       assert(!bad.ok && bad.exitCode === 1 && /not a window id/.test(String(bad.error)), JSON.stringify(bad));
+    });
+  });
+
+  await test('daemon: close-tab closes its own tab, refuses the user\'s without --force and another agent\'s always', async () => {
+    await withDaemon(async ({ rpc, edge, edgeExt, alias }) => {
+      const ea = await alias('inst-edge');
+      assert((await rpc('bridge.use', ['inst-edge'])).ok !== false, 'use edge');
+      const opened = await rpc('newWindow', ['https://own.example']);
+      assert(opened.ok, `newWindow: ${JSON.stringify(opened)}`);
+      const ownId = opened.data.id as string;
+      const closed = await rpc('closeTab');
+      assert(closed.ok && closed.data.closed === ownId && closed.data.active === null, `closeTab: ${JSON.stringify(closed)}`);
+      assert(edge.lastControl?.action === 'close-tab', `control message: ${JSON.stringify(edge.lastControl)}`);
+      assert(!edgeExt.tabs.some((t) => `${ea}:${t.id}` === ownId), 'tab removed');
+      const again = await rpc('closeTab');
+      assert(!again.ok && /no active tab/.test(String(again.error)), `second closeTab: ${JSON.stringify(again)}`);
+      const user = await rpc('closeTab', [`${ea}:2`]);
+      assert(!user.ok && (user as any).exitCode === 1 && /--force/.test(String(user.error)), `user tab: ${JSON.stringify(user)}`);
+      assert(edgeExt.tabs.some((t) => t.id === 2), 'user tab survives the refusal');
+      // Another agent (bridge port 1) holds tab 3: refused even with --force.
+      edgeExt.tabOwners.set(3, { controlledTabId: 3, port: 1 } as unknown as FakeConnection);
+      const other = await rpc('closeTab', [`${ea}:3`], { force: true });
+      assert(!other.ok && /another ghax agent \(bridge port 1\)/.test(String(other.error)), `other agent: ${JSON.stringify(other)}`);
+      edgeExt.tabOwners.delete(3);
+      const forced = await rpc('closeTab', [`${ea}:2`], { force: true });
+      assert(forced.ok && forced.data.closed === `${ea}:2`, `--force: ${JSON.stringify(forced)}`);
     });
   });
 
