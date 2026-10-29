@@ -5,6 +5,10 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [0.16.0] - 2026-10-29
 ### Added
 - **`ghax close-tab ['#n' | id] [--force]`.** Agents could open tabs but not
   close them (`window.close()` is ignored for tabs a script did not open). With
@@ -1865,7 +1869,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/kepptic/ghax/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kepptic/ghax/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/kepptic/ghax/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/kepptic/ghax/compare/v0.12.0...v0.13.0
