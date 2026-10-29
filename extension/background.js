@@ -1115,6 +1115,9 @@ class BridgeConnection {
         if (owner && owner !== this) throw conflictError(tabId, owner);
         const wasControlled = this.controlledTabId === tabId;
         if (wasControlled) await this.stopControl();
+        // stopControl awaits: another connection may have claimed the tab meanwhile.
+        const ownerNow = ownerOf(tabId);
+        if (ownerNow && ownerNow !== this) throw conflictError(tabId, ownerNow);
         await chrome.tabs.remove(tabId);
         this.send({ type: 'control-ack', id, ok: true, tabId: this.controlledTabId, result: { closed: tabId } });
         return;

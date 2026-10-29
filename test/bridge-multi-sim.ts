@@ -412,6 +412,8 @@ class FakeConnection {
           this.setControlled(null);
           this.send({ type: 'controlled', tabId: null });
         }
+        const ownerNow = this.ext.ownerOf(tabId); // re-check after the release, as background.js does
+        if (ownerNow && ownerNow !== this) this.ext.claim(this, tabId);
         this.ext.tabs = this.ext.tabs.filter((t) => t.id !== tabId);
         this.send({ type: 'control-ack', id, ok: true, tabId: this.controlledTabId, result: { closed: tabId } });
         return;
@@ -2247,6 +2249,38 @@ async function main(): Promise<void> {
       edgeExt.tabOwners.delete(3);
       const forced = await rpc('closeTab', [`${ea}:2`], { force: true });
       assert(forced.ok && forced.data.closed === `${ea}:2`, `--force: ${JSON.stringify(forced)}`);
+    });
+  });
+
+  await test('daemon: close-tab on another bound browser\'s tab goes to that browser, not the active one', async () => {
+    await withDaemon(async ({ rpc, edge, chrome, edgeExt, chromeExt, alias }) => {
+      const ca = await alias('inst-chrome');
+      assert((await rpc('bridge.use', ['inst-edge'])).ok !== false, 'use edge');
+      edge.lastControl = null;
+      const r = await rpc('closeTab', [`${ca}:2`], { force: true });
+      assert(r.ok && r.data.closed === `${ca}:2`, `closeTab: ${JSON.stringify(r)}`);
+      assert(chrome.lastControl?.action === 'close-tab' && chrome.lastControl.tabId === 2, `chrome got: ${JSON.stringify(chrome.lastControl)}`);
+      assert(edge.lastControl?.action !== 'close-tab', `edge must not get the close: ${JSON.stringify(edge.lastControl)}`);
+      assert(!chromeExt.tabs.some((t) => t.id === 2) && edgeExt.tabs.some((t) => t.id === 2), 'only the chrome tab is gone');
+    });
+  });
+
+  await test('daemon: close-tab ownership does not outlive the tab (reused chrome tab id needs --force)', async () => {
+    await withDaemon(async ({ rpc, edgeExt, alias }) => {
+      const ea = await alias('inst-edge');
+      assert((await rpc('bridge.use', ['inst-edge'])).ok !== false, 'use edge');
+      const opened = await rpc('newWindow', ['https://own.example']);
+      assert(opened.ok, `newWindow: ${JSON.stringify(opened)}`);
+      const id = opened.data.id as string;
+      const num = Number(id.slice(id.lastIndexOf(':') + 1));
+      // The tab dies by other means; Chrome later reuses its id for the user's tab.
+      edgeExt.tabs = edgeExt.tabs.filter((t) => t.id !== num);
+      edgeExt.tabOwners.delete(num);
+      assert((await rpc('tabs')).ok, 'tabs listing');
+      edgeExt.tabs.push({ id: num, title: 'user reopened', url: 'https://user.example' });
+      const r = await rpc('closeTab', [id]);
+      assert(!r.ok && /--force/.test(String(r.error)), `stale ownership must not skip --force: ${JSON.stringify(r)}`);
+      assert(edgeExt.tabs.some((t) => t.id === num), `${ea}: user tab survives`);
     });
   });
 

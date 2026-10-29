@@ -1045,6 +1045,8 @@ async function listBridgeTabsAll(ctx: Ctx, timeoutMs = LIST_TABS_TIMEOUT_MS): Pr
   const notes: string[] = [];
   settled.forEach((r, i) => {
     if (r.status === 'fulfilled') {
+      // A tab that left the browser's own listing is no longer ours (Chrome reuses tab ids).
+      pruneOpenedTabs(ctx, bridge.identityOf(ids[i])?.alias, new Set(r.value.map((t) => t.id)));
       if (r.value.length === 0) notes.push(noWindowsNote(ctx, ids[i]));
       rows.push(...r.value);
     } else {
@@ -1082,24 +1084,39 @@ async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInsta
  */
 async function controlResolvedTab(ctx: Ctx, tab: TabIdentity, extra: { focus?: boolean; quiet?: boolean } = {}): Promise<ControlAck> {
   const bridge = requireBridge(ctx);
-  const alias = aliasOfId(tab.id);
-  let owner: string | null = null;
-  if (alias !== null) {
-    const owners = bridge.boundIds.filter((id) => bridge.identityOf(id)?.alias === alias);
-    if (owners.length !== 1) {
-      throw new Error(`${describeTab(tab)}: browser ${alias} is not bound to this daemon. Run 'ghax bridge use ${alias}' first.`);
-    }
-    owner = owners[0];
-  }
+  const { owner, conn } = connForTab(ctx, tab);
   let ack: ControlAck;
   try {
-    const conn = owner === null ? verbBridge(ctx) : bridge.pinned(owner);
     ack = await conn.sendControl({ action: 'control-tab', tabId: tab.chromeTabId!, ...extra });
   } catch (err) {
     throw withTabIdentity(err, tab);
   }
   if (owner !== null && owner !== bridge.boundInstanceId) await switchActivePeer(ctx, owner);
   return ack;
+}
+
+/**
+ * The bound browser a resolved tab lives in: alias -> exactly one bound peer
+ * -> a connection pinned to it. A tab with no alias belongs to the verb's
+ * browser. An alias that matches no bound peer (or several) is an error.
+ */
+function connForTab(ctx: Ctx, tab: TabIdentity): { owner: string | null; conn: BridgeConn } {
+  const bridge = requireBridge(ctx);
+  const alias = aliasOfId(tab.id);
+  if (alias === null) return { owner: null, conn: verbBridge(ctx) };
+  const owners = bridge.boundIds.filter((id) => bridge.identityOf(id)?.alias === alias);
+  if (owners.length !== 1) {
+    throw new Error(`${describeTab(tab)}: browser ${alias} is not bound to this daemon. Run 'ghax bridge use ${alias}' first.`);
+  }
+  return { owner: owners[0], conn: bridge.pinned(owners[0]) };
+}
+
+/** Forget opened-tab entries of one browser alias, keeping only `keep` when given. */
+function pruneOpenedTabs(ctx: Ctx, alias: string | undefined, keep?: Set<string>): void {
+  if (!alias) return;
+  for (const id of ctx.openedTabs) {
+    if (aliasOfId(id) === alias && !(keep?.has(id))) ctx.openedTabs.delete(id);
+  }
 }
 
 /** resolveTabSelector over every bound browser; notes explain a missing one. */
@@ -1561,8 +1578,8 @@ register('closeTab', async (ctx, args, opts) => {
     if (!ctx.openedTabs.has(id) && !force) {
       throw new DaemonError(`${tab ? describeTab(tab) : id} was not opened by this daemon (new-tab/new-window); it is the user's tab. Pass --force to close it anyway.`, 1);
     }
-    const ownTab = chromeTabId === bridge.controlledTabId;
-    const conn = verbBridge(ctx);
+    const { owner: peer, conn } = tab ? connForTab(ctx, tab) : { owner: null, conn: verbBridge(ctx) };
+    const ownTab = chromeTabId === (peer === null ? bridge.controlledTabId : bridge.controlledTabOf(peer));
     try {
       await conn.sendControl({ action: 'close-tab', tabId: chromeTabId });
     } catch (err) {
@@ -5065,7 +5082,12 @@ async function main() {
     });
     // A browser restarted behind a known instance: its old tab numbers mean
     // nothing, so a `#n` from before must ask for a fresh `ghax tabs`.
-    bridge.on('peer-restart', () => { ctx.lastTabListing = null; });
+    bridge.on('peer-restart', (instanceId: string) => {
+      ctx.lastTabListing = null;
+      pruneOpenedTabs(ctx, bridge.identityOf(instanceId)?.alias);
+    });
+    // Ownership must not outlive the browser instance that held the tab.
+    bridge.on('expired', (instanceId: string) => pruneOpenedTabs(ctx, bridge.identityOf(instanceId)?.alias));
     if (bridge.controlledTabId !== null && bridge.boundInstanceId) {
       ctx.activePageId = bridgeTabId(ctx, bridge.controlledTabId);
       void enableBridgeDomains(bridge, bridge.boundInstanceId);
