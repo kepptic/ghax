@@ -6,7 +6,8 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+- Bridge extension provenance is now baked in when the service worker script loads (`extension/build-info.js`, statically imported) instead of fetched from disk at runtime. A worker that was never reloaded used to run old code while reporting the new on-disk version, so `ghax version --full` showed no mismatch (seen live: v0.16.0 extension replying `unknown control action: new-tab`). `extension/build-info.json` is gone.
 
 ## [0.16.0] - 2026-10-29
 ### Added

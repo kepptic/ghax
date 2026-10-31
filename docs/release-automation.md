@@ -111,7 +111,7 @@ CI cutting a release doesn't update anyone's own machine. `npm run
 sync-local` is that other half: pull, rebuild the CLI + daemon bundle,
 reinstall via `scripts/install-link.sh`, and — new since the `ghax bridge
 reload` verb — reload the bridge extension so it picks up the fresh
-`extension/build-info.json` too, with no click in `edge://extensions`. It
+`extension/build-info.js` too, with no click in `edge://extensions`. It
 prints a three-line cli/daemon/extension version table and fails loudly if
 any of the three disagree, which is exactly the "stale component" trap
 `ghax version --full` was built to catch (see `CLAUDE.md` invariant 4) —

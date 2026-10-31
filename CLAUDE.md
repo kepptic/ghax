@@ -66,7 +66,7 @@ the tool in the past.
    `scripts/build-daemon.mjs` (esbuild's JS API, not a shell one-liner —
    needed to stamp `{version, gitSha, buildDate}` into the bundle via
    `define`, cross-platform since this also runs in CI on Windows). The same
-   step writes `extension/build-info.json`, the bridge extension's only way
+   step writes `extension/build-info.js`, the bridge extension's only way
    to report its own provenance (an MV3 service worker can't shell out to
    git). `ghax version --full` reports the CLI, the running daemon, and the
    connected bridge extension's versions side by side and warns on any

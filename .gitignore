@@ -1,6 +1,5 @@
 node_modules/
 dist/
-extension/build-info.json
 .ghax/
 *.log
 .DS_Store
