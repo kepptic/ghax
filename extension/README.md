@@ -15,7 +15,7 @@ browser-level CDP endpoint, including the `ext` family, return an explicit
 
 ## Load it (unpacked)
 
-1. **Run `npm run build` first.** This writes `extension/build-info.json`
+1. **Run `npm run build` first.** This writes `extension/build-info.js`
    (version + git sha + build date) alongside building the daemon bundle —
    the extension's service worker reads it at startup and reports it in its
    `hello` handshake so `ghax version --full` can tell you which commit

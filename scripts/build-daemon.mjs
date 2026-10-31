@@ -9,7 +9,7 @@
 //      isn't safe to depend on; this script shells out via child_process
 //      itself, with the same fallback chain build.rs uses on the Rust side).
 //   2. Injecting that provenance into the bundle via esbuild's `define`,
-//      and writing the same info to extension/build-info.json so the
+//      and writing the same info to extension/build-info.js so the
 //      bridge extension (which can't read package.json/git at runtime —
 //      MV3 service workers have no filesystem or child_process access) can
 //      report matching values in its `hello` handshake.
@@ -57,14 +57,24 @@ const info = {
   buildDate: buildDate(),
 };
 
-// Written for the bridge extension — an MV3 service worker can't shell out
-// to git or read package.json off disk, but it CAN `fetch
-// (chrome.runtime.getURL('build-info.json'))` its own packaged file. See
-// extension/background.js's identify()/getBuildInfo().
+// Written for the bridge extension. A service worker can't shell out to git,
+// and extension/background.js statically imports this file, so provenance is
+// captured at SW script load and cached with it: a never-reloaded worker keeps
+// its OLD values and `ghax version --full` can flag it. The checked-in stub is
+// marked skip-worktree (best effort) so rebuilding doesn't dirty the tree.
+const extInfoPath = join(repoRoot, 'extension', 'build-info.js');
 writeFileSync(
-  join(repoRoot, 'extension', 'build-info.json'),
-  JSON.stringify(info, null, 2) + '\n',
+  extInfoPath,
+  `self.GHAX_BUILD_INFO = ${JSON.stringify(info)};\n`,
 );
+try {
+  execFileSync('git', ['update-index', '--skip-worktree', 'extension/build-info.js'], {
+    cwd: repoRoot,
+    stdio: 'ignore',
+  });
+} catch {
+  // not a git checkout (tarball) — nothing to hide
+}
 
 await build({
   entryPoints: [join(repoRoot, 'src', 'daemon.ts')],
