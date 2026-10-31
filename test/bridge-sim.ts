@@ -154,7 +154,7 @@ class FakeExt {
   /** Set to send a pairToken in hello (for the pairing tests). */
   pairToken: string | null = null;
   /** Set to send gitSha/buildDate in hello (provenance tests) — a real
-   * extension omits both when extension/build-info.json isn't built yet. */
+   * extension omits both when extension/build-info.js isn't built yet. */
   gitSha: string | null = null;
   buildDate: string | null = null;
   /** Set to send `profile`/`brandVersion` in hello, as a tab-identity-aware
@@ -271,7 +271,7 @@ class FakeExt {
    * own reconnect logic (background.js) brings it back on the SAME
    * instanceId — chrome.storage.local survives a reload, unlike an in-memory
    * worker. Callers update `gitSha`/`buildDate` beforehand to model a rebuilt
-   * extension/build-info.json taking effect.
+   * extension/build-info.js taking effect.
    */
   async simulateReload(): Promise<void> {
     this.kill();
@@ -1768,7 +1768,7 @@ async function main(): Promise<void> {
       const ack = await bridge.sendControl({ action: 'reload' });
       assert(ack.ok, `reload control-ack should be ok, got ${JSON.stringify(ack)}`);
 
-      // The extension "rebuilds": a fresh build-info.json, same instanceId
+      // The extension "rebuilds": a fresh build-info.js, same instanceId
       // (chrome.storage.local survives a reload).
       ext.gitSha = 'bbb2222';
       ext.buildDate = '2026-09-22';

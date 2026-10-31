@@ -309,16 +309,16 @@ c('version --full --json reports resolved + running bundle and mismatch flag', a
   assert(v.daemonVersionMismatch === false, 'daemonVersionMismatch should be false when daemon and CLI share a build');
   assert(typeof v.extensionVersionMismatch === 'boolean', 'version --full missing extensionVersionMismatch');
 
-  // scripts/build-daemon.mjs writes extension/build-info.json in the SAME
+  // scripts/build-daemon.mjs writes extension/build-info.js in the SAME
   // build step as dist/ghax-daemon.mjs — the bridge extension's only way to
   // report provenance (a service worker can't shell out to git). They must
   // agree, or the extension would report stale provenance for a fresh build.
-  const buildInfoPath = path.join(root, 'extension', 'build-info.json');
+  const buildInfoPath = path.join(root, 'extension', 'build-info.js');
   assert(fs.existsSync(buildInfoPath), `${buildInfoPath} missing — did 'npm run build' run before this suite?`);
-  const extBuildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8'));
+  const extBuildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8').replace(/^[^{]*/, '').replace(/;\s*$/, ''));
   assert(
     extBuildInfo.gitSha === v.daemon?.gitSha,
-    `extension/build-info.json gitSha (${extBuildInfo.gitSha}) !== daemon-reported gitSha (${v.daemon?.gitSha})`,
+    `extension/build-info.js gitSha (${extBuildInfo.gitSha}) !== daemon-reported gitSha (${v.daemon?.gitSha})`,
   );
 });
 

@@ -12,7 +12,8 @@ only Claude-specific detail and workflow recipes. Humans: CONTRIBUTING.md.
   resolve against tab B.
 - **#4 daemon restart:** `npm run build` runs `scripts/build-daemon.mjs`
   (esbuild JS API, stamps `{version, gitSha, buildDate}` via `define`) and
-  writes `extension/build-info.json`, the bridge extension's only
+  writes `extension/build-info.js`, which the bridge extension imports at
+  SW load (a stale worker keeps reporting its old version) as its only
   provenance. `ghax version --full` shows CLI, running daemon and bridge
   extension side by side and warns on a mismatch: the fast way to catch a
   stale daemon bundle or an extension not reloaded after a pull.
