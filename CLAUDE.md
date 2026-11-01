@@ -1,112 +1,21 @@
 @AGENTS.md
 
-# ghax — project instructions for Claude Code
+# ghax — Claude Code notes
 
-Claude Code auto-loads this file when it opens the ghax repo. Other AI
-agents (Codex, Cursor, Aider, Continue) should read [AGENTS.md](./AGENTS.md)
-first — it covers the same ground in a vendor-neutral form. This file
-extends that with Claude-specific workflow examples.
+AGENTS.md (imported above) holds the project overview, the five hard
+invariants, build/test commands and the add-a-verb steps. This file adds
+only Claude-specific detail and workflow recipes. Humans: CONTRIBUTING.md.
 
-Human contributors: start with [CONTRIBUTING.md](./CONTRIBUTING.md) —
-it has the same info plus bits that don't matter to agents (code of
-conduct, PR style, issue reporting).
+## Invariant details AGENTS.md leaves out
 
-## What this repo is
-
-ghax is a CLI browser-automation tool that **attaches to the user's real
-running Chrome or Edge via CDP**. Not a sandboxed browser — the user's own
-session, with auth, extensions, and open tabs intact. Plus a Claude Code
-skill (`/kepptic-ghax` — single skill, full command surface + recipes).
-
-Two transports (Edge 150 / Chrome 136 block CDP on the default profile):
-the **CDP path** (`chromium.connectOverCDP`) drives scratch/dedicated
-profiles, and the **bridge** (`ghax attach --extension`) drives the user's
-*real* session through an MV3 extension (`extension/`) that relays CDP via
-`chrome.debugger` over a localhost WebSocket (`src/bridge.ts` daemon side,
-`ctx.bridgeMode` verb branches). Full verb parity landed on the bridge in
-v0.5. See [`design/plan/07-extension-bridge.md`](./design/plan/07-extension-bridge.md).
-
-For the full architecture see [ARCHITECTURE.md](./ARCHITECTURE.md). For the
-"why" behind each design decision see
-[`design/plan/`](./design/plan/).
-
-## Hard invariants
-
-Before making changes, internalize these. Violating any of them has broken
-the tool in the past.
-
-1. **CLI is Rust. Daemon runs under Node.** Playwright's
-   `connectOverCDP` is Node-only — keep all Playwright usage in the
-   daemon. The Rust CLI calls the daemon via HTTP RPC; it has no Playwright
-   dependency. The old Bun CLI source under `src/cli.ts` is gone — use
-   `git log --oneline -- src/cli.ts` to find it in history if you need it.
-
-2. **Single daemon per state file.** `.ghax/ghax.json` stores
-   `{pid, port, browserKind, browserUrl, cwd}`. Never spawn a second
-   daemon pointing at the same state file. For parallel agents, use
-   `GHAX_STATE_FILE=/tmp/ghax-<agent>.json` — each gets its own daemon.
-
-3. **Refs resolve against the daemon's last snapshot, and only on the
-   tab they were taken on.** `ghax click @e3` looks up `@e3` in the
-   *last* snapshot's ref map. An element keeps its ref across
-   re-snapshots of the same document (daemon-wide `ctx.refRegistry`,
-   numbers never reused), so numbering is sparse, but refs
-   never survive a tab switch or navigation. The `tab` and
-   `new-window` handlers clear the ref map when the active page changes,
-   so a stale ref from tab A can't resolve against tab B; a smoke check
-   asserts this. `src/snapshot.ts` must stay the only `ariaSnapshot*`
-   call site (a second one replaces Playwright's ref cache). Never cache
-   ref IDs in code that outlives a single action.
-
-4. **Daemon restart required after editing `src/daemon.ts`.** The daemon
-   bundle is loaded once at attach time. Changes to `src/daemon.ts` don't
-   take effect until `ghax detach && npm run build && ghax attach`. Bit me
-   once debugging LCP capture — daemon returned null because it was still
-   running the pre-fix code. `npm run build` invokes
-   `scripts/build-daemon.mjs` (esbuild's JS API, not a shell one-liner —
-   needed to stamp `{version, gitSha, buildDate}` into the bundle via
-   `define`, cross-platform since this also runs in CI on Windows). The same
-   step writes `extension/build-info.json`, the bridge extension's only way
-   to report its own provenance (an MV3 service worker can't shell out to
-   git). `ghax version --full` reports the CLI, the running daemon, and the
-   connected bridge extension's versions side by side and warns on any
-   mismatch — the fast way to catch either half of this trap (a stale
-   daemon bundle, or a bridge extension not reloaded in
-   `edge://extensions`/`chrome://extensions` after a `git pull`).
-
-5. **The Rust CLI and daemon do not share source.** The Rust CLI uses
-   `serde_json::Value` for daemon responses (the daemon already returns
-   JSON; deserializing into named structs would be a re-implementation of
-   `printResult()` for no benefit). When the daemon changes an RPC
-   return shape, just update whatever Rust dispatch code reads
-   `data.get("foo")` if the field name changed. Smoke (`test/smoke.ts`
-   via `GHAX_BIN=$PWD/target/release/ghax npm run test:smoke`) catches
-   the breakage.
-
-## Command patterns
-
-Adding a new verb takes 3 steps:
-
-1. **Register a handler in `daemon.ts`** (Node side):
-   ```ts
-   register('myVerb', async (ctx, args, opts) => {
-     const page = await activePage(ctx);
-     // ...
-     return { ...result };
-   });
-   ```
-
-2. **Wire the Rust dispatch in `crates/cli/src/dispatch.rs`.** For
-   trivial verbs (parse args → POST /rpc → print), add the verb name
-   to one of the existing `match` arms — `simple()` does the rest.
-   For verbs with CLI-side logic (custom print, multi-RPC, shell-out),
-   add a new module under `crates/cli/src/<verb>.rs` exposing
-   `pub fn cmd_<verb>(parsed: &Parsed) -> Result<i32>`, then wire it
-   in `dispatch.rs::dispatch_inner` and declare `mod <verb>;` in
-   `main.rs`. See `qa.rs`, `ship.rs`, `attach.rs` for templates.
-
-3. **Add a smoke check in `test/smoke.ts`.** Run it against the
-   Rust CLI (`GHAX_BIN=$PWD/target/release/ghax npm run test:smoke`).
+- **#3 refs:** a smoke check asserts that a stale ref from tab A can't
+  resolve against tab B.
+- **#4 daemon restart:** `npm run build` runs `scripts/build-daemon.mjs`
+  (esbuild JS API, stamps `{version, gitSha, buildDate}` via `define`) and
+  writes `extension/build-info.json`, the bridge extension's only
+  provenance. `ghax version --full` shows CLI, running daemon and bridge
+  extension side by side and warns on a mismatch: the fast way to catch a
+  stale daemon bundle or an extension not reloaded after a pull.
 
 ## Common workflows
 
@@ -234,37 +143,12 @@ don't apply on the CDP transport:
 
 See `design/plan/09-bridge-multi-agent.md`.
 
-## Build, test, verify
+## Smoke-test browser
 
-Every change must pass:
-
-```bash
-# Rust CLI (toolchain pinned in rust-toolchain.toml; rustup installs it)
-cargo build --release            # compile Rust CLI (crates/cli/)
-cargo fmt --all --check          # CI gate
-cargo clippy -p ghax --all-targets -- -D warnings   # CI gate
-npm run typecheck                # tsc --noEmit (TypeScript 7, daemon TS + tests)
-npm run lint                     # Oxlint, type-aware (no-floating-promises is an error)
-npm run build                    # bundle daemon → dist/ghax-daemon.mjs (esbuild)
-npm run test:smoke               # 95-check smoke suite against a live Edge session
-```
-
-For bigger changes also run:
-
-```bash
-npm run test:cross-browser    # Edge + Chrome both pass the suite
-npm run test:benchmark        # per-command latency hasn't regressed
-```
-
-The smoke test requires a Chromium-family browser on
-`--remote-debugging-port=9222`. If you don't have one running, launch
-one with `ghax attach --launch` (or manually with BOTH
-`--remote-debugging-port=9222` and a non-default `--user-data-dir`) or
-the smoke will abort at the first attach. Just the port flag alone no
-longer works — Edge 150+/Chrome 136+ ignore it on the default profile.
-
-`GHAX_BIN=./target/release/ghax npm run test:smoke` runs the smoke
-suite against the Rust binary — useful for verifying parity.
+`npm run test:smoke` needs a Chromium browser on `--remote-debugging-port=9222`
+WITH a non-default `--user-data-dir` (Edge 150+/Chrome 136+ ignore the port on
+the default profile). `ghax attach --launch` does both. Bigger changes also run
+`npm run test:cross-browser` and `npm run test:benchmark`.
 
 ## Before committing
 
