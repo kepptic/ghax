@@ -511,6 +511,21 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
                     any_failed = true;
                     break;
                 }
+                // A batch RPC succeeds even when a step inside failed. One
+                // that may have landed ends the chain, like a top-level one.
+                if cmd == "batch" && batch_has_unsafe_failure(&data) {
+                    report.push(
+                        &cmd,
+                        false,
+                        t.elapsed().as_millis(),
+                        Some(&data),
+                        Some("a batch step failed after it may have been delivered"),
+                    );
+                    results
+                        .push(json!({ "cmd": cmd, "ok": false, "data": data, "retry": "unsafe" }));
+                    any_failed = true;
+                    break;
+                }
                 report.push(&cmd, true, t.elapsed().as_millis(), Some(&data), None);
                 results.push(json!({ "cmd": cmd, "ok": true, "data": data }));
             }
@@ -552,6 +567,17 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     };
     report.write(code);
     Ok(code)
+}
+
+/// True when a batch RPC's per-step results hold a failed step whose retry
+/// disposition is `unsafe` (it may have reached the page).
+fn batch_has_unsafe_failure(data: &Value) -> bool {
+    data.as_array().is_some_and(|steps| {
+        steps.iter().any(|r| {
+            r.get("ok").and_then(|v| v.as_bool()) != Some(true)
+                && r.get("retry").and_then(|v| v.as_str()) == Some("unsafe")
+        })
+    })
 }
 
 // ─── batch ───────────────────────────────────────────────────────────────────
@@ -1137,5 +1163,29 @@ fn normalize_frame_dims(frame_paths: &[String]) {
         } else {
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_batch_tests {
+    use super::*;
+
+    #[test]
+    fn unsafe_failed_step_inside_batch_is_detected() {
+        let data = json!([
+            { "cmd": "goto", "ok": true },
+            { "cmd": "click", "ok": false, "retry": "unsafe" }
+        ]);
+        assert!(batch_has_unsafe_failure(&data));
+    }
+
+    #[test]
+    fn safe_or_ok_steps_are_not_unsafe() {
+        let data = json!([
+            { "cmd": "click", "ok": false, "retry": "safe" },
+            { "cmd": "click", "ok": true, "retry": "unsafe" }
+        ]);
+        assert!(!batch_has_unsafe_failure(&data));
+        assert!(!batch_has_unsafe_failure(&json!({})));
     }
 }

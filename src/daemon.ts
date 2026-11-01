@@ -866,6 +866,12 @@ async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator
     checkRefScope(ctx, target, ref);
     const entry = ctx.refs.get(ref.key);
     if (!entry) throw staleRef(target, 'it is not in the latest snapshot');
+    // Navigation drops `aria-ref` matches but not an @c CSS path, which would
+    // resolve against the NEW document. Compare documents before any ref.
+    const docNow = docIdOfMarker(await readFreshnessMarker(ctx));
+    if (docNow && ctx.snapshotDocId && !ctx.snapshotDocId.startsWith('unknown:') && docNow !== ctx.snapshotDocId) {
+      throw staleRef(target, 'the page navigated since the snapshot');
+    }
     // An `aria-ref=` locator matches nothing once its element is gone or
     // renamed, or once the document navigated. Fail here instead of letting
     // an action wait out its timeout (or, for the @c selector chains, hit a
@@ -1822,6 +1828,7 @@ register('downloads', async (ctx, _args, opts) => {
 register('goto', async (ctx, args, opts) => {
   const url = String(args[0] ?? '');
   if (!url) throw new Error('Usage: goto <url>');
+  markDelivered();
   if (ctx.bridgeMode) {
     clearSnapshotRefs(ctx, 'the tab navigated (goto)');
     const result = await bridgeGoto(verbBridge(ctx), url);
@@ -1921,6 +1928,7 @@ async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNav
 }
 
 register('back', async (ctx) => {
+  markDelivered();
   if (ctx.bridgeMode) return await bridgeHistoryNav(ctx, -1);
   const page = await activePage(ctx);
   await page.goBack({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
@@ -1928,6 +1936,7 @@ register('back', async (ctx) => {
 });
 
 register('forward', async (ctx) => {
+  markDelivered();
   if (ctx.bridgeMode) return await bridgeHistoryNav(ctx, 1);
   const page = await activePage(ctx);
   await page.goForward({ waitUntil: 'commit', timeout: 15_000 }).catch(() => undefined);
@@ -1935,6 +1944,7 @@ register('forward', async (ctx) => {
 });
 
 register('reload', async (ctx) => {
+  markDelivered();
   if (ctx.bridgeMode) {
     const bridge = verbBridge(ctx);
     await bridge.send('Page.reload', {});
@@ -1981,6 +1991,7 @@ register('eval', async (ctx, args, opts) => {
   }
   const noWait = opts['no-wait'] === true || opts.noWait === true;
   const code = noWait ? noWaitExpression(js) : js;
+  markDelivered();
   let result: unknown;
   if (ctx.bridgeMode) {
     if (!ctx.bridge) throw new Error('bridge not initialized');
@@ -3169,6 +3180,7 @@ function buildSelectError(target: string, attempts: string[]): string {
 register('press', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: press <key>');
+  markDelivered();
   if (ctx.bridgeMode) {
     await pressBridgeKey(verbBridge(ctx), key);
     return { ok: true };
@@ -3235,6 +3247,7 @@ register('upload', async (ctx, args, opts) => {
 
 register('type', async (ctx, args) => {
   const text = String(args[0] ?? '');
+  markDelivered();
   if (ctx.bridgeMode) {
     await verbBridge(ctx).send('Input.insertText', { text });
     return { ok: true };
@@ -3504,6 +3517,7 @@ function cookieBackend(ctx: Ctx): CookieBackend {
 register('cookies', async (ctx, _args, opts) => listCookies(cookieBackend(ctx), opts));
 
 register('cookies.delete', async (ctx, args, opts) => {
+  markDelivered();
   try {
     return await deleteCookie(cookieBackend(ctx), String(args[0] ?? ''), opts);
   } catch (err) {
@@ -3565,6 +3579,7 @@ register('storage', async (ctx, args) => {
     throw new Error(`Unknown storage area: ${area} (expected local or session)`);
   }
   const api = area === 'local' ? 'localStorage' : 'sessionStorage';
+  if (op !== 'get' && op !== 'keys') markDelivered();
   // Bridge: no Playwright page, so run the same expression through
   // Runtime.evaluate on the controlled tab. Same expressions, same output.
   const page = ctx.bridgeMode ? null : await activePage(ctx);
@@ -3625,6 +3640,7 @@ register('viewport', async (ctx, args) => {
   const spec = String(args[0] ?? '');
   const m = spec.match(/^(\d+)x(\d+)$/);
   if (!m) throw new Error('Usage: viewport <WxH>, e.g. 1440x900');
+  markDelivered();
   const page = await activePage(ctx);
   const width = Number(m[1]);
   const height = Number(m[2]);
@@ -4101,6 +4117,7 @@ async function evalInTarget<T = unknown>(
 register('ext.reload', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext reload <ext-id>');
+  markDelivered();
   const { target } = await getSwTarget(ctx, extId);
   // Read content_scripts so we can warn — reload disconnects us before the promise resolves.
   let manifestCs: unknown[] = [];
@@ -4152,6 +4169,7 @@ register('ext.hot-reload', async (ctx, args, opts) => {
   const startedAt = Date.now();
   const extId = String(args[0] ?? '');
   if (!extId) throw new Error('Usage: ext hot-reload <ext-id>');
+  markDelivered();
   const waitSeconds = opts.wait === undefined ? 5 : Number(opts.wait);
   const noInject = Boolean(opts.noInject ?? opts['no-inject']);
   const verbose = Boolean(opts.verbose);
@@ -4351,6 +4369,7 @@ register('ext.sw.eval', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const js = String(args[1] ?? '');
   if (!extId || !js) throw new Error('Usage: ext sw <ext-id> eval <js>');
+  markDelivered();
   const { target } = await getSwTarget(ctx, extId);
   const value = await evalInTarget(target, js, {
     awaitPromise: true,
@@ -4367,6 +4386,7 @@ register('ext.storage', async (ctx, args) => {
   const op = String(args[2] ?? 'get');
   if (!extId) throw new Error('Usage: ext storage <ext-id> [local|session|sync] [get|set|clear] [key] [value]');
   if (!['local', 'session', 'sync'].includes(area)) throw new Error(`Unknown area: ${area}`);
+  if (op !== 'get') markDelivered();
   const { target } = await getSwTarget(ctx, extId);
 
   let expr: string;
@@ -4401,6 +4421,7 @@ register('ext.message', async (ctx, args) => {
   const extId = String(args[0] ?? '');
   const payloadRaw = String(args[1] ?? '');
   if (!extId || !payloadRaw) throw new Error('Usage: ext message <ext-id> <json-payload>');
+  markDelivered();
   let payload: unknown;
   try {
     payload = JSON.parse(payloadRaw);
@@ -4845,6 +4866,7 @@ register('record.status', async (ctx) => {
 register('gesture.key', async (ctx, args) => {
   const key = String(args[0] ?? '');
   if (!key) throw new Error('Usage: gesture key <key>');
+  markDelivered();
   await withInput(ctx, async (send) => {
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key });
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key });
@@ -4874,6 +4896,7 @@ register('gesture.scroll', async (ctx, args, opts) => {
   }
   const deltaX = dir === 'left' ? -amount : dir === 'right' ? amount : 0;
   const deltaY = dir === 'up' ? -amount : dir === 'down' ? amount : 0;
+  markDelivered();
   await withInput(ctx, async (send) => {
     await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX, deltaY });
   });

@@ -233,11 +233,25 @@ pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
     let client = crate::http::local_client_builder()
         .timeout(timeout)
         .build()?;
-    call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
+    call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, &opts, timeout))
+}
+
+/// Retry disposition after a timeout: only a true read is safe to repeat
+/// (`bridge stats --reset` mutates, so it is not).
+fn timeout_retry(cmd: &str, opts: &Value) -> &'static str {
+    match retry_class_for(cmd, opts) {
+        RetryClass::Idempotent => "safe",
+        RetryClass::Mutating => "unknown",
+    }
 }
 
 /// Turn a bare reqwest timeout into an error that says what to do.
-fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> anyhow::Error {
+fn explain_timeout(
+    err: anyhow::Error,
+    cmd: &str,
+    opts: &Value,
+    timeout: Option<Duration>,
+) -> anyhow::Error {
     let timed_out = err
         .downcast_ref::<reqwest::Error>()
         .map(|e| e.is_timeout())
@@ -254,7 +268,7 @@ fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> 
             ),
             code: Some("RPC_TIMEOUT".into()),
             // The daemon may still be running it: only a read is safe to repeat.
-            retry: Some(if IDEMPOTENT.contains(&cmd) { "safe" } else { "unknown" }.into()),
+            retry: Some(timeout_retry(cmd, opts).into()),
         })
         }
         _ => err,
@@ -405,6 +419,15 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn timeout_of_mutating_option_is_not_safe() {
+        assert_eq!(timeout_retry("bridge.stats", &json!({})), "safe");
+        assert_eq!(
+            timeout_retry("bridge.stats", &json!({ "reset": true })),
+            "unknown"
+        );
+    }
 
     #[test]
     fn borrowed_marker_rides_in_opts() {
@@ -657,7 +680,7 @@ mod tests {
             1,
             "a timed-out fill must not be re-sent"
         );
-        let explained = explain_timeout(err, "fill", Some(Duration::from_millis(200)));
+        let explained = explain_timeout(err, "fill", &json!({}), Some(Duration::from_millis(200)));
         let rpc = explained
             .downcast_ref::<RpcError>()
             .expect("typed timeout error");

@@ -823,6 +823,39 @@ c('scoped refs: @<scope>:eN clicks; a ref from an older document is STALE_REF', 
   assert((await run(['eval', 'String(window.__b || 0)'])).stdout.trim() === '0', "page B's button must not have been clicked");
 });
 
+c('a cursor ref after the page navigated is STALE_REF, never resolved against the new document', async () => {
+  // Codex finding 1: an @c ref is a CSS path. After a navigation without a
+  // re-snapshot, the same path in page B matched B's element and clicked it.
+  const mk = (flag: string) => `data:text/html,${encodeURIComponent(`<div id="x" style="cursor:pointer" onclick="window.${flag}=1">Tap me</div>`)}`;
+  await run(['goto', mk('__a')]);
+  const snap = await run(['snapshot', '-i', '-C']);
+  const m = /(@c\d+)/.exec(snap.stdout);
+  assert(m, `snapshot -C should emit an @c ref: ${snap.stdout.slice(0, 300)}`);
+  await run(['goto', mk('__b')]);
+  const r = await run(['click', m![1], '--json'], { allowFailure: true });
+  assert(r.exitCode === 6, `cursor ref after navigation should exit 6, got ${r.exitCode}: ${r.stdout}${r.stderr}`);
+  assert((await run(['eval', 'String(window.__b || 0)'])).stdout.trim() === '0', "page B's element must not have been clicked");
+});
+
+c('goto and press failures are retry unsafe (delivered), and batch stops', async () => {
+  const r = await run(['batch', JSON.stringify([
+    { cmd: 'goto', args: ['http://127.0.0.1:1/'] },
+    { cmd: 'wait', args: ['10'] },
+  ])], { allowFailure: true });
+  const steps = parseJson<Array<{ ok: boolean; retry?: string }>>(r.stdout);
+  assert(steps.length === 1 && steps[0].ok === false && steps[0].retry === 'unsafe',
+    `failed goto must be unsafe and stop the batch: ${r.stdout}`);
+  await new Promise((res) => setTimeout(res, 1000)); // let chrome-error:// settle
+  await run(['goto', `data:text/html,${encodeURIComponent('<p>ok</p>')}`]);
+  const p = await run(['batch', JSON.stringify([
+    { cmd: 'press', args: ['NoSuchKeyName'] },
+    { cmd: 'wait', args: ['10'] },
+  ])], { allowFailure: true });
+  const ps = parseJson<Array<{ ok: boolean; retry?: string }>>(p.stdout);
+  assert(ps.length === 1 && ps[0].ok === false && ps[0].retry === 'unsafe',
+    `failed press must be unsafe and stop the batch: ${p.stdout}`);
+});
+
 c('a selector matching more than one element is AMBIGUOUS_TARGET, exit 7, nothing clicked', async () => {
   const html = `<button class="b" onclick="window.__n=(window.__n||0)+1">One</button><button class="b" onclick="window.__n=(window.__n||0)+1">Two</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
