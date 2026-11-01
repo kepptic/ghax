@@ -120,7 +120,9 @@ cleanup() {
 trap cleanup EXIT
 
 # Every ghax call is bounded: a wedged daemon must not hang the sync.
-g() { timeout "${GHAX_SYNC_TIMEOUT:-60}" "$BIN" "$@"; }
+# </dev/null: g runs inside `while read ... <<< list` loops; a ghax call that
+# touched stdin would swallow the remaining rows.
+g() { timeout "${GHAX_SYNC_TIMEOUT:-60}" "$BIN" "$@" </dev/null; }
 
 echo "▸ ghax attach --extension (private state file, own bridge port)"
 # With Chrome + Edge both running the extension, attach reports
