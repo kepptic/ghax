@@ -515,15 +515,26 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
                 results.push(json!({ "cmd": cmd, "ok": true, "data": data }));
             }
             Err(err) => {
-                let msg = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
-                    rpc_err.message.clone()
+                let (msg, entry) = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
+                    let mut e = rpc_err.to_json();
+                    if let Value::Object(m) = &mut e {
+                        m.remove("ok");
+                        m.insert("cmd".into(), json!(cmd));
+                        m.insert("ok".into(), json!(false));
+                    }
+                    (rpc_err.message.clone(), e)
                 } else {
-                    err.to_string()
+                    let m = err.to_string();
+                    let e = json!({ "cmd": cmd, "ok": false, "error": m, "retry": "unknown" });
+                    (m, e)
                 };
+                let unsafe_retry = entry.get("retry").and_then(|v| v.as_str()) == Some("unsafe");
                 report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
-                results.push(json!({ "cmd": cmd, "ok": false, "error": msg }));
+                results.push(entry);
                 any_failed = true;
-                if stop_on_error {
+                // A step that may have landed ends the chain whatever
+                // --no-stop-on-error says (same rule as daemon-side batch).
+                if stop_on_error || unsafe_retry {
                     break;
                 }
             }
@@ -604,8 +615,17 @@ pub fn cmd_batch(cfg: &Config, rest: &[String]) -> Result<i32> {
                 .any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true))
         })
         .unwrap_or(false);
+    // A typed step failure (STALE_REF 6, AMBIGUOUS_TARGET 7) keeps its code.
+    let step_exit = data.as_array().and_then(|arr| {
+        arr.iter()
+            .filter(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true))
+            .find_map(|r| r.get("exitCode").and_then(|v| v.as_i64()))
+            .filter(|c| *c == 6 || *c == 7)
+    });
     let code = if let Some(f) = failed_expect("batch", &data) {
         f.exit()
+    } else if let Some(c) = step_exit.filter(|_| any_failed) {
+        c as i32
     } else if any_failed {
         EXIT_CDP_ERROR
     } else {
