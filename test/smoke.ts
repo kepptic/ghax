@@ -837,6 +837,19 @@ c('a cursor ref after the page navigated is STALE_REF, never resolved against th
   assert((await run(['eval', 'String(window.__b || 0)'])).stdout.trim() === '0', "page B's element must not have been clicked");
 });
 
+c('a cursor ref fails closed when the document cannot be confirmed', async () => {
+  const html = `<div style="cursor:pointer" onclick="window.__cc=1">Tap me</div>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const snap = await run(['snapshot', '-i', '-C']);
+  const m = /(@c\d+)/.exec(snap.stdout);
+  assert(m, `snapshot -C should emit an @c ref: ${snap.stdout.slice(0, 300)}`);
+  await run(['eval', `Object.defineProperty(window, '__ghaxMark', { get() { throw new Error('no marker'); }, configurable: true }); 'ok'`]);
+  const r = await run(['click', m![1], '--json'], { allowFailure: true });
+  assert(r.exitCode === 6, `unverifiable cursor ref should exit 6, got ${r.exitCode}: ${r.stdout}${r.stderr}`);
+  assert(/cannot confirm the document is unchanged/.test(r.stdout + r.stderr), `expected fail-closed reason: ${r.stdout}${r.stderr}`);
+  assert((await run(['eval', 'String(window.__cc || 0)'])).stdout.trim() === '0', 'nothing must have been clicked');
+});
+
 c('goto and press failures are retry unsafe (delivered), and batch stops', async () => {
   const r = await run(['batch', JSON.stringify([
     { cmd: 'goto', args: ['http://127.0.0.1:1/'] },

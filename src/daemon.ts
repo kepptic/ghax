@@ -869,6 +869,11 @@ async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator
     // Navigation drops `aria-ref` matches but not an @c CSS path, which would
     // resolve against the NEW document. Compare documents before any ref.
     const docNow = docIdOfMarker(await readFreshnessMarker(ctx));
+    // An @c path cannot be told from the same path in a new document without
+    // a document id, so fail closed when either side is unknown.
+    if (entry.role === 'cursor-interactive' && (!docNow || !ctx.snapshotDocId || ctx.snapshotDocId.startsWith('unknown:'))) {
+      throw staleRef(target, 'cannot confirm the document is unchanged');
+    }
     if (docNow && ctx.snapshotDocId && !ctx.snapshotDocId.startsWith('unknown:') && docNow !== ctx.snapshotDocId) {
       throw staleRef(target, 'the page navigated since the snapshot');
     }
