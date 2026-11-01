@@ -51,7 +51,8 @@ import { BUILD_INFO } from './build-info';
 import { daemonCdpStats, diffStats, traceSend } from './cdp-stats';
 import { actionability } from './actionability';
 import { applyGrep, applySnapshotBudget, budgetFromOpts, grepFromOpts, type BudgetedText } from './snapshot-budget';
-import { RefRegistry, docIdOfMarker } from './ref-registry';
+import { RefRegistry, docIdOfMarker, parseRef, REF_RE } from './ref-registry';
+import { ambiguousTarget, markDelivered, retryOf, staleRef, withDispatchScope, withRetry } from './errors';
 import { parseExpect, runExpect, type ExpectProbes, type VisState } from './expect';
 import { registerFindEl, VERBS as FIND_EL_VERBS } from './find-el';
 import type { RefEntry } from './snapshot';
@@ -183,6 +184,14 @@ interface Ctx {
   // snapshot. `batch` compares it to decide whether a ref step needs a
   // re-snapshot. Null whenever the ref map is cleared.
   lastSnapshotMarker: string | null;
+  // Scope (`s<N>`) and document id of the last snapshot: what a bare `@e8`
+  // means and what a qualified `@s3:e8` must name. Null after the ref map is
+  // cleared (tab switch, navigation on the bridge).
+  snapshotScope: string | null;
+  snapshotDocId: string | null;
+  // Why a scope stopped being current (`tab switched`, `navigated`), so a
+  // STALE_REF can say so. Small and bounded.
+  goneScopes: Map<string, string>;
   // Per bound browser: main frame, execution contexts, load timing and
   // in-flight requests (plan 12, brief B). Keyed by instanceId; readers use
   // the verb's pinned peer's via verbPeerState(). See bridge-page-state.ts.
@@ -614,7 +623,7 @@ function wireBridgeEvents(ctx: Ctx): void {
     tabIdOf: (instanceId, chromeTabId) => bridgeTabId(ctx, chromeTabId, instanceId),
     // A main-frame navigation kills every @ref: backend node ids belong to
     // the old document.
-    onActiveMainFrameNavigated: () => clearSnapshotRefs(ctx),
+    onActiveMainFrameNavigated: () => clearSnapshotRefs(ctx, 'the tab navigated'),
   });
 }
 
@@ -818,23 +827,65 @@ async function enableBridgeDomains(bridge: Bridge, instanceId: string): Promise<
   ]).catch(() => undefined);
 }
 
+/**
+ * Refuse a ref that does not belong to the current snapshot scope, before
+ * any page work. Bare `@e8` means "current scope": ref numbers are
+ * daemon-wide unique and the registry remembers each one's document, so a
+ * bare ref from another tab or document is caught here exactly like a
+ * qualified `@s2:e8`.
+ */
+function checkRefScope(ctx: Ctx, target: string, ref: { scope: string | null; key: string }): void {
+  if (!ctx.refRegistry.everIssued(ref.key)) {
+    throw staleRef(target, 'no snapshot has issued this ref');
+  }
+  const minted = ctx.refRegistry.scopeOfRef(ref.key);
+  if (ref.scope && minted && ref.scope !== minted) {
+    throw staleRef(target, `${ref.key} was issued in scope ${minted}, not ${ref.scope}`, { scope: ref.scope, mintedIn: minted });
+  }
+  const want = ref.scope ?? minted;
+  if (want && want !== ctx.snapshotScope) {
+    const why = ctx.goneScopes.get(want) ?? 'a snapshot of another document replaced it';
+    throw staleRef(
+      target,
+      `it belongs to scope ${want} (${why}); the current scope is ${ctx.snapshotScope ?? 'none, no snapshot since'}`,
+      { scope: want, currentScope: ctx.snapshotScope },
+    );
+  }
+}
+
+/** Why a ref in the current scope no longer resolves. */
+async function whyRefGone(ctx: Ctx): Promise<string> {
+  const docNow = docIdOfMarker(await readFreshnessMarker(ctx));
+  if (docNow && ctx.snapshotDocId && docNow !== ctx.snapshotDocId) return 'the page navigated since the snapshot';
+  return 'the element is gone or was replaced (re-render, or its name or role changed)';
+}
+
 async function resolveRef(ctx: Ctx, target: string, page: Page): Promise<Locator> {
-  if (target.startsWith('@')) {
-    const key = target.slice(1);
-    const entry = ctx.refs.get(key);
-    if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
+  const ref = parseRef(target);
+  if (ref) {
+    checkRefScope(ctx, target, ref);
+    const entry = ctx.refs.get(ref.key);
+    if (!entry) throw staleRef(target, 'it is not in the latest snapshot');
     // An `aria-ref=` locator matches nothing once its element is gone or
-    // renamed, or once a newer ariaSnapshot replaced Playwright's ref cache.
-    // Fail here with the same wording instead of letting an action wait out
-    // its timeout (or, for the @c selector chains, hit a different element).
-    if (await entry.locator.count() === 0) {
-      throw new Error(
-        `Ref ${target} not found in the latest snapshot (element gone, renamed, or a newer snapshot replaced it). Run 'ghax snapshot' first.`,
-      );
-    }
+    // renamed, or once the document navigated. Fail here instead of letting
+    // an action wait out its timeout (or, for the @c selector chains, hit a
+    // different element).
+    const n = await entry.locator.count();
+    if (n === 0) throw staleRef(target, await whyRefGone(ctx));
+    if (n > 1) throw ambiguousTarget(target, n);
+    markDelivered();
     return entry.locator;
   }
-  return page.locator(target);
+  if (target.startsWith('@')) {
+    throw withRetry(new DaemonError(`${target} is not a ref: expected @e<n>, @c<n> or @s<n>:e<n>`, 2), 'safe');
+  }
+  const loc = page.locator(target);
+  // Zero matches still waits (the element may be about to appear); more than
+  // one is refused: acting on "the first" is a guess.
+  const n = await loc.count();
+  if (n > 1) throw ambiguousTarget(target, n);
+  markDelivered();
+  return loc;
 }
 
 function requireBridge(ctx: Ctx): Bridge {
@@ -875,7 +926,16 @@ function verbPeerState(ctx: Ctx, conn: BridgeConn = verbBridge(ctx)): PeerPageSt
   return conn.instanceId ? peerState(ctx, conn.instanceId) : newPeerPageState();
 }
 
-function clearSnapshotRefs(ctx: Ctx): void {
+function clearSnapshotRefs(ctx: Ctx, why = 'the tab changed or navigated'): void {
+  if (ctx.snapshotScope) {
+    ctx.goneScopes.set(ctx.snapshotScope, why);
+    if (ctx.goneScopes.size > 200) {
+      const oldest = ctx.goneScopes.keys().next().value;
+      if (oldest !== undefined) ctx.goneScopes.delete(oldest);
+    }
+  }
+  ctx.snapshotScope = null;
+  ctx.snapshotDocId = null;
   ctx.refs.clear();
   ctx.bridgeRefs.clear();
   // Forget identities but keep the counters: a number is never reused.
@@ -1067,7 +1127,7 @@ async function switchActivePeer(ctx: Ctx, selector: string): Promise<BridgeInsta
   const instance = await bridge.use(selector);
   const store = verbPeer.getStore();
   if (store) store.peer = instance.instanceId;
-  clearSnapshotRefs(ctx);
+  clearSnapshotRefs(ctx, 'the active browser changed');
   // A different browser means a different alias, so the active id changes
   // even when the chrome tab number happens to match.
   const controlled = bridge.controlledTabId;
@@ -1162,7 +1222,7 @@ async function listCdpTabs(ctx: Ctx): Promise<TabIdentity[]> {
  * browser) drops them.
  */
 function setActiveTab(ctx: Ctx, id: string | null): void {
-  if (ctx.activePageId !== id) clearSnapshotRefs(ctx);
+  if (ctx.activePageId !== id) clearSnapshotRefs(ctx, 'the active tab changed');
   ctx.activePageId = id;
   if (id !== null) ctx.activeTabClosed = false;
 }
@@ -1194,13 +1254,22 @@ function withTabIdentity(err: unknown, tab: TabIdentity): Error {
 }
 
 async function resolveBridgeTarget(ctx: Ctx, target: string): Promise<BridgeRef> {
-  if (target.startsWith('@')) {
-    const key = target.slice(1);
-    const entry = ctx.bridgeRefs.get(key);
-    if (!entry) throw new Error(`Ref ${target} not found. Run 'ghax snapshot' first.`);
+  const ref = parseRef(target);
+  if (ref) {
+    checkRefScope(ctx, target, ref);
+    const entry = ctx.bridgeRefs.get(ref.key);
+    if (!entry) throw staleRef(target, 'it is not in the latest snapshot');
+    // Liveness is checked where the handle is resolved (bridgeResolveHandle
+    // throws STALE_REF); anything after that may have reached the page.
+    markDelivered();
     return entry;
   }
-  return bridgeResolveSelector(verbBridge(ctx), target);
+  if (target.startsWith('@')) {
+    throw withRetry(new DaemonError(`${target} is not a ref: expected @e<n>, @c<n> or @s<n>:e<n>`, 2), 'safe');
+  }
+  const resolved = await bridgeResolveSelector(verbBridge(ctx), target);
+  markDelivered();
+  return resolved;
 }
 
 // ─── Command handlers ──────────────────────────────────────────
@@ -1222,7 +1291,7 @@ register('batch', async (ctx, args, opts) => {
   const snapshotHandler = handlers.get('snapshot');
   const results: Array<Record<string, unknown>> = [];
 
-  const REF_ARG = /^@[ec]\d+$/;
+  const REF_ARG = REF_RE;
   const refsOf = (step: { args?: unknown[]; opts?: Record<string, unknown> }): string[] => [
     ...(Array.isArray(step.args) ? step.args : []),
     ...Object.values(step.opts ?? {}),
@@ -1230,14 +1299,14 @@ register('batch', async (ctx, args, opts) => {
 
   for (const raw of steps) {
     if (!raw || typeof raw !== 'object') {
-      results.push({ cmd: '<invalid>', ok: false, error: 'step must be an object' });
+      results.push({ cmd: '<invalid>', ok: false, error: 'step must be an object', retry: 'safe' });
       if (stopOnError) break;
       continue;
     }
     const step = raw as { cmd?: unknown; args?: unknown; opts?: unknown };
     const cmd = typeof step.cmd === 'string' ? step.cmd : null;
     if (!cmd) {
-      results.push({ cmd: '<missing>', ok: false, error: 'step missing cmd' });
+      results.push({ cmd: '<missing>', ok: false, error: 'step missing cmd', retry: 'safe' });
       if (stopOnError) break;
       continue;
     }
@@ -1245,7 +1314,7 @@ register('batch', async (ctx, args, opts) => {
     const stepOpts = (step.opts && typeof step.opts === 'object') ? (step.opts as Record<string, unknown>) : {};
     const handler = handlers.get(cmd);
     if (!handler) {
-      results.push({ cmd, ok: false, error: `unknown cmd: ${cmd}` });
+      results.push({ cmd, ok: false, error: `unknown cmd: ${cmd}`, retry: 'safe' });
       if (stopOnError) break;
       continue;
     }
@@ -1266,7 +1335,7 @@ register('batch', async (ctx, args, opts) => {
       const docNow = docIdOfMarker(current);
       const foreign = docNow
         ? stepRefs.find((r) => {
-          const d = ctx.refRegistry.docOf(r.slice(1));
+          const d = ctx.refRegistry.docOf(parseRef(r)!.key);
           return d !== undefined && !d.startsWith('unknown:') && d !== docNow;
         })
         : undefined;
@@ -1274,9 +1343,11 @@ register('batch', async (ctx, args, opts) => {
         results.push({
           cmd,
           ok: false,
-          code: 'BRIDGE_REF_STALE',
-          error: `${foreign} was taken on a page that is no longer loaded (the tab navigated since). `
-            + `Run 'ghax snapshot -i' and use a fresh ref.`,
+          code: 'STALE_REF',
+          retry: 'safe',
+          exitCode: 6,
+          error: `${foreign} is stale: it was taken on a page that is no longer loaded (the tab navigated since)`,
+          hint: "run 'ghax snapshot -i' and use a ref from it",
         });
         return stopOnError;
       }
@@ -1303,34 +1374,53 @@ register('batch', async (ctx, args, opts) => {
       const snapField = autoSnap ? { autoSnapshot: autoSnap } : {};
       const t0 = Date.now();
       try {
-        const data = await handler(ctx, stepArgs, stepOpts);
+        const data = await withDispatchScope(cmd, stepOpts, () => handler(ctx, stepArgs, stepOpts));
         const ms = Date.now() - t0;
         // A failed expect is a result, not a throw (see src/expect.ts). It ends
         // the plan whatever stopOnError says: the checks after it assume it held.
         if (cmd === 'expect' && (data as { ok?: boolean } | null)?.ok === false) {
           const r = data as ExpectResultLike;
           results.push({
-            cmd, ok: false, code: r.code === 'EXPECT_ERROR' ? 'EXPECT_ERROR' : 'EXPECT_FAILED', error: r.message, step: results.length,
+            cmd, ok: false, code: r.code === 'EXPECT_ERROR' ? 'EXPECT_ERROR' : 'EXPECT_FAILED', retry: 'safe', error: r.message, step: results.length,
             expect: r.expect, expected: r.expected, actual: r.actual, elapsedMs: r.elapsedMs, ms, ...snapField,
           });
           return true;
         }
         // A nested batch stopped on an expect: the outer plan stops too, with
         // the same code, so the CLI maps it to the same exit.
+        // An unsafe inner failure stops the outer plan too: the steps after it
+        // assume a state nobody can vouch for.
         if (cmd === 'batch' && Array.isArray(data)) {
-          const inner = (data as Array<{ code?: string; error?: string }>).find(
-            (s) => s && (s.code === 'EXPECT_FAILED' || s.code === 'EXPECT_ERROR'),
+          const inner = (data as Array<{ code?: string; error?: string; retry?: string }>).find(
+            (s) => s && (s.code === 'EXPECT_FAILED' || s.code === 'EXPECT_ERROR' || (s as { ok?: boolean }).ok === false && s.retry === 'unsafe'),
           );
           if (inner) {
-            results.push({ cmd, ok: false, code: inner.code, error: inner.error, step: results.length, data, ms, ...snapField });
+            results.push({
+              cmd, ok: false, ...(inner.code ? { code: inner.code } : {}), ...(inner.retry ? { retry: inner.retry } : {}),
+              error: inner.error, step: results.length, data, ms, ...snapField,
+            });
             return true;
           }
         }
         results.push({ cmd, ok: true, data, ms, ...snapField });
         return false;
       } catch (err) {
-        results.push({ cmd, ok: false, error: String((err as { message?: string } | null)?.message ?? err), ms: Date.now() - t0, ...snapField });
-        return stopOnError;
+        const e = err as { message?: string; code?: unknown; hint?: unknown; exitCode?: unknown; retry?: unknown } | null;
+        const retry = retryOf(err, cmd, stepOpts);
+        results.push({
+          cmd,
+          ok: false,
+          error: String(e?.message ?? err),
+          ...(typeof e?.code === 'string' ? { code: e.code } : {}),
+          ...(typeof e?.exitCode === 'number' ? { exitCode: e.exitCode } : {}),
+          ...(typeof e?.hint === 'string' ? { hint: e.hint } : {}),
+          retry,
+          ms: Date.now() - t0,
+          ...snapField,
+        });
+        // An action that may have landed ends the plan whatever stopOnError
+        // says: the next step would run against a state nobody can vouch for.
+        return stopOnError || retry === 'unsafe';
       }
     });
     if (stop) break;
@@ -1732,7 +1822,7 @@ register('goto', async (ctx, args, opts) => {
   const url = String(args[0] ?? '');
   if (!url) throw new Error('Usage: goto <url>');
   if (ctx.bridgeMode) {
-    clearSnapshotRefs(ctx);
+    clearSnapshotRefs(ctx, 'the tab navigated (goto)');
     const result = await bridgeGoto(verbBridge(ctx), url);
     // --stable turns goto into "navigate AND wait for the SPA to settle",
     // which is what most callers actually want before their first read.
@@ -1804,7 +1894,7 @@ async function bridgeHistoryNav(ctx: Ctx, direction: -1 | 1): Promise<HistoryNav
   const index = history.currentIndex ?? 0;
   const sourceId = history.entries?.[index]?.id ?? null;
   const target = history.entries?.[index + direction];
-  clearSnapshotRefs(ctx);
+  clearSnapshotRefs(ctx, 'the tab navigated (history)');
   if (!target) {
     // No entry that way — a no-op, honestly reported.
     return { url: String(await bridgeEvaluate(bridge, 'location.href').catch(() => '')), outcome: 'succeeded' };
@@ -1847,7 +1937,7 @@ register('reload', async (ctx) => {
   if (ctx.bridgeMode) {
     const bridge = verbBridge(ctx);
     await bridge.send('Page.reload', {});
-    clearSnapshotRefs(ctx);
+    clearSnapshotRefs(ctx, 'the tab reloaded');
     return { url: String(await bridgeEvaluate(bridge, 'location.href').catch(() => '')) };
   }
   const page = await activePage(ctx);
@@ -2357,6 +2447,13 @@ register('snapshot', async (ctx, _args, opts) => {
   // later document, which errs toward "stale", never toward a wrong element.
   const docId = docIdOfMarker(marker) ?? `unknown:${crypto.randomUUID()}`;
   const refAllocator = ctx.refRegistry.forDoc(docId);
+  const scope = ctx.refRegistry.scopeOf(docId);
+  // Same document as the last snapshot: same scope, and refs stay put.
+  const adoptScope = () => {
+    if (ctx.snapshotScope && ctx.snapshotScope !== scope) ctx.goneScopes.set(ctx.snapshotScope, 'a snapshot of another document replaced it');
+    ctx.snapshotScope = scope;
+    ctx.snapshotDocId = docId;
+  };
   if (ctx.bridgeMode) {
     const bridge = verbBridge(ctx);
     const selector = (opts.selector as string | undefined) ?? null;
@@ -2381,6 +2478,7 @@ register('snapshot', async (ctx, _args, opts) => {
     }
     ctx.refs.clear();
     ctx.bridgeRefs = result.refs;
+    adoptScope();
     // Only a whole-page snapshot may vouch for "unchanged since": after a
     // --selector or modal snapshot the ref map holds that subtree only, and
     // batch skipping its re-snapshot would turn any ref outside it into
@@ -2392,6 +2490,7 @@ register('snapshot', async (ctx, _args, opts) => {
       await annotateBridgeScreenshot(bridge, result.refs, annotatedPath);
     }
     return {
+      scope,
       ...budgetFields(applySnapshotBudget(applyGrep(result.text.split('\n'), opts), budget)),
       ...(annotatedPath ? { annotatedPath } : {}),
       ...(possiblyIncomplete ? {
@@ -2413,6 +2512,7 @@ register('snapshot', async (ctx, _args, opts) => {
     refs: refAllocator,
   });
   ctx.refs = result.refs;
+  adoptScope();
   ctx.lastSnapshotMarker = result.scoped ? null : marker; // see the bridge branch
 
 
@@ -2423,6 +2523,7 @@ register('snapshot', async (ctx, _args, opts) => {
   }
 
   return {
+    scope,
     ...budgetFields(applySnapshotBudget(applyGrep(result.text.split('\n'), opts), budget)),
     ...(annotatedPath ? { annotatedPath } : {}),
   };
@@ -3087,7 +3188,7 @@ register('press', async (ctx, args) => {
 // Bridge mode: same DOM.setFileInputFiles CDP call, just dispatched via
 // chrome.debugger instead of Playwright's local connectOverCDP transport.
 // The ref resolves to a Runtime object (the same handle click/fill use, so a
-// cursor ref works and a vanished node is BRIDGE_REF_STALE), which
+// cursor ref works and a vanished node is STALE_REF), which
 // DOM.setFileInputFiles accepts as `objectId`. The one
 // real difference from the non-bridge path: there is no Playwright to
 // resolve a relative path for you, and `path.resolve()` on the daemon side
@@ -3634,14 +3735,13 @@ const TEXT_FN = (el: Element): string => (el as HTMLElement).innerText;
 type ProbeFn = (el: Element) => string;
 
 function expectProbes(ctx: Ctx): ExpectProbes {
-  const isRef = (t: string) => /^@[ec]\d+$/.test(t);
+  const isRef = (t: string) => REF_RE.test(t);
   const pageEval = async (js: string): Promise<unknown> =>
     ctx.bridgeMode ? bridgeEval(ctx, js) : evalWithNavRetry(await activePage(ctx), js);
   // A ref whose element is gone is "absent", not an error: `hidden @e3` after a
   // dialog closes is the normal way to say it worked.
   const goneRef = (err: unknown): boolean =>
-    (err as { code?: string } | null)?.code === 'BRIDGE_REF_STALE'
-    || /not found in the latest snapshot/.test(String((err as Error | null)?.message ?? ''));
+    (err as { code?: string } | null)?.code === 'STALE_REF';
 
   // Runs `fnSrc(el)` on the target. undefined: nothing matched.
   const onTarget = async (target: string, fn: ProbeFn): Promise<unknown> => {
@@ -5046,6 +5146,9 @@ async function main() {
     refs: new Map(),
     bridgeRefs: new Map(),
     refRegistry: new RefRegistry(),
+    snapshotScope: null,
+    snapshotDocId: null,
+    goneScopes: new Map(),
     lastSnapshotMarker: null,
     bridgePeers: new Map(),
     instrumented: new WeakSet<Page>(),
@@ -5068,7 +5171,7 @@ async function main() {
     // composed with the active alias would point at the wrong browser.
     // (Per-peer page state resets in wireBridgePageEvents for every peer.)
     bridge.onActive('controlled', (tabId: number | null) => {
-      clearSnapshotRefs(ctx);
+      clearSnapshotRefs(ctx, 'the controlled tab changed');
       ctx.activePageId = tabId === null ? null : bridgeTabId(ctx, tabId);
     });
     // Domains go on per peer, active or not: a browser that is never made
@@ -5330,7 +5433,7 @@ async function main() {
         };
       };
       try {
-        const data = await dispatch(body.cmd, body.args ?? [], rpcOpts);
+        const data = await withDispatchScope(body.cmd!, rpcOpts, () => dispatch(body.cmd!, body.args ?? [], rpcOpts));
         json(res, 200, { ok: true, data, ...buildTrace() });
       } catch (err: any) {
         log(`rpc ${body.cmd} failed: ${err.message}`);
@@ -5341,6 +5444,7 @@ async function main() {
         json(res, 500, {
           ok: false,
           error: err.message || String(err),
+          retry: retryOf(err, body.cmd ?? "", rpcOpts),
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(code !== undefined ? { code } : {}),
           ...(hint !== undefined ? { hint } : {}),

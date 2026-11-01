@@ -1063,7 +1063,7 @@ async function main(): Promise<void> {
     return ext;
   };
 
-  await test('guard: a gone backend node becomes BRIDGE_REF_STALE', async () => {
+  await test('guard: a gone backend node becomes STALE_REF', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-stale');
       ext.replies.set('DOM.resolveNode', () => { throw new Error('No node with given id found'); });
@@ -1074,7 +1074,7 @@ async function main(): Promise<void> {
         .catch((e) => { caught = e; });
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
-      assert(e.code === 'BRIDGE_REF_STALE', `code ${e.code}`);
+      assert(e.code === 'STALE_REF', `code ${e.code}`);
       assert(/@e3 is gone/.test(e.hint) && /snapshot -i/.test(e.hint), `hint: ${e.hint}`);
     });
   });
@@ -1117,7 +1117,7 @@ async function main(): Promise<void> {
       ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
       caught = null;
       await bridgeGuard(bridge.pinned(), h, '@e2', 'fill', false).catch((e) => { caught = e; });
-      assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
+      assert(caught?.code === 'STALE_REF', `detached should read as stale, got ${caught?.code}`);
     });
   });
 
@@ -1451,7 +1451,7 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('snapshot: cursor refs resolve lazily, and a gone node is BRIDGE_REF_STALE', async () => {
+  await test('snapshot: cursor refs resolve lazily, and a gone node is STALE_REF', async () => {
     await withBridge(async (bridge, port) => {
       const { ext, liveCursor } = snapshotExt(port, 2, 2);
       await ext.connect();
@@ -1463,7 +1463,7 @@ async function main(): Promise<void> {
       liveCursor.delete(2);
       let caught: any = null;
       await bridgeResolveHandle(bridge.pinned(), c2, '@c2').catch((e) => { caught = e; });
-      assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
+      assert(caught?.code === 'STALE_REF', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
   });
 
