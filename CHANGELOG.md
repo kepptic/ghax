@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.16.1] - 2026-11-01
 ### Fixed
 - Bridge extension provenance is now baked in when the service worker script loads (`extension/build-info.js`, statically imported) instead of fetched from disk at runtime. A worker that was never reloaded used to run old code while reporting the new on-disk version, so `ghax version --full` showed no mismatch (seen live: v0.16.0 extension replying `unknown control action: new-tab`). `extension/build-info.json` is gone.
 
@@ -1870,7 +1873,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/kepptic/ghax/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/kepptic/ghax/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kepptic/ghax/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/kepptic/ghax/compare/v0.13.0...v0.14.0
