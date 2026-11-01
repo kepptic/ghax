@@ -191,10 +191,11 @@ ariaSnapshot taken in that frame (`_lastAriaSnapshotForQuery`), requires
 - A locator-scoped snapshot (modal, `--selector`) sets the cache to that
   subtree, so modal scoping needs no locator re-rooting any more.
 
-`resolveRef` checks `count() === 0` before acting and fails with "not
-found in the latest snapshot ... Run 'ghax snapshot' first", so a gone
-or renamed element never waits out an action timeout or lands on a
-neighbour. Playwright prefixes refs with `f<seq>` for iframes AND for
+`resolveRef` checks `count()` before acting: zero is `STALE_REF`
+(exit 6), more than one is `AMBIGUOUS_TARGET` (exit 7), so a gone or
+renamed element never waits out an action timeout or lands on a
+neighbour. Both are `TargetError`s (`src/errors.ts`) and always
+`retry: "safe"`. Playwright prefixes refs with `f<seq>` for iframes AND for
 the main frame once it has navigated away from a real document (it
 renumbers the main frame so old refs can't resolve in the new one). ghax
 prints and keys the `e<n>` part, keeps the full string in the `aria-ref=`
@@ -209,7 +210,30 @@ daemon's lifetime, keyed by (freshness-marker document id, transport key:
 `p<playwright ref>`, `b<backendNodeId>`, cursor ids). A tab change or
 navigation forgets identities but keeps the counters, so a number is
 never handed to a second element, and `docOf(ref)` lets `batch` refuse a
-ref minted on a document that is no longer loaded (`BRIDGE_REF_STALE`).
+ref minted on a document that is no longer loaded (`STALE_REF`).
+
+**Scopes.** `scopeOf(docId)` gives each document a token `s<N>` (also
+monotonic, never reused). A snapshot reports it (`scope` in the result)
+and records it as `ctx.snapshotScope`. Refs are accepted bare (`@e8`) or
+qualified (`@s3:e8`); `checkRefScope` runs before any page work and
+refuses a ref the counter never issued, a qualified ref whose number was
+minted in a different scope, and any ref whose scope is not the current
+one. Bare refs stay safe because numbers are daemon-wide unique and
+`docOf` remembers each one's document: a bare ref from another document
+fails exactly like a qualified one. `clearSnapshotRefs(ctx, why)` (tab
+switch, bridge navigation) parks the old scope in `ctx.goneScopes` so the
+`STALE_REF` message says why it ended. Re-snapshotting the same document
+keeps the same scope and, through the registry, the same refs.
+
+**Retry disposition.** Every RPC error carries `retry`. Each RPC and each
+`batch` step runs in `withDispatchScope` (an `AsyncLocalStorage` flag);
+`resolveRef`/`resolveBridgeTarget` call `markDelivered()` once a target
+resolved. `retryOf` then decides: an explicit `retry` on the error wins
+(`TargetError`, `STALE_REF` and `BRIDGE_TARGET_NOT_ACTIONABLE` are
+`safe`: they fire before input is sent); a read-only verb is `safe`; a
+usage error (exit 1/2) is `safe`; otherwise `unsafe` if a target had
+resolved and `unknown` if not. `batch` and the CLI's `chain` stop on
+`unsafe` whatever `stopOnError` says.
 
 Over the bridge the daemon keeps the same promise itself:
 the registry keys a backend node id to `{ref, role, name}`, a
@@ -262,7 +286,8 @@ Nothing is written into the DOM. `@e` refs keep the AX node's backend id;
 id, so the same element keeps its id across snapshots, plus an id to
 element `Map` pruned of disconnected nodes). A cursor ref is looked up
 only when a verb acts on it; a missing registry or a disconnected node is
-`BRIDGE_REF_STALE`, never a best guess.
+`STALE_REF`, never a best guess. A selector resolves only when it matches
+exactly one element; more is `AMBIGUOUS_TARGET`.
 
 Before acting, bridge `click`/`fill`/`upload` run `src/actionability.ts`
 in the page (one `Runtime.callFunctionOn` on the resolved node). For
@@ -282,7 +307,7 @@ rendered child, as in Playwright's `computeBox`), scroll to centre, and
 `expectHitTarget`'s root-chain hit test, repeated once after centring
 when the first test finds a coverer (sticky headers). The function is shipped with `toString()`, so it must stay
 self-contained. A refusal is `BRIDGE_TARGET_NOT_ACTIONABLE` with a
-reason; a node that no longer exists is `BRIDGE_REF_STALE`. `--force`
+reason; a node that no longer exists is `STALE_REF`. `--force`
 skips everything but "connected" and the rect. The Playwright path runs
 the same function in `precheck` mode (inherited `aria-disabled` and
 `inert` only) because Playwright's own actionability waits out its timeout

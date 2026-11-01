@@ -269,7 +269,9 @@ One tab, one agent. `ghax tabs --json` has `controlledBy` (`{port, pid, name, cw
 - `ghax snapshot --grep <regex> [--context N]` prints only the matching lines, their ancestors and N lines after each, before the cap below. Refs still all resolve. `ghax screenshot --path-only` prints just the path. `ghax eval <js> --timeout <ms>` raises the bridge's 30 s eval deadline; `--no-wait` fires the code on a timer and returns at once (errors go to `ghax console`). `ghax gesture scroll down 300 --on @e7` aims the wheel at that element.
 - `ghax screenshot --region x0,y0,x1,y1 [--scale 0.1..4]` captures a viewport rectangle in CSS pixels (a 2x zoom unless `--scale` is given); `--json` reports `scale`, `region` and the image size so `x = x0 + px/scale` maps back to click coordinates. `ghax window size [<WxH>] [--window <id>]` reads or sets the browser window's outer size on both transports (a headed browser; bridge users run `ghax bridge reload` once to get the new extension action).
 - Snapshots print at most 250 refs / 32 KB by default and end with `… N more refs omitted` when they cut, so a huge page doesn't flood an agent's context. Every ref stays clickable. Narrow with `--selector`/`--depth`, or lift it with `--max-refs <n>`, `--max-chars <n>`, `--no-cap`.
-- Stable refs on both transports. On CDP a ref is minted by Playwright and cached on the element; over the bridge the daemon keeps the same mapping itself. Either way `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with "not found in the latest snapshot" rather than landing on a neighbour.
+- Stable refs on both transports. On CDP a ref is minted by Playwright and cached on the element; over the bridge the daemon keeps the same mapping itself. Either way `@e12` stays `@e12` across re-snapshots of the same document, and an element inserted above it gets a new number instead of shifting everyone. Numbering is sparse as a result. A ref whose element is gone fails fast with `STALE_REF` (exit 6) rather than landing on a neighbour.
+- Scoped refs. Each snapshot has a `scope` (`s3`, one per document; `snapshot --json` prints it). `@s3:e8` names the scope explicitly; bare `@e8` means the current one. A ref from another tab or an older document is refused as `STALE_REF` before anything is sent, and a selector or ref matching more than one element is `AMBIGUOUS_TARGET` (exit 7). ghax never picks "the first match".
+- Retry disposition. Every error carries `retry`: `safe` (the action provably never reached the page, run it again), `unsafe` (the target resolved and the action was handed over, so check the page first) or `unknown`. `--json` prints the error object on stdout; `batch` and `chain` stop on an `unsafe` step.
 - `ghax find-el "second delete button"` finds an element from a plain description and prints the best matches as `@e12  87  button "Save changes"  (name, role)`, with a `confidence` line on stderr. It scores the `snapshot` text (name, role hint, placeholder, disabled/checked state, ordinals, nearby labels and ancestor names), so it is deterministic, makes no LLM call, and works on CDP and the bridge. The refs it returns are clickable straight away. `--top N` (5), `--min-score N` (20), `--interactive-only`, `--json`; an empty result exits `4`. `--rerank-cmd <cmd>` pipes the top 20 candidates to your own command as `{query, candidates}` on stdin and reads back a reordered `[{ref, score}]`: the only place a model can come in, and it stays on the CLI side.
 - Dialog-aware walker. When a modal is open, snapshots walk the modal instead of the `aria-hidden="true"` app behind it.
 - Shadow-DOM traversal. Chain selectors (`host >> inner`) descend into open shadow roots for custom-element apps (Lit, Shoelace, web components).
@@ -312,7 +314,7 @@ hint: something is on top of it (div#consent.banner "Accept cookies"): dismiss i
 ```
 
 `--force` skips the checks. A ref whose element was re-rendered away fails
-as `BRIDGE_REF_STALE`: re-snapshot and use a fresh ref.
+as `STALE_REF`: re-snapshot and use a fresh ref.
 
 ### Downloads
 
@@ -374,7 +376,7 @@ ghax --help           # full surface — authoritative
 ghax --help | less    # scroll it
 ```
 
-Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error or failed `expect` (an `expect` that could not run, e.g. bridge disconnect, is `4`), `2` not attached, `4` CDP error, `10` build/bootstrap failure.
+Every verb accepts `--json` for machine-readable output. Exit codes: `0` ok, `1` usage error or failed `expect` (an `expect` that could not run, e.g. bridge disconnect, is `4`), `2` not attached, `4` CDP error, `6` `STALE_REF`, `7` `AMBIGUOUS_TARGET`, `10` build/bootstrap failure. A failure under `--json` also prints `{ok:false, error, code?, retry, hint?, exitCode?}` on stdout.
 
 ---
 

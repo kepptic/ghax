@@ -5,8 +5,29 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-
-_No changes yet._
+### Changed (breaking)
+- **Refs are scoped to a document, and a stale or ambiguous target fails
+  closed with its own code.** Ideas borrowed from vercel-labs/agent-desktop.
+  Every snapshot now reports a `scope` (`s3`, one per document, never
+  reused) and every verb takes a qualified ref `@s3:e8` as well as a bare
+  `@e8`, which means "the current scope". A ref from another tab, another
+  document, or a scope that does not match is refused before anything is
+  sent, as `STALE_REF` (exit 6); so is a ref whose element is gone. The old
+  `BRIDGE_REF_STALE` code and the "not found in the latest snapshot" wording
+  are gone. A selector or ref that matches more than one element is
+  `AMBIGUOUS_TARGET` (exit 7) on both transports: the bridge used to act on
+  the first `querySelector` match, CDP left it to Playwright's strict mode.
+- **Every daemon error carries `retry: "safe" | "unsafe" | "unknown"`.**
+  `safe` only when the action provably never reached the page (the target
+  failed to resolve, bad arguments, or a read). Once a click/fill target
+  resolved, a failure is `unsafe`: it may have landed. With `--json` the CLI
+  now also prints `{ok:false, error, code?, retry, hint?, exitCode?}` on
+  stdout (the human message stays on stderr), and prints `code: X (retry: Y)`
+  on stderr for typed errors. `batch` and `chain` stop on an `unsafe` step
+  even with `stopOnError` off, `batch` step results carry `code`/`retry`/
+  `exitCode`, and `batch` exits 6/7 when a step failed that way.
+  `batch --stopOnError=false` from the CLI now actually turns it off (the
+  daemon only accepted a boolean).
 
 ## [0.16.2] - 2026-11-01
 ### Fixed
