@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.16.2] - 2026-11-01
 ### Fixed
 - `npm run sync-local` now reloads the bridge extension in EVERY connected browser. With Chrome and Edge both running it, `attach --extension` reports `BRIDGE_AMBIGUOUS`, which used to skip the reload; the script now attaches on its private state file, walks `bridge instances`, and runs `bridge use` + `bridge reload` per instance. It reports each result, prints the manual `edge://extensions` step for a pre-reload extension that doesn't ack, and runs every ghax call under `timeout`.
 - `extension/build-info.js` is no longer tracked, so `npm run build` leaves the tree clean and no `git update-index --skip-worktree` is needed. That flag made `git rebase`/`checkout` abort with "commit your changes" while `git status` looked clean. `npm install` (postinstall, `scripts/ensure-ext-build-info.mjs`) writes a null stub if the file is missing, so a fresh clone still loads unpacked; the build overwrites it with real provenance. If you hit the old problem, run `git update-index --no-skip-worktree extension/build-info.js` once before pulling this.
@@ -1875,7 +1878,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/kepptic/ghax/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/kepptic/ghax/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/kepptic/ghax/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/kepptic/ghax/compare/v0.14.0...v0.15.0
