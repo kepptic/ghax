@@ -60,22 +60,14 @@ const info = {
 // Written for the bridge extension. A service worker can't shell out to git,
 // and extension/background.js statically imports this file, so provenance is
 // captured at SW script load and cached with it: a never-reloaded worker keeps
-// its OLD values and `ghax version --full` can flag it. The checked-in stub is
-// marked skip-worktree (best effort) so rebuilding doesn't dirty the tree.
+// its OLD values and `ghax version --full` can flag it. The file is
+// gitignored (nothing tracked changes on rebuild); scripts/ensure-ext-build-info.mjs
+// writes a null stub on `npm install` so a fresh clone still loads unpacked.
 const extInfoPath = join(repoRoot, 'extension', 'build-info.js');
 writeFileSync(
   extInfoPath,
   `self.GHAX_BUILD_INFO = ${JSON.stringify(info)};\n`,
 );
-try {
-  execFileSync('git', ['update-index', '--skip-worktree', 'extension/build-info.js'], {
-    cwd: repoRoot,
-    stdio: 'ignore',
-  });
-} catch {
-  // not a git checkout (tarball) — nothing to hide
-}
-
 await build({
   entryPoints: [join(repoRoot, 'src', 'daemon.ts')],
   bundle: true,
