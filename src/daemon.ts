@@ -1286,7 +1286,8 @@ register('batch', async (ctx, args, opts) => {
   if (!steps || steps.length === 0) {
     throw new Error('Usage: batch \'[{"cmd":"click","args":["@e7"]}, …]\'');
   }
-  const stopOnError = opts.stopOnError !== false;
+  // `--stopOnError=false` from the CLI arrives as the string.
+  const stopOnError = opts.stopOnError !== false && opts.stopOnError !== 'false';
   const autoSnapshot = opts['auto-snapshot'] !== false && opts.autoSnapshot !== false;
   const snapshotHandler = handlers.get('snapshot');
   const results: Array<Record<string, unknown>> = [];

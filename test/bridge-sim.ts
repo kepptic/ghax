@@ -34,6 +34,7 @@ import {
   bridgeGuard,
   bridgeReleaseHandle,
   bridgeResolveHandle,
+  bridgeResolveSelector,
   bridgeRefStillMatches,
   bridgeSnapshot,
   isStaleContextError,
@@ -1074,8 +1075,25 @@ async function main(): Promise<void> {
         .catch((e) => { caught = e; });
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
-      assert(e.code === 'STALE_REF', `code ${e.code}`);
+      assert(e.code === 'STALE_REF' && (e as unknown as { retry?: string }).retry === 'safe', `code ${e.code}`);
       assert(/@e3 is gone/.test(e.hint) && /snapshot -i/.test(e.hint), `hint: ${e.hint}`);
+    });
+  });
+
+  await test('selector: more than one match is AMBIGUOUS_TARGET (retry-safe), never the first', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-ambig');
+      // The single-match probe returns null; the count probe says 3.
+      ext.replies.set('Runtime.evaluate', (params: Record<string, unknown>) => (params.returnByValue === false
+        ? { result: { type: 'object', subtype: 'null' } }
+        : { result: { type: 'number', value: 3 } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: any = null;
+      await bridgeResolveSelector(bridge.pinned(), '.item').catch((e) => { caught = e; });
+      assert(caught?.code === 'AMBIGUOUS_TARGET' && caught?.retry === 'safe' && caught?.exitCode === 7, `got ${caught?.code}/${caught?.retry}: ${caught?.message}`);
+      assert(/matches 3 elements/.test(caught.message), caught.message);
+      assert(!ext.received.includes('DOM.describeNode'), 'nothing may be resolved for an ambiguous selector');
     });
   });
 

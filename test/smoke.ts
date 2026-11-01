@@ -748,7 +748,7 @@ c('modal-scoped refs do not resolve outside the modal', async () => {
   const modalSnap = await run(['snapshot', '-i']);
   assert(!modalSnap.stdout.includes('"Outside"'), `modal scope should hide the outside button:\n${modalSnap.stdout}`);
   const r = await run(['click', outside], { allowFailure: true });
-  assert(r.exitCode === 4 && /Run 'ghax snapshot' first/.test(r.stderr), `old ref should fail: exit=${r.exitCode} ${r.stderr}`);
+  assert(r.exitCode === 6 && /STALE_REF/.test(r.stderr), `old ref should fail as STALE_REF: exit=${r.exitCode} ${r.stderr}`);
   const flag = await run(['eval', 'String(!!window.__outside)']);
   assert(flag.stdout.trim() === 'false', 'the outside button must not have been clicked');
 });
@@ -783,16 +783,72 @@ c('refs are stable across snapshots: an insertion above does not shift them', as
   assert(linked.stdout.trim() === '1', `stable ref should still click the link, __linked=${linked.stdout.trim()}`);
 });
 
-c('a ref whose element was removed fails as stale, exit 4', async () => {
+c('a ref whose element was removed fails as STALE_REF, exit 6', async () => {
   const html = `<button id="gone">Vanish</button><button>Stay</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
   const ref = await snapRef('button', 'Vanish');
   await run(['eval', `document.getElementById('gone').remove(); 'ok'`]);
   const started = Date.now();
   const r = await run(['click', ref], { allowFailure: true });
-  assert(r.exitCode === 4, `expected exit 4, got ${r.exitCode}: ${r.stderr}`);
-  assert(/not found in the latest snapshot/.test(r.stderr), `expected the stale-ref message: ${r.stderr}`);
+  assert(r.exitCode === 6, `expected exit 6, got ${r.exitCode}: ${r.stderr}`);
+  assert(/is stale: the element is gone/.test(r.stderr) && /code: STALE_REF \(retry: safe\)/.test(r.stderr), `expected the stale-ref message: ${r.stderr}`);
   assert(Date.now() - started < 10_000, 'stale ref must fail fast, not wait out the action timeout');
+});
+
+c('scoped refs: @<scope>:eN clicks; a ref from an older document is STALE_REF', async () => {
+  const pageA = `data:text/html,${encodeURIComponent('<button onclick="window.__a=(window.__a||0)+1">Go</button>')}`;
+  const pageB = `data:text/html,${encodeURIComponent('<button onclick="window.__b=1">Go</button>')}`;
+  await run(['goto', pageA]);
+  const snapA = parseJson<{ scope: string; text: string }>((await run(['snapshot', '-i', '--json'])).stdout);
+  assert(/^s\d+$/.test(snapA.scope), `snapshot --json should carry a scope: ${JSON.stringify(snapA.scope)}`);
+  const ref = refOf(snapA.text, 'button', 'Go');
+  // Same document again: same scope, same ref (registry stability).
+  const again = parseJson<{ scope: string; text: string }>((await run(['snapshot', '-i', '--json'])).stdout);
+  assert(again.scope === snapA.scope && refOf(again.text, 'button', 'Go') === ref, 'a re-snapshot of the same document keeps scope and ref');
+  const qualified = `@${snapA.scope}:${ref.slice(1)}`;
+  await run(['click', qualified]);
+  assert((await run(['eval', 'String(window.__a || 0)'])).stdout.trim() === '1', 'qualified ref should click');
+  await run(['goto', pageB]);
+  const snapB = parseJson<{ scope: string }>((await run(['snapshot', '-i', '--json'])).stdout);
+  assert(snapB.scope !== snapA.scope, 'a new document gets a new scope');
+  for (const t of [qualified, ref]) {
+    const r = await run(['click', t, '--json'], { allowFailure: true });
+    assert(r.exitCode === 6, `${t} from page A should exit 6, got ${r.exitCode}: ${r.stdout}${r.stderr}`);
+    const e = parseJson<{ ok: boolean; code: string; retry: string }>(r.stdout);
+    assert(e.ok === false && e.code === 'STALE_REF' && e.retry === 'safe', `expected STALE_REF/safe: ${r.stdout}`);
+  }
+  // A qualified ref naming the wrong scope is refused even if the number exists.
+  const wrong = await run(['click', `@${snapB.scope}:${ref.slice(1)}`], { allowFailure: true });
+  assert(wrong.exitCode === 6, `mis-scoped ref should be STALE_REF: ${wrong.stderr}`);
+  assert((await run(['eval', 'String(window.__b || 0)'])).stdout.trim() === '0', "page B's button must not have been clicked");
+});
+
+c('a selector matching more than one element is AMBIGUOUS_TARGET, exit 7, nothing clicked', async () => {
+  const html = `<button class="b" onclick="window.__n=(window.__n||0)+1">One</button><button class="b" onclick="window.__n=(window.__n||0)+1">Two</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['click', '.b', '--json'], { allowFailure: true });
+  assert(r.exitCode === 7, `expected exit 7, got ${r.exitCode}: ${r.stdout}${r.stderr}`);
+  const e = parseJson<{ code: string; retry: string; error: string }>(r.stdout);
+  assert(e.code === 'AMBIGUOUS_TARGET' && e.retry === 'safe' && /matches 2 elements/.test(e.error), `bad error: ${r.stdout}`);
+  assert((await run(['eval', 'String(window.__n || 0)'])).stdout.trim() === '0', 'no button may be clicked');
+});
+
+c('retry disposition: an action that failed after dispatch is unsafe and ends a batch', async () => {
+  const html = `<div id="d">not an input</div><button onclick="window.__after=1">After</button>`;
+  await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  const r = await run(['batch', JSON.stringify([
+    { cmd: 'fill', args: ['#d', 'x'] },
+    { cmd: 'click', args: ['button'] },
+  ]), '--stopOnError=false'], { allowFailure: true });
+  const steps = parseJson<Array<{ cmd: string; ok: boolean; retry?: string }>>(r.stdout);
+  assert(steps.length === 1 && steps[0].ok === false && steps[0].retry === 'unsafe',
+    `fill on a div resolves, then fails: unsafe, and the plan stops: ${r.stdout}`);
+  assert((await run(['eval', 'String(window.__after || 0)'])).stdout.trim() === '0', 'the step after an unsafe failure must not run');
+  // A read that fails is always safe.
+  const read = await run(['snapshot', '-s', '#nope-not-here', '--json'], { allowFailure: true });
+  assert(read.exitCode !== 0, 'snapshot of a missing selector should fail');
+  const e = parseJson<{ retry: string }>(read.stdout);
+  assert(e.retry === 'safe', `a failed read is retry-safe: ${read.stdout}`);
 });
 
 c('snapshot -d limits depth', async () => {
@@ -887,7 +943,7 @@ c('batch skips the auto re-snapshot when the page has not changed', async () => 
 c('batch refuses a ref from a page the tab navigated away from (never clicks page B)', async () => {
   // Review finding 1: [snapshot, navigate, click old-ref] used to resolve the
   // old number against page B. Numbers are daemon-wide and never reused, and
-  // a ref minted on another document fails as BRIDGE_REF_STALE.
+  // a ref minted on another document fails as STALE_REF.
   const pageA = `data:text/html,${encodeURIComponent('<button onclick="window.__a=1">Go</button><button>Other</button>')}`;
   const pageB = `data:text/html,${encodeURIComponent('<button>Other</button><button onclick="window.__b=1">Go</button>')}`;
   await run(['goto', pageA]);
@@ -897,9 +953,9 @@ c('batch refuses a ref from a page the tab navigated away from (never clicks pag
     { cmd: 'goto', args: [pageB] },
     { cmd: 'click', args: [oldRef] },
   ])], { allowFailure: true });
-  assert(r.exitCode === 4, `batch should exit 4, got ${r.exitCode}: ${r.stdout}`);
-  const steps = parseJson<Array<{ ok: boolean; code?: string; error?: string }>>(r.stdout);
-  assert(steps[2] && steps[2].ok === false && steps[2].code === 'BRIDGE_REF_STALE',
+  assert(r.exitCode === 6, `batch should exit 6 (STALE_REF), got ${r.exitCode}: ${r.stdout}`);
+  const steps = parseJson<Array<{ ok: boolean; code?: string; error?: string; retry?: string }>>(r.stdout);
+  assert(steps[2] && steps[2].ok === false && steps[2].code === 'STALE_REF' && steps[2].retry === 'safe',
     `click of the old ref must fail as stale: ${JSON.stringify(steps[2])}`);
   const b = await run(['eval', 'String(window.__b || 0)']);
   assert(b.stdout.trim() === '0', 'page B\'s button must not have been clicked');
@@ -2397,7 +2453,7 @@ c('refs cleared on tab switch (CLAUDE.md invariant)', async () => {
   const click = await run(['click', `@${firstRef}`], { allowFailure: true });
   const combined = click.stderr + click.stdout;
   assert(
-    click.exitCode !== 0 && /not found|Run 'ghax snapshot' first/i.test(combined),
+    click.exitCode === 6 && /STALE_REF/.test(combined),
     `@${firstRef} should fail after tab switch — got exit=${click.exitCode}, out=${combined.slice(0, 200)}`,
   );
 
