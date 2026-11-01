@@ -8,6 +8,7 @@
     "ghax": "./bin/ghax"
   },
   "scripts": {
+    "postinstall": "node scripts/ensure-ext-build-info.mjs",
     "daemon": "node --enable-source-maps dist/ghax-daemon.mjs",
     "build": "node scripts/build-daemon.mjs",
     "build:rust": "cargo build --release --manifest-path crates/cli/Cargo.toml",
