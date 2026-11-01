@@ -836,13 +836,18 @@ c('a selector matching more than one element is AMBIGUOUS_TARGET, exit 7, nothin
 c('retry disposition: an action that failed after dispatch is unsafe and ends a batch', async () => {
   const html = `<div id="d">not an input</div><button onclick="window.__after=1">After</button>`;
   await run(['goto', `data:text/html,${encodeURIComponent(html)}`]);
+  // upload on a <div>: the target resolves (the action is handed over), then
+  // setInputFiles throws. ghax cannot prove nothing happened: unsafe.
+  const file = path.join(os.tmpdir(), `ghax-smoke-retry-${process.pid}.txt`);
+  fs.writeFileSync(file, 'x');
   const r = await run(['batch', JSON.stringify([
-    { cmd: 'fill', args: ['#d', 'x'] },
+    { cmd: 'upload', args: ['#d', file] },
     { cmd: 'click', args: ['button'] },
   ]), '--stopOnError=false'], { allowFailure: true });
+  fs.rmSync(file, { force: true });
   const steps = parseJson<Array<{ cmd: string; ok: boolean; retry?: string }>>(r.stdout);
   assert(steps.length === 1 && steps[0].ok === false && steps[0].retry === 'unsafe',
-    `fill on a div resolves, then fails: unsafe, and the plan stops: ${r.stdout}`);
+    `upload on a div resolves, then fails: unsafe, and the plan stops: ${r.stdout}`);
   assert((await run(['eval', 'String(window.__after || 0)'])).stdout.trim() === '0', 'the step after an unsafe failure must not run');
   // A read that fails is always safe.
   const read = await run(['snapshot', '-s', '#nope-not-here', '--json'], { allowFailure: true });

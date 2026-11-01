@@ -96,20 +96,20 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
         Ok(code) => code,
         Err(err) => {
             if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
+                // Humans read stderr either way; --json also puts the
+                // machine-readable failure on stdout, where its output goes.
+                eprintln!("ghax: {}", rpc_err.message);
+                if let Some(hint) = &rpc_err.hint {
+                    eprintln!("hint: {hint}");
+                }
+                if let Some(code) = &rpc_err.code {
+                    eprintln!(
+                        "code: {code} (retry: {})",
+                        rpc_err.retry.as_deref().unwrap_or("unknown")
+                    );
+                }
                 if wants_json(rest) {
-                    // Machine-readable failure on stdout, where --json output goes.
                     output::print(&rpc_err.to_json(), true);
-                } else {
-                    eprintln!("ghax: {}", rpc_err.message);
-                    if let Some(hint) = &rpc_err.hint {
-                        eprintln!("hint: {hint}");
-                    }
-                    if let Some(code) = &rpc_err.code {
-                        eprintln!(
-                            "code: {code} (retry: {})",
-                            rpc_err.retry.as_deref().unwrap_or("unknown")
-                        );
-                    }
                 }
                 return rpc_err.exit_code.unwrap_or(EXIT_CDP_ERROR);
             }
@@ -121,7 +121,6 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
                     .is_some_and(|e| e.is_connect());
                 let retry = if never_sent { "safe" } else { "unknown" };
                 output::print(&json!({ "ok": false, "error": msg, "retry": retry }), true);
-                return EXIT_CDP_ERROR;
             }
             if msg.contains("browser has been closed")
                 || msg.contains("Target page has been closed")
