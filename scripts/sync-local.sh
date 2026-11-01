@@ -12,7 +12,7 @@
 # Idempotent: running it twice in a row with nothing new to build is a
 # no-op past the first line (no backups are made when the installed version
 # already matches what was just built; the bridge reload still runs, since
-# refreshing a service worker's cached build-info.json is cheap and safe
+# refreshing a service worker's cached build-info.js is cheap and safe
 # even when nothing changed).
 #
 # Runs the extension half on a PRIVATE state file

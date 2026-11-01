@@ -51,7 +51,7 @@ Prerequisites: **Node 24+**, [rustup](https://rustup.rs), git. The Rust toolchai
 
 ```bash
 npm install
-npm run build            # scripts/build-daemon.mjs (esbuild) → dist/ghax-daemon.mjs + extension/build-info.json
+npm run build            # scripts/build-daemon.mjs (esbuild) → dist/ghax-daemon.mjs + extension/build-info.js
 npm run build:rust       # compiles Rust CLI → target/release/ghax
 ./target/release/ghax attach   # attach to a running Edge on :9222
 ./target/release/ghax --help   # command surface
@@ -63,7 +63,7 @@ cargo clippy -p ghax --all-targets -- -D warnings   # CI gate
 
 During dev, editing `src/*.ts` requires `npm run build` again — the
 daemon is a bundle, not a live file. `npm run build` also stamps the
-bundle (and `extension/build-info.json`, for the bridge extension loaded
+bundle (and `extension/build-info.js`, for the bridge extension loaded
 unpacked in `extension/`) with `{version, gitSha, buildDate}` — see
 `scripts/build-daemon.mjs`. `ghax version --full` reports all three
 components' provenance side by side and warns if any of them disagree,

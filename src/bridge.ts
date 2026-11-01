@@ -16,7 +16,7 @@
  *     {"type":"hello","agent":"ghax-ext","version":"0.1.0","gitSha?":"...","buildDate?":"..."}
  *     (gitSha/buildDate are optional — absent on any extension build older
  *     than the provenance change, or one loaded before its first `npm run
- *     build` produced extension/build-info.json; treated as "unknown".)
+ *     build` produced extension/build-info.js; treated as "unknown".)
  *   daemon -> extension, a CDP command to relay via chrome.debugger.sendCommand:
  *     {"id":<n>,"method":"Page.navigate","params":{...}}
  *   extension -> daemon, the command's reply:

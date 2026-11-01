@@ -2121,8 +2121,8 @@ register('bridge.control', async (ctx, _args, opts) => {
 
 // `ghax bridge reload` — ask the connected extension to reload itself, so a
 // fresh `git pull` + `npm run build` (new manifest, new background.js, new
-// extension/build-info.json) takes effect with no manual click in
-// edge://extensions. Needed because the service worker caches build-info.json
+// extension/build-info.js) takes effect with no manual click in
+// edge://extensions. Needed because the service worker caches build-info.js
 // for its own lifetime (see getBuildInfo() in extension/background.js) — a
 // worker that booted before the file existed keeps reporting stale/no
 // provenance until it reloads.
