@@ -96,13 +96,32 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
         Ok(code) => code,
         Err(err) => {
             if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
+                // Humans read stderr either way; --json also puts the
+                // machine-readable failure on stdout, where its output goes.
                 eprintln!("ghax: {}", rpc_err.message);
                 if let Some(hint) = &rpc_err.hint {
                     eprintln!("hint: {hint}");
                 }
+                if let Some(code) = &rpc_err.code {
+                    eprintln!(
+                        "code: {code} (retry: {})",
+                        rpc_err.retry.as_deref().unwrap_or("unknown")
+                    );
+                }
+                if wants_json(rest) {
+                    output::print(&rpc_err.to_json(), true);
+                }
                 return rpc_err.exit_code.unwrap_or(EXIT_CDP_ERROR);
             }
             let msg = err.to_string();
+            if wants_json(rest) {
+                // The request provably never arrived only when the connect failed.
+                let never_sent = err
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(|e| e.is_connect());
+                let retry = if never_sent { "safe" } else { "unknown" };
+                output::print(&json!({ "ok": false, "error": msg, "retry": retry }), true);
+            }
             if msg.contains("browser has been closed")
                 || msg.contains("Target page has been closed")
                 || msg.contains("Target browser has been closed")
@@ -115,6 +134,13 @@ pub fn run(verb: &str, rest: &[String]) -> i32 {
             EXIT_CDP_ERROR
         }
     }
+}
+
+/// `--json` anywhere before a `--` terminator.
+fn wants_json(rest: &[String]) -> bool {
+    rest.iter()
+        .take_while(|a| *a != "--")
+        .any(|a| a == "--json")
 }
 
 /// Verbs that never talk to a daemon, so discovery (and its ambiguity /

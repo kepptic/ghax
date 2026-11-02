@@ -34,6 +34,7 @@ import {
   bridgeGuard,
   bridgeReleaseHandle,
   bridgeResolveHandle,
+  bridgeResolveSelector,
   bridgeRefStillMatches,
   bridgeSnapshot,
   isStaleContextError,
@@ -1063,7 +1064,7 @@ async function main(): Promise<void> {
     return ext;
   };
 
-  await test('guard: a gone backend node becomes BRIDGE_REF_STALE', async () => {
+  await test('guard: a gone backend node becomes STALE_REF', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-stale');
       ext.replies.set('DOM.resolveNode', () => { throw new Error('No node with given id found'); });
@@ -1074,8 +1075,25 @@ async function main(): Promise<void> {
         .catch((e) => { caught = e; });
       assert(caught instanceof BridgeTypedError, `expected typed error, got ${caught}`);
       const e = caught as BridgeTypedError;
-      assert(e.code === 'BRIDGE_REF_STALE', `code ${e.code}`);
+      assert(e.code === 'STALE_REF' && (e as unknown as { retry?: string }).retry === 'safe', `code ${e.code}`);
       assert(/@e3 is gone/.test(e.hint) && /snapshot -i/.test(e.hint), `hint: ${e.hint}`);
+    });
+  });
+
+  await test('selector: more than one match is AMBIGUOUS_TARGET (retry-safe), never the first', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-ambig');
+      // The single-match probe returns null; the count probe says 3.
+      ext.replies.set('Runtime.evaluate', (params: Record<string, unknown>) => (params.returnByValue === false
+        ? { result: { type: 'object', subtype: 'null' } }
+        : { result: { type: 'number', value: 3 } }));
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let caught: any = null;
+      await bridgeResolveSelector(bridge.pinned(), '.item').catch((e) => { caught = e; });
+      assert(caught?.code === 'AMBIGUOUS_TARGET' && caught?.retry === 'safe' && caught?.exitCode === 7, `got ${caught?.code}/${caught?.retry}: ${caught?.message}`);
+      assert(/matches 3 elements/.test(caught.message), caught.message);
+      assert(!ext.received.includes('DOM.describeNode'), 'nothing may be resolved for an ambiguous selector');
     });
   });
 
@@ -1117,7 +1135,7 @@ async function main(): Promise<void> {
       ext.replies.set('Runtime.callFunctionOn', () => ({ result: { value: { guard: { ok: false, reason: 'detached' } } } }));
       caught = null;
       await bridgeGuard(bridge.pinned(), h, '@e2', 'fill', false).catch((e) => { caught = e; });
-      assert(caught?.code === 'BRIDGE_REF_STALE', `detached should read as stale, got ${caught?.code}`);
+      assert(caught?.code === 'STALE_REF', `detached should read as stale, got ${caught?.code}`);
     });
   });
 
@@ -1451,7 +1469,7 @@ async function main(): Promise<void> {
     });
   });
 
-  await test('snapshot: cursor refs resolve lazily, and a gone node is BRIDGE_REF_STALE', async () => {
+  await test('snapshot: cursor refs resolve lazily, and a gone node is STALE_REF', async () => {
     await withBridge(async (bridge, port) => {
       const { ext, liveCursor } = snapshotExt(port, 2, 2);
       await ext.connect();
@@ -1463,7 +1481,7 @@ async function main(): Promise<void> {
       liveCursor.delete(2);
       let caught: any = null;
       await bridgeResolveHandle(bridge.pinned(), c2, '@c2').catch((e) => { caught = e; });
-      assert(caught?.code === 'BRIDGE_REF_STALE', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
+      assert(caught?.code === 'STALE_REF', `gone cursor node should be stale, got ${caught?.code ?? caught}`);
     });
   });
 

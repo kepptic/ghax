@@ -27,11 +27,43 @@ export interface RefAllocator {
 
 /** Bound on `docOf` so a long-lived daemon doesn't grow without limit. */
 const DOC_OF_CAP = 50_000;
+const SCOPE_CAP = 1_000;
 
 export class RefRegistry {
   private next: Record<RefPrefix, number> = { e: 1, c: 1 };
   private byKey = new Map<string, { ref: string; role: string; name: string }>();
   private docOfRef = new Map<string, string>();
+  private scopeByDoc = new Map<string, string>();
+  private nextScope = 1;
+
+  /**
+   * The scope token (`s<N>`) for a document: what a qualified ref
+   * (`@s3:e8`) names. Minted on first use, never reused.
+   */
+  scopeOf(docId: string): string {
+    let s = this.scopeByDoc.get(docId);
+    if (!s) {
+      s = `s${this.nextScope++}`;
+      this.scopeByDoc.set(docId, s);
+      if (this.scopeByDoc.size > SCOPE_CAP) {
+        const oldest = this.scopeByDoc.keys().next().value;
+        if (oldest !== undefined) this.scopeByDoc.delete(oldest);
+      }
+    }
+    return s;
+  }
+
+  /** The scope a ref was minted in, if its document is still remembered. */
+  scopeOfRef(ref: string): string | undefined {
+    const d = this.docOfRef.get(ref);
+    return d === undefined ? undefined : this.scopeByDoc.get(d);
+  }
+
+  /** True when the counter has handed out this ref (`e12`) at some point. */
+  everIssued(ref: string): boolean {
+    const m = /^([ec])(\d+)$/.exec(ref);
+    return !!m && Number(m[2]) < this.next[m[1] as RefPrefix];
+  }
 
   forDoc(docId: string): RefAllocator {
     return {
@@ -87,3 +119,15 @@ export function docIdOfMarker(marker: string | null): string | null {
   const i = marker.indexOf('|');
   return i > 0 ? marker.slice(0, i) : null;
 }
+
+/**
+ * Split a ref argument: `@s3:e8` -> {scope:'s3', key:'e8'}, `@e8` ->
+ * {scope:null, key:'e8'}. Null when it is not a ref.
+ */
+export function parseRef(target: string): { scope: string | null; key: string } | null {
+  const m = /^@(?:(s\d+):)?([ec]\d+)$/.exec(target);
+  return m ? { scope: m[1] ?? null, key: m[2] } : null;
+}
+
+/** Matches a ref argument, bare or qualified. */
+export const REF_RE = /^@(?:s\d+:)?[ec]\d+$/;

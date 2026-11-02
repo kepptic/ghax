@@ -474,14 +474,35 @@ walking them and no automation tool can force entry.
 - `3` — target not found (wrong ext-id, wrong tab id)
 - `4` — CDP error
 - `5` — service worker didn't return after hot-reload (bump `--wait`)
-- `6` — re-inject failed on some tabs (details in `--verbose` output)
+- `6` — `STALE_REF`: the ref belongs to another tab/document/scope, or its element is gone
+- `7` — `AMBIGUOUS_TARGET`: the selector or ref matches more than one element
 - `10` — daemon failed to start
 
-Typed errors print `ghax: <message>` then `hint: <next step>` on stderr
-(exit 4). The ones worth branching on:
+Typed errors print `ghax: <message>`, `hint: <next step>` and
+`code: <CODE> (retry: <safe|unsafe|unknown>)` on stderr. With `--json` the
+same failure is also a JSON object on stdout:
+`{ok:false, error, code?, retry, hint?, exitCode?}`.
 
-- `BRIDGE_REF_STALE` — the element behind `@eN` is gone (re-render or
-  navigation). Re-snapshot and use a fresh ref.
+**Refs and scopes.** `snapshot --json` reports `scope` (`s3`; one per
+document, never reused). `@s3:e8` pins the scope; bare `@e8` means the
+current one and is checked the same way (ref numbers are daemon-wide
+unique). Never reuse a ref across a tab switch or navigation.
+
+**Retry.** `safe` = the action provably did not reach the page (resolution
+failed, bad args, or a read): fix the target and run it again. `unsafe` =
+the target resolved and the action was handed over, so it may have landed:
+look at the page (`snapshot`, `expect`) before repeating a click or fill.
+`unknown` = a mutating verb failed with no way to tell. `batch`/`chain`
+stop on `unsafe` even with `stopOnError` off.
+
+The codes worth branching on:
+
+- `STALE_REF` — the element behind `@eN` is gone (re-render or
+  navigation), or the ref is from another tab/document/scope. Re-snapshot
+  and use a fresh ref. Always `retry: safe`.
+- `AMBIGUOUS_TARGET` — the selector or ref matched more than one element;
+  ghax refuses to pick one. Use an `@ref` or a narrower selector.
+  Always `retry: safe`.
 - `BRIDGE_TARGET_NOT_ACTIONABLE` — `click`/`fill`/`upload` refused before
   acting. The message says why: `covered by <tag#id.class "text">` (a
   banner or overlay is on top; dismiss it or click that instead),

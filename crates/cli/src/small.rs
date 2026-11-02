@@ -473,6 +473,7 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let mut results: Vec<Value> = Vec::new();
     let mut any_failed = false;
     let mut expect_exit: Option<i32> = None;
+    let mut first_typed_exit: Option<i32> = None;
     let mut report = match Report::from_flags(&parsed) {
         Ok(r) => r,
         Err(c) => return Ok(c),
@@ -511,19 +512,48 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
                     any_failed = true;
                     break;
                 }
+                // A batch RPC succeeds even when a step inside failed. One
+                // that may have landed ends the chain, like a top-level one.
+                if cmd == "batch" && batch_has_unsafe_failure(&data) {
+                    report.push(
+                        &cmd,
+                        false,
+                        t.elapsed().as_millis(),
+                        Some(&data),
+                        Some("a batch step failed after it may have been delivered"),
+                    );
+                    results
+                        .push(json!({ "cmd": cmd, "ok": false, "data": data, "retry": "unsafe" }));
+                    any_failed = true;
+                    break;
+                }
                 report.push(&cmd, true, t.elapsed().as_millis(), Some(&data), None);
                 results.push(json!({ "cmd": cmd, "ok": true, "data": data }));
             }
             Err(err) => {
-                let msg = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
-                    rpc_err.message.clone()
+                let (msg, entry) = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
+                    let mut e = rpc_err.to_json();
+                    if let Value::Object(m) = &mut e {
+                        m.remove("ok");
+                        m.insert("cmd".into(), json!(cmd));
+                        m.insert("ok".into(), json!(false));
+                    }
+                    (rpc_err.message.clone(), e)
                 } else {
-                    err.to_string()
+                    let m = err.to_string();
+                    let e = json!({ "cmd": cmd, "ok": false, "error": m, "retry": "unknown" });
+                    (m, e)
                 };
+                if first_typed_exit.is_none() {
+                    first_typed_exit = typed_exit(&entry);
+                }
+                let unsafe_retry = entry.get("retry").and_then(|v| v.as_str()) == Some("unsafe");
                 report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
-                results.push(json!({ "cmd": cmd, "ok": false, "error": msg }));
+                results.push(entry);
                 any_failed = true;
-                if stop_on_error {
+                // A step that may have landed ends the chain whatever
+                // --no-stop-on-error says (same rule as daemon-side batch).
+                if stop_on_error || unsafe_retry {
                     break;
                 }
             }
@@ -535,12 +565,32 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let code = if let Some(c) = expect_exit {
         c
     } else if any_failed {
-        EXIT_CDP_ERROR
+        first_typed_exit.unwrap_or(EXIT_CDP_ERROR)
     } else {
         EXIT_OK
     };
     report.write(code);
     Ok(code)
+}
+
+/// The typed exit code (6 STALE_REF, 7 AMBIGUOUS_TARGET) a failed step carries.
+fn typed_exit(entry: &Value) -> Option<i32> {
+    entry
+        .get("exitCode")
+        .and_then(|v| v.as_i64())
+        .filter(|c| matches!(c, 6 | 7))
+        .map(|c| c as i32)
+}
+
+/// True when a batch RPC's per-step results hold a failed step whose retry
+/// disposition is `unsafe` (it may have reached the page).
+fn batch_has_unsafe_failure(data: &Value) -> bool {
+    data.as_array().is_some_and(|steps| {
+        steps.iter().any(|r| {
+            r.get("ok").and_then(|v| v.as_bool()) != Some(true)
+                && r.get("retry").and_then(|v| v.as_str()) == Some("unsafe")
+        })
+    })
 }
 
 // ─── batch ───────────────────────────────────────────────────────────────────
@@ -604,8 +654,17 @@ pub fn cmd_batch(cfg: &Config, rest: &[String]) -> Result<i32> {
                 .any(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true))
         })
         .unwrap_or(false);
+    // A typed step failure (STALE_REF 6, AMBIGUOUS_TARGET 7) keeps its code.
+    let step_exit = data.as_array().and_then(|arr| {
+        arr.iter()
+            .filter(|r| r.get("ok").and_then(|v| v.as_bool()) != Some(true))
+            .find_map(|r| r.get("exitCode").and_then(|v| v.as_i64()))
+            .filter(|c| *c == 6 || *c == 7)
+    });
     let code = if let Some(f) = failed_expect("batch", &data) {
         f.exit()
+    } else if let Some(c) = step_exit.filter(|_| any_failed) {
+        c as i32
     } else if any_failed {
         EXIT_CDP_ERROR
     } else {
@@ -1117,5 +1176,37 @@ fn normalize_frame_dims(frame_paths: &[String]) {
         } else {
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_batch_tests {
+    use super::*;
+
+    #[test]
+    fn unsafe_failed_step_inside_batch_is_detected() {
+        let data = json!([
+            { "cmd": "goto", "ok": true },
+            { "cmd": "click", "ok": false, "retry": "unsafe" }
+        ]);
+        assert!(batch_has_unsafe_failure(&data));
+    }
+
+    #[test]
+    fn typed_exit_keeps_only_stale_and_ambiguous() {
+        assert_eq!(typed_exit(&json!({ "exitCode": 6 })), Some(6));
+        assert_eq!(typed_exit(&json!({ "exitCode": 7 })), Some(7));
+        assert_eq!(typed_exit(&json!({ "exitCode": 4 })), None);
+        assert_eq!(typed_exit(&json!({ "error": "x" })), None);
+    }
+
+    #[test]
+    fn safe_or_ok_steps_are_not_unsafe() {
+        let data = json!([
+            { "cmd": "click", "ok": false, "retry": "safe" },
+            { "cmd": "click", "ok": true, "retry": "unsafe" }
+        ]);
+        assert!(!batch_has_unsafe_failure(&data));
+        assert!(!batch_has_unsafe_failure(&json!({})));
     }
 }

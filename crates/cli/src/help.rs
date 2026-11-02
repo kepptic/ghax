@@ -112,6 +112,12 @@ Snapshot & interact:
                                   # prints at most 250 refs / 32 KB by default and
                                   #   ends with "… N more refs omitted"; every ref
                                   #   stays clickable. --max-refs 0 = --no-cap.
+                                  # Refs: @e8 = current scope; @s3:e8 names the
+                                  #   scope (--json `scope`, one per document).
+                                  #   A ref from another tab or page fails with
+                                  #   STALE_REF (exit 6); a selector or ref that
+                                  #   matches >1 element fails AMBIGUOUS_TARGET
+                                  #   (exit 7). Neither guesses.
   click <@ref|selector> [--force] [--button left|right|middle] [--count 1|2|3]
                                              # refuses covered, disabled, inert,
                                              #   hidden targets; --force skips that.
@@ -239,7 +245,9 @@ Real user gestures:
 Batch / recording:
   chain < steps.json          (JSON array of {cmd, args?, opts?})
   batch '<json-array>'        (one round-trip; auto re-snapshots between
-                               steps that use @e<n> refs)
+                               steps that use @e<n> refs; a step failing
+                               with retry "unsafe" ends the plan even
+                               with stopOnError off, chain likewise)
   record start [name]
   record stop
   record status
@@ -269,7 +277,11 @@ Checks (poll until true or --timeout ms, default 5000; exit 1 when one fails):
   As a plan step: {"cmd":"expect","opts":{"url":"dashboard","timeout":3000}}.
   The first failed expect ends the plan, even with stopOnError off.
   Exit codes: 0 ok, 1 usage error or failed expect, 2 not attached, 4 error
-  (including an expect that could not run, code EXPECT_ERROR: bridge gone, probe hung).
+  (including an expect that could not run, code EXPECT_ERROR: bridge gone, probe hung),
+  6 STALE_REF, 7 AMBIGUOUS_TARGET.
+  Errors: with --json a failure prints {ok:false, error, code?, retry, hint?}
+  on stdout. retry is "safe" (provably not delivered: re-run it), "unsafe"
+  (the action may have landed: check the page first) or "unknown".
 
 Orchestrated:
   qa --url <u> [--url <u> ...] [--urls a,b,c]

@@ -39,6 +39,7 @@
  * the adjacent control channel implemented by extension/background.js.
  */
 
+import { ambiguousTarget, EXIT_STALE_REF, withRetry } from './errors';
 import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
@@ -2034,8 +2035,14 @@ export async function bridgeRefStillMatches(bridge: BridgeConn, ref: BridgeRef):
 
 /** Resolve a normal CSS selector to the same backend-node handle refs use. */
 export async function bridgeResolveSelector(bridge: BridgeConn, selector: string): Promise<BridgeRef> {
-  const object = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `document.querySelector(${JSON.stringify(selector)})`, cid));
-  if (!object) throw new Error(`Selector not found: ${selector}`);
+  const sel = JSON.stringify(selector);
+  // Exactly one match or nothing: "the first of several" is a guess.
+  const object = await inWorld(bridge, (cid) => runtimeObjectFor(bridge, `(() => { const a = document.querySelectorAll(${sel}); return a.length === 1 ? a[0] : null; })()`, cid));
+  if (!object) {
+    const n = Number(await inWorld(bridge, (cid) => bridgeEvaluate(bridge, `document.querySelectorAll(${sel}).length`, { contextId: cid })).catch(() => 0));
+    if (n > 1) throw ambiguousTarget(selector, n);
+    throw withRetry(new Error(`Selector not found: ${selector}`), 'safe');
+  }
   await bridge.send('Runtime.releaseObject', { objectId: object.objectId }).catch(() => undefined);
   return { backendNodeId: object.backendNodeId, role: '', name: '' };
 }
@@ -2069,7 +2076,8 @@ export function staleRefError(label: string): BridgeTypedError {
   const hint = label.startsWith('@')
     ? `the element behind ${label} is gone (re-render or navigation). Run 'ghax snapshot -i' and use a fresh ref.`
     : `the element matched by ${label} is gone (re-render or navigation). Re-run the command.`;
-  return new BridgeTypedError(`${label}: element is gone`, 'BRIDGE_REF_STALE', hint);
+  // Resolution failed before anything was dispatched: always retry-safe.
+  return Object.assign(new BridgeTypedError(`${label} is stale: element is gone`, 'STALE_REF', hint), { retry: 'safe', exitCode: EXIT_STALE_REF });
 }
 
 const NOT_ACTIONABLE_HINTS: Record<string, (r: ActionabilityResult) => string> = {
@@ -2089,11 +2097,12 @@ export function notActionableError(label: string, kind: string, r: Actionability
     ? `${kind} ${what}: covered by ${r.coveredBy ?? 'another element'}`
     : `${kind} ${what}: not actionable (${reason})`;
   const hint = (NOT_ACTIONABLE_HINTS[reason] ?? (() => 'pass --force to act anyway'))(r);
-  return new BridgeTypedError(msg, 'BRIDGE_TARGET_NOT_ACTIONABLE', hint, {
+  // The actionability check runs before any input is sent: retry-safe.
+  return Object.assign(new BridgeTypedError(msg, 'BRIDGE_TARGET_NOT_ACTIONABLE', hint, {
     reason,
     ...(r.coveredBy ? { coveredBy: r.coveredBy } : {}),
     ...(r.retargeted ? { retargeted: r.retargeted } : {}),
-  });
+  }), { retry: 'safe' });
 }
 
 export interface BridgeHandle {
@@ -2104,7 +2113,7 @@ export interface BridgeHandle {
 
 /**
  * Resolve a ref to a live Runtime object. The one place a stale backend node
- * id turns into BRIDGE_REF_STALE instead of a raw CDP string.
+ * id turns into STALE_REF instead of a raw CDP string.
  */
 export async function bridgeResolveHandle(
   bridge: BridgeConn,

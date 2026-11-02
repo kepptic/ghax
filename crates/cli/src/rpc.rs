@@ -56,6 +56,35 @@ pub struct RpcError {
     /// Recovery guidance from the daemon (bridge-mode typed errors). Printed on
     /// its own line by the dispatch error handler. See docs/design/plan/08 §2.7.
     pub hint: Option<String>,
+    /// Machine-readable error code (`STALE_REF`, `AMBIGUOUS_TARGET`, ...).
+    pub code: Option<String>,
+    /// `safe` | `unsafe` | `unknown`: whether re-running the verb can double
+    /// an effect. `safe` only when the action provably never reached the page.
+    pub retry: Option<String>,
+}
+
+impl RpcError {
+    /// The error as the JSON object `--json` prints:
+    /// `{ok:false, error, code?, retry, hint?, exitCode?}`.
+    pub fn to_json(&self) -> Value {
+        let mut m = serde_json::Map::new();
+        m.insert("ok".into(), Value::Bool(false));
+        m.insert("error".into(), Value::String(self.message.clone()));
+        if let Some(c) = &self.code {
+            m.insert("code".into(), Value::String(c.clone()));
+        }
+        m.insert(
+            "retry".into(),
+            Value::String(self.retry.clone().unwrap_or_else(|| "unknown".into())),
+        );
+        if let Some(h) = &self.hint {
+            m.insert("hint".into(), Value::String(h.clone()));
+        }
+        if let Some(e) = self.exit_code {
+            m.insert("exitCode".into(), Value::from(e));
+        }
+        Value::Object(m)
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -204,17 +233,32 @@ pub fn call(port: u16, cmd: &str, args: Value, opts: Value) -> Result<Value> {
     let client = crate::http::local_client_builder()
         .timeout(timeout)
         .build()?;
-    call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, timeout))
+    call_with(&client, port, cmd, &args, &opts).map_err(|e| explain_timeout(e, cmd, &opts, timeout))
+}
+
+/// Retry disposition after a timeout: only a true read is safe to repeat
+/// (`bridge stats --reset` mutates, so it is not).
+fn timeout_retry(cmd: &str, opts: &Value) -> &'static str {
+    match retry_class_for(cmd, opts) {
+        RetryClass::Idempotent => "safe",
+        RetryClass::Mutating => "unknown",
+    }
 }
 
 /// Turn a bare reqwest timeout into an error that says what to do.
-fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> anyhow::Error {
+fn explain_timeout(
+    err: anyhow::Error,
+    cmd: &str,
+    opts: &Value,
+    timeout: Option<Duration>,
+) -> anyhow::Error {
     let timed_out = err
         .downcast_ref::<reqwest::Error>()
         .map(|e| e.is_timeout())
         .unwrap_or(false);
     match (timed_out, timeout) {
-        (true, Some(t)) => anyhow!(RpcError {
+        (true, Some(t)) => {
+            anyhow!(RpcError {
             message: format!("daemon did not answer `{cmd}` within {}s", t.as_secs()),
             exit_code: Some(4),
             hint: Some(
@@ -222,7 +266,11 @@ fn explain_timeout(err: anyhow::Error, cmd: &str, timeout: Option<Duration>) -> 
                  may still be running. Raise the limit with GHAX_RPC_TIMEOUT=<seconds> (0 = none)."
                     .into(),
             ),
-        }),
+            code: Some("RPC_TIMEOUT".into()),
+            // The daemon may still be running it: only a read is safe to repeat.
+            retry: Some(timeout_retry(cmd, opts).into()),
+        })
+        }
         _ => err,
     }
 }
@@ -286,10 +334,13 @@ fn call_once(
             .get("hint")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let text = |k: &str| envelope.get(k).and_then(|v| v.as_str()).map(str::to_string);
         return Err(anyhow!(RpcError {
             message,
             exit_code,
-            hint
+            hint,
+            code: text("code"),
+            retry: text("retry"),
         }));
     }
     Ok(envelope.get("data").cloned().unwrap_or(Value::Null))
@@ -368,6 +419,15 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn timeout_of_mutating_option_is_not_safe() {
+        assert_eq!(timeout_retry("bridge.stats", &json!({})), "safe");
+        assert_eq!(
+            timeout_retry("bridge.stats", &json!({ "reset": true })),
+            "unknown"
+        );
+    }
 
     #[test]
     fn borrowed_marker_rides_in_opts() {
@@ -450,11 +510,37 @@ mod tests {
     }
 
     #[test]
+    fn rpc_error_json_carries_code_and_retry() {
+        let e = RpcError {
+            message: "@e3 is stale".into(),
+            exit_code: Some(6),
+            hint: Some("re-snapshot".into()),
+            code: Some("STALE_REF".into()),
+            retry: Some("safe".into()),
+        };
+        let v = e.to_json();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["code"], "STALE_REF");
+        assert_eq!(v["retry"], "safe");
+        assert_eq!(v["exitCode"], 6);
+        let bare = RpcError {
+            message: "x".into(),
+            exit_code: None,
+            hint: None,
+            code: None,
+            retry: None,
+        };
+        assert_eq!(bare.to_json()["retry"], "unknown");
+    }
+
+    #[test]
     fn rpc_error_is_never_retried() {
         let err = anyhow!(RpcError {
             message: "nope".into(),
             exit_code: Some(4),
-            hint: None
+            hint: None,
+            code: None,
+            retry: None,
         });
         assert!(!should_retry(&err, RetryClass::Idempotent));
         assert!(!should_retry(&err, RetryClass::Mutating));
@@ -594,7 +680,7 @@ mod tests {
             1,
             "a timed-out fill must not be re-sent"
         );
-        let explained = explain_timeout(err, "fill", Some(Duration::from_millis(200)));
+        let explained = explain_timeout(err, "fill", &json!({}), Some(Duration::from_millis(200)));
         let rpc = explained
             .downcast_ref::<RpcError>()
             .expect("typed timeout error");
