@@ -28,6 +28,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `exitCode`, and `batch` exits 6/7 when a step failed that way.
   `batch --stopOnError=false` from the CLI now actually turns it off (the
   daemon only accepted a boolean).
+  Coordinate gestures (`gesture click/dblclick/tripleclick/rightclick`, and
+  `drag`) are marked delivered like `click`, so a failure after the mouse
+  events went out is `unsafe`, not `unknown`. `chain` keeps a step's
+  `STALE_REF` / `AMBIGUOUS_TARGET` exit code (6/7) instead of a flat 4.
 
 ## [0.16.2] - 2026-11-01
 ### Fixed

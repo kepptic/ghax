@@ -17,6 +17,7 @@
     "lint": "oxlint --type-aware",
     "test:smoke": "tsx test/smoke.ts",
     "test:expect": "tsx test/expect-unit.ts",
+    "test:input": "tsx test/input-unit.ts",
     "test:find-el": "tsx test/find-el-unit.ts",
     "test:browser-profiles": "tsx test/browser-profiles-unit.ts",
     "test:release": "bash test/release-bump.sh",

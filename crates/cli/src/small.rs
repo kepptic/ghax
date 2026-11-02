@@ -473,6 +473,7 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let mut results: Vec<Value> = Vec::new();
     let mut any_failed = false;
     let mut expect_exit: Option<i32> = None;
+    let mut first_typed_exit: Option<i32> = None;
     let mut report = match Report::from_flags(&parsed) {
         Ok(r) => r,
         Err(c) => return Ok(c),
@@ -543,6 +544,9 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
                     let e = json!({ "cmd": cmd, "ok": false, "error": m, "retry": "unknown" });
                     (m, e)
                 };
+                if first_typed_exit.is_none() {
+                    first_typed_exit = typed_exit(&entry);
+                }
                 let unsafe_retry = entry.get("retry").and_then(|v| v.as_str()) == Some("unsafe");
                 report.push(&cmd, false, t.elapsed().as_millis(), None, Some(&msg));
                 results.push(entry);
@@ -561,12 +565,21 @@ pub fn cmd_chain(cfg: &Config, rest: &[String]) -> Result<i32> {
     let code = if let Some(c) = expect_exit {
         c
     } else if any_failed {
-        EXIT_CDP_ERROR
+        first_typed_exit.unwrap_or(EXIT_CDP_ERROR)
     } else {
         EXIT_OK
     };
     report.write(code);
     Ok(code)
+}
+
+/// The typed exit code (6 STALE_REF, 7 AMBIGUOUS_TARGET) a failed step carries.
+fn typed_exit(entry: &Value) -> Option<i32> {
+    entry
+        .get("exitCode")
+        .and_then(|v| v.as_i64())
+        .filter(|c| matches!(c, 6 | 7))
+        .map(|c| c as i32)
 }
 
 /// True when a batch RPC's per-step results hold a failed step whose retry
@@ -1177,6 +1190,14 @@ mod chain_batch_tests {
             { "cmd": "click", "ok": false, "retry": "unsafe" }
         ]);
         assert!(batch_has_unsafe_failure(&data));
+    }
+
+    #[test]
+    fn typed_exit_keeps_only_stale_and_ambiguous() {
+        assert_eq!(typed_exit(&json!({ "exitCode": 6 })), Some(6));
+        assert_eq!(typed_exit(&json!({ "exitCode": 7 })), Some(7));
+        assert_eq!(typed_exit(&json!({ "exitCode": 4 })), None);
+        assert_eq!(typed_exit(&json!({ "error": "x" })), None);
     }
 
     #[test]

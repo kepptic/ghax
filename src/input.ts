@@ -22,6 +22,7 @@ import {
   type BridgeConn,
   type BridgeRef,
 } from './bridge';
+import { markDelivered } from './errors';
 
 export type InputSend = (method: string, params: Record<string, unknown>) => Promise<unknown>;
 /** Subscribe to one CDP event on the input session. Returns an unsubscribe. */
@@ -369,7 +370,11 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
     const { html5, from, to } = await deps.withInput(ctx, (send, on) => dragPath(
       send, on,
       () => targetPoint(ctx, 'drag', fromSpec, force),
-      () => targetPoint(ctx, 'drag', toSpec, force),
+      async () => {
+        const p = await targetPoint(ctx, 'drag', toSpec, force);
+        markDelivered(); // both ends resolved: the press is next
+        return p;
+      },
       { steps, mode },
     ));
     return { ok: true, from, to, mode, html5 };
@@ -378,6 +383,7 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
   deps.register('gesture.click', async (ctx, args, opts) => {
     const { x, y } = gesturePoint('click', args);
     const click = parseClickOpts(opts, 'gesture click');
+    markDelivered();
     await deps.withInput(ctx, (send) => clickAt(send, x, y, click));
     return { ok: true };
   });
@@ -385,6 +391,7 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
   const fixedClick = (verb: string, click: { button: MouseButton; count: number }) =>
     deps.register(`gesture.${verb}`, async (ctx, args) => {
       const { x, y } = gesturePoint(verb, args);
+      markDelivered();
       await deps.withInput(ctx, (send) => clickAt(send, x, y, click));
       return { ok: true };
     });
