@@ -5,6 +5,10 @@ All notable changes to ghax are tracked here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [0.17.0] - 2026-11-02
 ### Changed (breaking)
 - **Refs are scoped to a document, and a stale or ambiguous target fails
   closed with its own code.** Ideas borrowed from vercel-labs/agent-desktop.
@@ -1903,7 +1907,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/kepptic/ghax/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/kepptic/ghax/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/kepptic/ghax/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/kepptic/ghax/compare/v0.15.0...v0.16.0
