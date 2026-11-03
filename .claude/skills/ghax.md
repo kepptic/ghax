@@ -367,6 +367,24 @@ reloads, waits for the SW to restart, then re-injects each declared
 `content_scripts` entry (JS + CSS, respecting `all_frames`) into every
 matching tab. User's tabs + sidepanel + scroll position stay intact.
 
+### Never take focus — ghax works on background tabs
+
+ghax drives a tab through `chrome.debugger`/CDP, which works the same whether the tab
+is in the foreground or not. **The page never needs focus**, so never bring a tab or
+window forward: the user keeps working in their own tabs while you drive yours.
+
+- Open work tabs with `ghax new-tab <url>` (opens in the background) and switch with `ghax tab '#n'`
+  (no `--focus`). `--focus` is for when the user asks to see a tab.
+- **Clicking a link or tile that opens a new tab** (`target=_blank`, `window.open`,
+  launcher tiles on My Apps / KaseyaOne) makes the browser activate the new tab, which
+  takes focus. Prefer reading the destination URL (`ghax eval` the `href`) and
+  opening it with `ghax new-tab`, or navigating in your own tab (`ghax goto`). When
+  the only way in is a click that opens a new tab, say so before you click.
+- Don't open URLs with `open -a`/`open <url>` from the shell: that raises the browser.
+- Before `new-tab`, select a tab in the right browser/profile (`ghax tab '#n'`): new
+  tabs land in the current tab's window. With several profiles bound (`--browser
+  all`), check `ghax tabs` shows the profile you need (e.g. `DAG Tech`) on your row.
+
 ### Several sessions in one browser
 
 Every session gets its own daemon and its own tab; nobody takes focus.
