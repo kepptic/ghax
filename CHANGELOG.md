@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.17.1] - 2026-11-09
 ### Fixed
 
 - `ghax attach --extension` writes the `extension/build-info.js` stub when it is missing and tells you to reload. Without that file the bridge service worker never starts, so the extension looks enabled but never connects (seen after pulling across v0.16.2, which untracked the file).
@@ -1909,7 +1912,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/kepptic/ghax/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/kepptic/ghax/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/kepptic/ghax/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/kepptic/ghax/compare/v0.16.0...v0.16.1
