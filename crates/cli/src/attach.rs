@@ -2035,6 +2035,29 @@ unsafe fn libc_kill(_pid: i32, _sig: i32) -> i32 {
     0
 }
 
+/// extension/background.js statically imports build-info.js (gitignored,
+/// written by `npm run build`). A missing static import stops the MV3 service
+/// worker from registering at all, so the extension sits "enabled" but never
+/// dials the daemon. Write the null stub (same as
+/// scripts/ensure-ext-build-info.mjs) so the next reload works, and say so.
+fn ensure_build_info(dir: &std::path::Path) {
+    let target = dir.join("build-info.js");
+    if target.exists() {
+        return;
+    }
+    match std::fs::write(&target, "self.GHAX_BUILD_INFO = null;\n") {
+        Ok(()) => eprintln!(
+            "ghax: WARNING: {} was missing, so the bridge extension could not start. \
+             Wrote a stub; reload the extension in edge://extensions (or run `npm run build` for real version info).",
+            target.display()
+        ),
+        Err(e) => eprintln!(
+            "ghax: WARNING: {} is missing and could not be written ({e}). The bridge extension will not start until `npm run build` runs.",
+            target.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2210,28 +2233,5 @@ mod tests {
     fn bridge_port_from_state_rejects_an_unparseable_port() {
         let state = state_with_browser_url("bridge://host:notaport");
         assert_eq!(bridge_port_from_state(&state), None);
-    }
-}
-
-/// extension/background.js statically imports build-info.js (gitignored,
-/// written by `npm run build`). A missing static import stops the MV3 service
-/// worker from registering at all, so the extension sits "enabled" but never
-/// dials the daemon. Write the null stub (same as
-/// scripts/ensure-ext-build-info.mjs) so the next reload works, and say so.
-fn ensure_build_info(dir: &std::path::Path) {
-    let target = dir.join("build-info.js");
-    if target.exists() {
-        return;
-    }
-    match std::fs::write(&target, "self.GHAX_BUILD_INFO = null;\n") {
-        Ok(()) => eprintln!(
-            "ghax: WARNING: {} was missing, so the bridge extension could not start. \
-             Wrote a stub; reload the extension in edge://extensions (or run `npm run build` for real version info).",
-            target.display()
-        ),
-        Err(e) => eprintln!(
-            "ghax: WARNING: {} is missing and could not be written ({e}). The bridge extension will not start until `npm run build` runs.",
-            target.display()
-        ),
     }
 }
