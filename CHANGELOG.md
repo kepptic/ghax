@@ -6,7 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+
+- `ghax attach --extension` writes the `extension/build-info.js` stub when it is missing and tells you to reload. Without that file the bridge service worker never starts, so the extension looks enabled but never connects (seen after pulling across v0.16.2, which untracked the file).
 
 ## [0.17.0] - 2026-11-02
 ### Changed (breaking)
