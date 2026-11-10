@@ -125,11 +125,18 @@ Snapshot & interact:
   hover <@ref|selector|x,y> [--force]       # moves the mouse there and leaves it,
                                              #   so :hover menus stay open for a
                                              #   following snapshot or screenshot
-  drag <from> <to> [--steps 10] [--mode auto|mouse|html5|synthetic] [--force]
+  drag <from> <to> [--steps 10] [--hold <ms>] [--mode auto|mouse|html5|synthetic] [--force]
                                              # from/to: @ref, selector or x,y.
                                              #   auto: HTML5 drag-and-drop when the
                                              #   page starts one, else a plain mouse
                                              #   drag. synthetic: in-page DragEvents.
+                                             #   --hold <ms> pauses after the press and
+                                             #   before the drop, so back-to-back drags
+                                             #   do not lose drops. x,y are viewport CSS
+                                             #   px. The result has hitStart/hitEnd
+                                             #   (elementFromPoint at both ends).
+  hit <x,y>                                  # what elementFromPoint finds at viewport
+                                             #   CSS px x,y: tag, id, class, text, rect
   find-el "<description>" [--top 5] [--min-score 20] [--interactive-only] [--json]
           [--rerank-cmd <cmd>] [--rerank-timeout <secs>]
                                   # find an element by description ("save button",

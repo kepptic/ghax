@@ -1354,6 +1354,15 @@ c('drag finishes an HTML5 drag-and-drop with the drag data', async () => {
   assert(dropped === 'card-1', `drop received the dragstart data, got ${JSON.stringify(dropped)}`);
 });
 
+c('hit reports the element under a point; drag --hold reports hitStart/hitEnd', async () => {
+  await run(['goto', DND_PAGE]);
+  const b = parseJson<{ x: number; y: number; width: number; height: number }>((await run(['box', '#src', '--json'])).stdout);
+  const h = parseJson<{ tag: string; id?: string }>((await run(['hit', `${b.x + 5},${b.y + 5}`, '--json'])).stdout);
+  assert(h.tag === 'div' && h.id === 'src', `hit: ${JSON.stringify(h)}`);
+  const r = parseJson<{ hitStart: { id?: string }; hitEnd: { id?: string } }>((await run(['drag', '#src', '#dst', '--hold', '50', '--json'])).stdout);
+  assert(r.hitStart?.id === 'src' && r.hitEnd?.id === 'dst', `drag hits: ${JSON.stringify(r)}`);
+});
+
 c('drag to a destination below the fold scrolls it in and drops on it', async () => {
   await run(['goto', DND_BELOW_FOLD_PAGE]);
   assert(await evalJson<number>('scrollY') === 0, 'page starts at the top');

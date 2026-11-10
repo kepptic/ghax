@@ -328,7 +328,7 @@ fn dispatch_inner(cfg: &Config, verb: &str, rest: &[String]) -> Result<i32> {
             simple(cfg, "tab", parsed)
         }
 
-        "find" | "goto" | "try" | "xpath" | "box" | "click" | "press" | "type" | "html"
+        "find" | "goto" | "try" | "xpath" | "box" | "hit" | "click" | "press" | "type" | "html"
         | "wait" | "viewport" | "responsive" | "diff" | "storage" | "perf" | "profile" => {
             let parsed = args::parse(rest);
             simple(cfg, verb, parsed)
