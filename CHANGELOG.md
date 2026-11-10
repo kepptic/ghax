@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.17.3] - 2026-11-10
 ### Fixed
 
 - Bridge: when chrome.debugger lets go of the tab mid-command (a long `eval` came back `BRIDGE_OUTCOME_UNKNOWN` with no socket drop), the daemon log now says so: method, elapsed time, tab and the `onDetach` reason. Before, the log held only the rpc failure.
@@ -1922,7 +1925,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.3...HEAD
+[0.17.3]: https://github.com/kepptic/ghax/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/kepptic/ghax/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/kepptic/ghax/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/kepptic/ghax/compare/v0.16.2...v0.17.0
