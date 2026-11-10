@@ -130,13 +130,34 @@ pub fn cmd_status(cfg: &Config, rest: &[String]) -> Result<i32> {
     Ok(EXIT_OK)
 }
 
-/// Path to the daemon's stderr/lifecycle log — `<state_dir>/ghax-daemon.log`.
-/// Mirrors `daemonLog` in `src/config.ts`. The daemon appends its own
+/// Path to the daemon's stderr/lifecycle log — `<state_dir>/<state file
+/// stem>-daemon.log` (`ghax-daemon.log` for the default `ghax.json`, so each
+/// `GHAX_STATE_FILE` gets its own log). Mirrors `daemonLogPath` in
+/// `src/config.ts`. The daemon appends its own
 /// lifecycle events here (`daemon starting`, `listening on …`, and crucially
 /// `shutdown: <reason>`), so when an attach silently doesn't persist, this
 /// log names the killer (e.g. `shutdown: SIGTERM`).
 fn daemon_log_path(cfg: &state::Config) -> std::path::PathBuf {
-    cfg.state_dir.join("ghax-daemon.log")
+    daemon_log_for(&cfg.state_file)
+}
+
+fn daemon_log_for(state_file: &std::path::Path) -> std::path::PathBuf {
+    let is_json = state_file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    let part = if is_json {
+        state_file.file_stem()
+    } else {
+        state_file.file_name()
+    };
+    let stem = part
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ghax".to_string());
+    state_file
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{stem}-daemon.log"))
 }
 
 /// When `ghax status` finds no live daemon, point the operator at the daemon
@@ -1208,5 +1229,22 @@ mod chain_batch_tests {
         ]);
         assert!(!batch_has_unsafe_failure(&data));
         assert!(!batch_has_unsafe_failure(&json!({})));
+    }
+
+    #[test]
+    fn one_daemon_log_per_state_file() {
+        use std::path::Path;
+        assert_eq!(
+            daemon_log_for(Path::new("/repo/.ghax/ghax.json")),
+            Path::new("/repo/.ghax/ghax-daemon.log")
+        );
+        assert_eq!(
+            daemon_log_for(Path::new("/tmp/ghax-a.json")),
+            Path::new("/tmp/ghax-a-daemon.log")
+        );
+        assert_eq!(
+            daemon_log_for(Path::new("/tmp/agent")),
+            Path::new("/tmp/agent-daemon.log")
+        );
     }
 }

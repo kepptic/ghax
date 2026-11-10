@@ -5046,8 +5046,11 @@ async function main() {
   }
 
   const logStream = fs.createWriteStream(cfg.daemonLog, { flags: 'a', mode: 0o600 });
+  // pid (and the bridge port once bound) on every line: even with one log
+  // per state file, a log copied into a report must say which daemon spoke.
+  let logTag = `pid ${process.pid}`;
   const log = (msg: string) => {
-    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    const line = `[${new Date().toISOString()}] [${logTag}] ${msg}\n`;
     try {
       logStream.write(line);
     } catch {
@@ -5097,6 +5100,7 @@ async function main() {
     }
     bridge = started;
     bridgePort = started.port;
+    logTag = `pid ${process.pid} :${bridgePort}`;
     if (pairCode) log(`bridge: pairing required — extensions must supply the code`);
     log(`bridge: listening on ws://127.0.0.1:${bridgePort} — waiting for extension`);
     started.on('hello', (info: { agent?: string; version?: string }) => {

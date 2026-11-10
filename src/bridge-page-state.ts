@@ -138,6 +138,10 @@ export function wireBridgePageEvents(bridge: Bridge, sink: BridgePageSink, hooks
   // 'switch' (`use` moving the active peer) changed no tab, so they stay.
   bridge.on('controlled', (_tabId: number | null, instanceId: string, reason?: ControlledReason) => {
     if (reason !== 'switch') sink.bridgePeers.get(instanceId)?.networkRequests.clear();
+    // A new debugger session: the contexts we knew came from the old one and
+    // the daemon's Runtime.enable re-announces the live ones. Pinning an eval
+    // to a context from before a `target_closed` detach is a stale pin.
+    if (reason === 'reattach') sink.bridgePeers.get(instanceId)?.contexts.clear();
   });
   // A dropped or expired peer's frames and contexts are gone with its
   // debugger session; a reconnect re-announces them.

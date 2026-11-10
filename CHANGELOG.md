@@ -6,7 +6,12 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+
+- Bridge: when chrome.debugger lets go of the tab mid-command (a long `eval` came back `BRIDGE_OUTCOME_UNKNOWN` with no socket drop), the daemon log now says so: method, elapsed time, tab and the `onDetach` reason. Before, the log held only the rpc failure.
+- Bridge: the extension tells the daemon when it re-attaches chrome.debugger to the same tab on the next command. That path used to re-attach silently, so the new debugger session ran with Page, Runtime, Network and focus emulation off and with stale execution-context pins. The daemon now re-enables them and drops the old contexts. Reload the bridge extension to get this.
+- Bridge: a command that times out says the page may still have run it. An `eval` that fires a PATCH lands even when its reply never comes back.
+- Each daemon writes its own log: `<state file name>-daemon.log` next to the state file. `GHAX_STATE_FILE=/tmp/ghax-a.json` logs to `/tmp/ghax-a-daemon.log` instead of every agent sharing `/tmp/ghax-daemon.log`. The default `.ghax/ghax-daemon.log` is unchanged. Every line now carries the daemon's pid and bridge port.
 
 ## [0.17.2] - 2026-11-10
 ### Fixed
