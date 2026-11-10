@@ -6,7 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+
+- Release builds for Apple Silicon run on `macos-15`. The `macos-14` job kept getting cancelled before it started, which blocked v0.16.1, v0.16.2 and v0.17.1 from publishing. This release also carries the v0.17.1 fix: `ghax attach --extension` restores a missing `extension/build-info.js`.
 
 ## [0.17.1] - 2026-11-09
 ### Fixed
