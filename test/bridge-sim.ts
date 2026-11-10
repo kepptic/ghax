@@ -1615,6 +1615,25 @@ async function main(): Promise<void> {
     });
   });
 
+  // PR #52 review: two commands after a detach both re-attached and both
+  // reported it; the second domain-enable pass wiped the contexts the first
+  // announced. One report per numbered debugger session.
+  await test('TASK-020: two concurrent commands after a detach yield ONE reattach per session', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-a');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const reasons: Array<string | undefined> = [];
+      bridge.on('controlled', (_t: number | null, _i: string, reason?: string) => reasons.push(reason));
+      ext.send({ type: 'controlled', tabId: 42, reattached: true, session: 2 });
+      ext.send({ type: 'controlled', tabId: 42, reattached: true, session: 2 });
+      await bridge.send('Runtime.evaluate', {}); // round-trip: both frames processed
+      assert(reasons.length === 1 && reasons[0] === 'reattach', `same session must emit once: ${JSON.stringify(reasons)}`);
+      ext.send({ type: 'controlled', tabId: 42, reattached: true, session: 3 });
+      await until(() => reasons.length === 2, 'a new session emits again');
+    });
+  });
+
   await test('TASK-020: a bridge timeout says the page may still have run the command', async () => {
     await withBridge(async (bridge, port) => {
       const ext = new FakeExt(port, 'inst-a');

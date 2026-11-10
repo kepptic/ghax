@@ -370,6 +370,10 @@ class BridgeConnection {
     this.detachedReason = null;
     /** The tab the last successful chrome.debugger.attach was for. */
     this.sessionTabId = null;
+    /** Counts successful chrome.debugger attaches; names a session to the daemon. */
+    this.sessionSeq = 0;
+    /** The one attach in progress for ensureAttached, shared by concurrent commands. */
+    this.attachInFlight = null;
     /** Consecutive dials that never reached OPEN — see DEAD_DIAL_THRESHOLD. */
     this.failedDials = 0;
   }
@@ -744,6 +748,7 @@ class BridgeConnection {
     });
     this.attached = true;
     this.sessionTabId = tabId;
+    this.sessionSeq += 1;
     this.detachedReason = null;
     // Focus emulation lives and dies with the debugger session. The daemon
     // turns it on when it learns of a tab, but every re-attach here (after
@@ -879,15 +884,35 @@ class BridgeConnection {
     if (this.controlledTabId == null) {
       throw new Error('no tab under control — click "Control this tab" in the ghax bridge popup, or run `ghax bridge control --active`');
     }
-    claimTab(this, this.controlledTabId);
-    const hadSession = this.sessionTabId === this.controlledTabId;
-    await this.attachTo(this.controlledTabId);
+    const tabId = this.controlledTabId;
+    // Single-flight per tab: two commands arriving after a detach both see
+    // `attached === false`. Without sharing one attach, both re-attached and
+    // both reported it, and the daemon's second domain-enable pass wiped the
+    // contexts the first had just announced (PR #52 review).
+    if (this.attachInFlight?.tabId === tabId) {
+      await this.attachInFlight.promise;
+      return;
+    }
+    const promise = this.reattachOnce(tabId);
+    this.attachInFlight = { tabId, promise };
+    try {
+      await promise;
+    } finally {
+      if (this.attachInFlight?.promise === promise) this.attachInFlight = null;
+    }
+  }
+
+  async reattachOnce(tabId) {
+    claimTab(this, tabId);
+    const hadSession = this.sessionTabId === tabId;
+    await this.attachTo(tabId);
     // Same tab, NEW chrome.debugger session (after a detach, or the refusal
     // recycle in relayCommand): every domain the daemon enabled is off again
     // and its context bookkeeping is stale. This path used to re-attach
     // silently, so the daemon kept driving a session with Page/Runtime/Network
     // disabled. Tell it (TASK-020); switchControlTo reports on its own.
-    if (hadSession) this.send({ type: 'controlled', tabId: this.controlledTabId, reattached: true });
+    // `session` numbers the debugger session so the daemon drops a duplicate.
+    if (hadSession) this.send({ type: 'controlled', tabId, reattached: true, session: this.sessionSeq });
   }
 
   // The single code path both the popup and the daemon control channel use to

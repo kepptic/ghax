@@ -404,6 +404,8 @@ export class Bridge extends EventEmitter {
   private bindEvents: number[] = [];
   private livelockWarned = false;
   private livenessTimer: NodeJS.Timeout | null = null;
+  /** Last `tab:session` re-attach seen per instance, to drop duplicates. */
+  private readonly lastReattach = new Map<string, string>();
   private readonly log: (msg: string) => void;
   private readonly graceMs: number;
   private readonly livenessMs: number;
@@ -825,7 +827,16 @@ export class Bridge extends EventEmitter {
       // `reattached`: same tab, fresh debugger session (background.js
       // ensureAttached). Older extensions never send it and re-attached
       // silently, leaving Page/Runtime/Network off until the next control.
-      const reattached = msg.reattached === true && peer.controlledTabId !== null;
+      let reattached = msg.reattached === true && peer.controlledTabId !== null;
+      // One reattach per debugger session: a repeat for the same numbered
+      // session would re-run the domain enable and wipe the contexts the
+      // first pass announced. Unnumbered (older) frames are taken as new.
+      if (reattached && typeof msg.session === 'number') {
+        const key = `${peer.controlledTabId}:${msg.session}`;
+        if (this.lastReattach.get(peer.instanceId) === key) reattached = false;
+        else this.lastReattach.set(peer.instanceId, key);
+      }
+      if (msg.reattached === true && !reattached) return;
       if (reattached) {
         this.log(`bridge: ${this.registry.describePeer(peer)} re-attached chrome.debugger to tab ${peer.controlledTabId} (new session)`);
       }
