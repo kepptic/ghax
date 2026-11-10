@@ -245,7 +245,8 @@ ghax find-el "billing tab" --rerank-cmd "<cmd>" --rerank-timeout 30   # optional
 ghax screenshot --path-only              # prints just the file path
 ghax screenshot --region 0,0,400,300     # viewport rectangle (CSS px) at 2x; --scale 0.1..4 overrides
 ghax screenshot --region 0,0,400,300 --json   # + scale/region/image: click at x = x0 + px/scale
-ghax screenshot --scale 0.5              # whole viewport, half size (cheaper to read)
+ghax screenshot --scale 0.5              # whole viewport, half size (cheaper to read); image px = CSS px * scale, exact
+ghax screenshot --scale 0.5 --json       # + origin/cssPerPx/image: click at x = origin.x + px/scale (viewport CSS px)
 ghax window size                         # read the browser WINDOW's outer size + page inner size
 ghax window size 1440x900                # resize the window (headed only; not viewport emulation)
 ghax eval '<js>' --timeout 120000        # raise the bridge's 30 s eval deadline
@@ -257,6 +258,9 @@ ghax click @e3 --count 2                 # double click; --count 3 = triple (sel
 ghax hover @e4                           # mouse stays there: :hover menus stay open for snapshot/screenshot
 ghax drag @e7 @e9                        # drag-and-drop; from/to also take selectors or x,y
 ghax drag @e7 @e9 --mode synthetic       # in-page DragEvents for react-dnd/dropzones that ignore real drags
+ghax drag @e7 @e9 --hold 150            # pause 150 ms after the press and before the drop: back-to-back drags stop losing drops
+ghax hit 640,300                         # elementFromPoint debug: tag, id, class, text, rect at that viewport CSS px
+ghax wait 300                            # plain pause (ms) between gestures when a page animates after a drop
 ghax fill @e5 "hello"                    # React-safe input fill
 ghax press Enter
 
@@ -348,6 +352,13 @@ files 0600, the default dir 0700). `save` on an existing name exits 1 unless `--
 `$${k}` is a literal, and a missing var exits 1 before any command runs. Save
 refuses `text`/`html`/`auth.export` etc. and warns on `@e<n>` refs: save
 selectors, not refs.
+
+**Coordinates.** `drag`, `hover`, `hit` and every `gesture` take viewport CSS
+pixels (the frame of `innerWidth`/`elementFromPoint`), never screenshot or device
+pixels. From a scaled screenshot: `css = origin + px / scale` (`screenshot --json`
+gives `origin` and `scale`). `drag` returns `hitStart`/`hitEnd` (what
+`elementFromPoint` found at each end): if they are not the elements you meant,
+the coordinates were in the wrong frame.
 
 Add `--json` to any command for machine-parseable output.
 

@@ -6,7 +6,16 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- `ghax hit x,y`: `elementFromPoint` at viewport CSS px (tag, id, class, text, rect).
+- `drag --hold <ms>` pauses after the press and before the drop so back-to-back drags stop losing drops. The drag result now includes `hitStart` and `hitEnd` (what is under each end).
+- `screenshot --json` returns `origin` and `cssPerPx` next to the measured `scale`.
+
+### Fixed
+
+- `screenshot --scale` gives image px = CSS px x scale. The browser rounds `clip.scale` (measured: dpr 2.5, `--scale 0.6` came back at 0.749x); when the corrected recapture still misses, ghax captures at natural size and downsizes exactly.
+- Skill docs: drag/gesture coordinates are viewport CSS px.
 
 ## [0.17.3] - 2026-11-10
 ### Fixed

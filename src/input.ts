@@ -33,7 +33,7 @@ export type MouseButton = 'left' | 'right' | 'middle';
 
 /** Every verb this module registers. All of them work over the bridge. */
 export const INPUT_VERBS = [
-  'hover', 'drag',
+  'hover', 'drag', 'hit',
   'gesture.click', 'gesture.dblclick', 'gesture.rightclick', 'gesture.tripleclick', 'gesture.hover',
 ] as const;
 
@@ -42,7 +42,7 @@ export const INPUT_VERBS = [
  * and moving to the same point twice changes nothing. Clicks and drags are
  * not: a replay could click or drop twice.
  */
-export const INPUT_RETRY_SAFE = ['hover', 'gesture.hover'] as const;
+export const INPUT_RETRY_SAFE = ['hover', 'gesture.hover', 'hit'] as const;
 
 const BUTTON_MASK: Record<MouseButton, number> = { left: 1, right: 2, middle: 4 };
 const POINT_RE = /^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/;
@@ -120,6 +120,48 @@ export async function bridgeTargetPoint(conn: BridgeConn, ref: BridgeRef, label:
   }
 }
 
+export interface Hit {
+  x: number; y: number;
+  /** null when nothing is at the point (outside the viewport). */
+  tag: string | null;
+  id?: string; class?: string; text?: string;
+  /** [x, y, w, h] viewport CSS px. */
+  rect?: number[];
+  /** Same-origin iframe or shadow host the point landed in, when it is not the top document. */
+  frame?: boolean;
+}
+
+/** document.elementFromPoint(x, y) described, x/y in viewport CSS px. */
+export async function hitAt(send: InputSend, x: number, y: number): Promise<Hit> {
+  const expression = `(() => {
+    const x = ${Number(x)}, y = ${Number(y)};
+    const el = document.elementFromPoint(x, y);
+    if (!el) return { x, y, tag: null };
+    const r = el.getBoundingClientRect();
+    const out = { x, y, tag: el.tagName.toLowerCase(), rect: [r.x, r.y, r.width, r.height].map((n) => Math.round(n * 10) / 10) };
+    if (el.id) out.id = el.id;
+    if (typeof el.className === 'string' && el.className) out.class = el.className.slice(0, 80);
+    // No el.value on custom elements: its getter may have side effects and hit is retry-safe.
+    let val = '';
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+      val = d && d.get ? String(d.get.call(el) || '') : '';
+      if (el instanceof HTMLInputElement && el.type === 'password') val = '';
+    }
+    const t = (el.innerText || val || el.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ');
+    if (t) out.text = t.slice(0, 60);
+    if (el.tagName === 'IFRAME') out.frame = true;
+    return out;
+  })()`;
+  const res = await send('Runtime.evaluate', { expression, returnByValue: true }) as
+    { result?: { value?: Hit }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+  if (res.exceptionDetails) throw new Error(`hit: ${res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? 'page threw'}`);
+  return res.result?.value ?? { x, y, tag: null };
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const hitOrNull = (send: InputSend, p: Point): Promise<Hit | null> => hitAt(send, p.x, p.y).catch(() => null);
+
 /** A drag end point, resolved on demand so it is fresh when it is used. */
 export type PointSource = () => Promise<Point>;
 
@@ -195,12 +237,14 @@ export async function dragPath(
   on: InputOn,
   from: PointSource,
   to: PointSource,
-  { steps = 10, mode = 'auto' }: { steps?: number; mode?: DragMode } = {},
-): Promise<{ html5: boolean; from: Point; to: Point }> {
+  { steps = 10, mode = 'auto', hold = 0 }: { steps?: number; mode?: DragMode; hold?: number } = {},
+): Promise<{ html5: boolean; from: Point; to: Point; hitStart: Hit | null; hitEnd: Hit | null }> {
   if (mode === 'synthetic') {
     const { start, end } = await resolveDragPair(send, from, to, 'drag --mode synthetic');
+    const hitStart = await hitOrNull(send, start);
+    const hitEnd = await hitOrNull(send, end);
     await syntheticDrag(send, start, end);
-    return { html5: true, from: start, to: end };
+    return { html5: true, from: start, to: end, hitStart, hitEnd };
   }
   const intercept = mode !== 'mouse';
   // A holder, not a `let`: the listener fills it in, which TS flow analysis can't see.
@@ -219,9 +263,15 @@ export async function dragPath(
     if (intercept) await send('Input.setInterceptDrags', { enabled: true });
     const { start, end } = await resolveDragPair(send, from, to, 'drag');
     last = start;
+    // What is under each end, in the frame the gesture uses (viewport CSS px).
+    const hitStart = await hitOrNull(send, start);
+    const hitEnd = await hitOrNull(send, end);
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y });
     held = true;
     await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', buttons: 1, clickCount: 1 });
+    // --hold: let the page register the press (and the previous drop settle)
+    // before the first move, and the last move before the release/drop.
+    if (hold > 0) await sleep(hold);
     for (let i = 1; i <= steps && drag.data === null; i++) {
       last = { x: start.x + ((end.x - start.x) * i) / steps, y: start.y + ((end.y - start.y) * i) / steps };
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: last.x, y: last.y, button: 'left', buttons: 1 });
@@ -232,20 +282,23 @@ export async function dragPath(
         drag.wake = () => { clearTimeout(timer); resolve(); };
       });
     }
+    if (hold > 0 && drag.data === null) await sleep(hold);
     const data = drag.data;
     if (data !== null) {
       for (const type of ['dragEnter', 'dragOver', 'drop']) {
         await send('Input.dispatchDragEvent', { type, x: end.x, y: end.y, data, modifiers: 0 });
       }
       held = false;
-      return { html5: true, from: start, to: end };
+      if (hold > 0) await sleep(hold);
+      return { html5: true, from: start, to: end, hitStart, hitEnd };
     }
     await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: last.x, y: last.y, button: 'left', buttons: 0, clickCount: 1 });
     held = false;
     if (mode === 'html5') {
       throw new Error('drag --mode html5: the page started no HTML5 drag (no Input.dragIntercepted). Try --mode mouse or --mode synthetic.');
     }
-    return { html5: false, from: start, to: end };
+    if (hold > 0) await sleep(hold); // settle: the drop handler runs before the next gesture
+    return { html5: false, from: start, to: end, hitStart, hitEnd };
   } catch (err) {
     if (held && last !== null) {
       // A held button or a half-run drag would outlive this verb and leave the
@@ -355,11 +408,13 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
   deps.register('drag', async (ctx, args, opts) => {
     const fromSpec = String(args[0] ?? '');
     const toSpec = String(args[1] ?? '');
-    if (!fromSpec || !toSpec) throw usage('Usage: drag <from> <to> [--steps 10] [--mode auto|mouse|html5|synthetic]');
+    if (!fromSpec || !toSpec) throw usage('Usage: drag <from> <to> [--steps 10] [--hold <ms>] [--mode auto|mouse|html5|synthetic]');
     const mode = String(opts.mode ?? 'auto') as DragMode;
     if (!DRAG_MODES.includes(mode)) throw usage(`drag: --mode must be one of ${DRAG_MODES.join(', ')} (got ${mode})`);
     const steps = opts.steps === undefined ? 10 : Number(opts.steps);
     if (!Number.isInteger(steps) || steps < 1 || steps > 200) throw usage(`drag: --steps must be an integer 1-200 (got ${String(opts.steps)})`);
+    const hold = opts.hold === undefined ? 0 : Number(opts.hold);
+    if (!Number.isInteger(hold) || hold < 0 || hold > 10000) throw usage(`drag: --hold must be an integer 0-10000 ms (got ${String(opts.hold)})`);
     const force = opts.force === true;
     // shortcut: no auto-scroll while the button is held. Both ends are scrolled
     // to before the press, so a pair that cannot share one viewport fails with
@@ -367,7 +422,7 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
     // Upgrade when a real page needs a long drag: scroll near the viewport
     // edge while moving (Chromium drops the HTML5 drag if the page scrolls
     // between press and first move, so the scroll has to follow the first move).
-    const { html5, from, to } = await deps.withInput(ctx, (send, on) => dragPath(
+    const { html5, from, to, hitStart, hitEnd } = await deps.withInput(ctx, (send, on) => dragPath(
       send, on,
       () => targetPoint(ctx, 'drag', fromSpec, force),
       async () => {
@@ -375,9 +430,16 @@ export function registerInput<C extends { bridgeMode: boolean }>(deps: InputDeps
         markDelivered(); // both ends resolved: the press is next
         return p;
       },
-      { steps, mode },
+      { steps, mode, hold },
     ));
-    return { ok: true, from, to, mode, html5 };
+    return { ok: true, from, to, mode, html5, frame: 'viewport-css-px', hitStart, hitEnd };
+  });
+
+  deps.register('hit', async (ctx, args) => {
+    const spec = String(args[0] ?? '');
+    if (!spec) throw usage('Usage: hit <x,y>   (viewport CSS px)');
+    const { x, y } = deps.parseGesturePoint(spec);
+    return deps.withInput(ctx, (send) => hitAt(send, x, y));
   });
 
   deps.register('gesture.click', async (ctx, args, opts) => {

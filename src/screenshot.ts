@@ -15,6 +15,7 @@
 
 import * as fs from 'fs';
 import type { CDPSession, Locator, Page } from 'playwright';
+import { resizePng } from './png-resize';
 import { bridgeBox, type BridgeConn, type BridgeRef } from './bridge';
 
 export type CdpSend = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
@@ -67,6 +68,8 @@ export function pngSize(png: Buffer): { width: number; height: number } {
 export interface ClipShot {
   png: Buffer;
   region: Region | null;
+  /** Viewport CSS px of the image's top-left: x = origin.x + px/scale. */
+  origin: { x: number; y: number };
   /** Measured: image.width / region width, so `x = x0 + px/scale` holds. */
   scale: number;
   /** Measured image.height / region height; only set when it differs from `scale`. */
@@ -133,6 +136,19 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
       Math.abs(img.width - expectedW) / Math.max(1, SCALE_TOLERANCE * width * scale),
       Math.abs(img.height - expectedH) / Math.max(1, SCALE_TOLERANCE * height * scale),
     );
+  // The browser quantizes clip.scale (measured: dpr 2.5, 0.6 asked, clip 0.24
+  // became 0.3, image 0.749x) and rounds sizes its own way. clip.scale 1 is
+  // always exact, so take the natural capture (CSS px * dpr, or * 1 on a
+  // browser that ignores dpr) and downscale it here to round(CSS * scale).
+  // Null when the natural capture is not what a sane browser returns.
+  const exactFallback = async (): Promise<Buffer | null> => {
+    const natural = await grab(1);
+    const nat = pngSize(natural);
+    const fits = [vp.dpr, 1].some((k) =>
+      Math.abs(nat.width - width * k) <= Math.max(1, 0.02 * width * k)
+      && Math.abs(nat.height - height * k) <= Math.max(1, 0.02 * height * k));
+    return fits ? resizePng(natural, expectedW, expectedH) : null;
+  };
   let clipScale = scale / vp.dpr;
   let png = await grab(clipScale);
   let image = pngSize(png);
@@ -145,17 +161,28 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
     png = await grab(clipScale);
     image = pngSize(png);
     if (off(image) > 1) {
+      const exact = await exactFallback();
+      if (exact) { png = exact; image = { width: expectedW, height: expectedH }; }
+    }
+    if (off(image) > 1) {
       throw new Error(
         `screenshot: the browser returned ${image.width}x${image.height} for a ${width}x${height} region at scale ${scale} `
         + `(expected about ${expectedW}x${expectedH}) even after one correction. Try a different --scale.`,
       );
     }
   }
+  // Exactly round(CSS * scale) in both dimensions, or resize: a near-miss
+  // inside the tolerance (101x101 CSS at 0.99 returned as 101x101) is still wrong.
+  if (image.width !== expectedW || image.height !== expectedH) {
+    const exact = await exactFallback();
+    if (exact) { png = exact; image = { width: expectedW, height: expectedH }; }
+  }
   const measuredX = image.width / width;
   const measuredY = image.height / height;
   return {
     png,
     region,
+    origin: { x: r.x0, y: r.y0 },
     scale: measuredX,
     ...(Math.abs(measuredY - measuredX) > 1e-9 ? { scaleY: measuredY } : {}),
     viewport: { width: vp.width, height: vp.height },
@@ -240,6 +267,8 @@ export function registerScreenshot<C>(deps: ScreenshotDeps<C>): void {
         scale: shot.scale,
         ...(shot.scaleY === undefined ? {} : { scaleY: shot.scaleY }),
         region: shot.region,
+        origin: shot.origin,
+        cssPerPx: 1 / shot.scale,
         viewport: shot.viewport,
         image: shot.image,
         note: 'click/gesture coords are viewport CSS px: x = x0 + px/scale, y = y0 + py/(scaleY ?? scale). scale is measured from the image, so it can differ slightly from --scale on a small region',
