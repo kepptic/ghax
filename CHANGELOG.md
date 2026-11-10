@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.17.2] - 2026-11-10
 ### Fixed
 
 - Release builds for Apple Silicon run on `macos-15`. The `macos-14` job kept getting cancelled before it started, which blocked v0.16.1, v0.16.2 and v0.17.1 from publishing. This release also carries the v0.17.1 fix: `ghax attach --extension` restores a missing `extension/build-info.js`.
@@ -1914,7 +1917,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/kepptic/ghax/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/kepptic/ghax/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/kepptic/ghax/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/kepptic/ghax/compare/v0.16.1...v0.16.2
