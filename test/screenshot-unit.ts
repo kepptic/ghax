@@ -47,6 +47,20 @@ for (const [label, q] of [
   });
 }
 
+await test('near-miss inside the tolerance is resized: 101x101 CSS at 0.99 is 100x100', async () => {
+  const { send } = browser({ width: 101, height: 101, dpr: 1 }, (s) => s + 0.01); // 1.00 -> 101px
+  const shot = await captureClip(send, null, 0.99);
+  const size = pngSize(shot.png);
+  assert(size.width === 100 && size.height === 100, `png ${size.width}x${size.height}`);
+  assert(shot.image.width === 100 && shot.image.height === 100, 'image field');
+});
+
+await test('floor-rounding browser on a tiny region still yields round(CSS * scale)', async () => {
+  const { send } = browser({ width: 1280, height: 720, dpr: 2 }, (s) => s * 0.99);
+  const shot = await captureClip(send, { x0: 0, y0: 0, x1: 7, y1: 7 }, 0.5);
+  assert(shot.image.width === 4 && shot.image.height === 4, `image ${JSON.stringify(shot.image)}`);
+});
+
 await test('resizePng keeps colours: 2x2 checker area-averages to one grey pixel', async () => {
   const data = Buffer.from([0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0]);
   const out = decodePng(resizePng(encodePng({ width: 2, height: 2, channels: 3, data }), 1, 1));

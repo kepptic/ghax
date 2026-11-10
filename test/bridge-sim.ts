@@ -43,6 +43,7 @@ import { CookieDeleteError, CookieVerifyError, deleteCookie, fromCdpCookie, list
 import { AuthExportError, exportAuth, writeSecretFile, type AuthSource } from '../src/auth-export';
 import { recordableStep } from '../src/record-filter';
 import { bridgeInputIO, dragPath, registerInput, type InputDeps, type InputOn, type InputSend, type Point } from '../src/input';
+import { encodePng } from '../src/png-resize';
 import { captureClip, type CdpSend } from '../src/screenshot';
 import { bridgeWindowSize, cdpWindowSize, findPageInWindow } from '../src/window';
 import { spawnSync } from 'child_process';
@@ -2710,15 +2711,8 @@ async function main(): Promise<void> {
   });
 
   // A PNG with only a signature and an IHDR: enough for the IHDR size read.
-  const fakePng = (width: number, height: number): string => {
-    const b = Buffer.alloc(33);
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
-    b.writeUInt32BE(13, 8);
-    b.write('IHDR', 12, 'latin1');
-    b.writeUInt32BE(width, 16);
-    b.writeUInt32BE(height, 20);
-    return b.toString('base64');
-  };
+  const fakePng = (width: number, height: number): string =>
+    encodePng({ width, height, channels: 3, data: Buffer.alloc(width * height * 3, 128) }).toString('base64');
   const clipSender = (
     page: { width: number; height: number; dpr: number; pageX: number; pageY: number },
     multipliesDpr: boolean,
@@ -2765,7 +2759,8 @@ async function main(): Promise<void> {
       await test(`screenshot clip: tiny region ${label} (${mode}) is one capture with the measured scale`, async () => {
         const { send, clips } = clipSender({ width: 1280, height: 720, dpr, pageX: 0, pageY: 0 }, true, round);
         const shot = await captureClip(send, { x0: 0, y0: 0, x1: w, y1: h }, scale);
-        assert(clips.length === 1, `exactly one capture, got ${clips.length}`);
+        assert(clips.length <= 2, `at most capture + natural-size fallback, got ${clips.length}`);
+        assert(shot.image.width === Math.round(w * scale), `image.width ${shot.image.width} must be round(${w}*${scale})`);
         assert(shot.scale === shot.image.width / w, `scale ${shot.scale} must be image.width/${w} (${shot.image.width})`);
         assert(shot.scaleY === undefined && shot.image.width === shot.image.height, 'square region, square image, no scaleY');
       });
@@ -2775,8 +2770,9 @@ async function main(): Promise<void> {
   await test('screenshot clip: a rectangular region reports scaleY when the rounded ratios differ', async () => {
     const { send, clips } = clipSender({ width: 1280, height: 720, dpr: 2, pageX: 0, pageY: 0 }, true, Math.floor);
     const shot = await captureClip(send, { x0: 0, y0: 0, x1: 7, y1: 10 }, 0.5);
-    assert(clips.length === 1, `one capture, got ${clips.length}`);
-    assert(shot.scale === 3 / 7 && shot.scaleY === 5 / 10, `scales: ${shot.scale} ${shot.scaleY}`);
+    void clips;
+    assert(shot.image.width === 4 && shot.image.height === 5, `image: ${JSON.stringify(shot.image)}`);
+    assert(shot.scale === 4 / 7 && shot.scaleY === 5 / 10, `scales: ${shot.scale} ${shot.scaleY}`);
   });
 
   await test('screenshot clip: a recapture that still misses is an error, not a wrong scale', async () => {

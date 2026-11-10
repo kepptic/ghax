@@ -136,6 +136,19 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
       Math.abs(img.width - expectedW) / Math.max(1, SCALE_TOLERANCE * width * scale),
       Math.abs(img.height - expectedH) / Math.max(1, SCALE_TOLERANCE * height * scale),
     );
+  // The browser quantizes clip.scale (measured: dpr 2.5, 0.6 asked, clip 0.24
+  // became 0.3, image 0.749x) and rounds sizes its own way. clip.scale 1 is
+  // always exact, so take the natural capture (CSS px * dpr, or * 1 on a
+  // browser that ignores dpr) and downscale it here to round(CSS * scale).
+  // Null when the natural capture is not what a sane browser returns.
+  const exactFallback = async (): Promise<Buffer | null> => {
+    const natural = await grab(1);
+    const nat = pngSize(natural);
+    const fits = [vp.dpr, 1].some((k) =>
+      Math.abs(nat.width - width * k) <= Math.max(1, 0.02 * width * k)
+      && Math.abs(nat.height - height * k) <= Math.max(1, 0.02 * height * k));
+    return fits ? resizePng(natural, expectedW, expectedH) : null;
+  };
   let clipScale = scale / vp.dpr;
   let png = await grab(clipScale);
   let image = pngSize(png);
@@ -148,19 +161,8 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
     png = await grab(clipScale);
     image = pngSize(png);
     if (off(image) > 1) {
-      // The browser quantizes clip.scale (measured: dpr 2.5, 0.6 asked, clip
-      // 0.24 became 0.3, image 0.749x). clip.scale 1 is always exact, so take
-      // the natural capture (CSS px * dpr, or * 1 on a browser that ignores
-      // dpr) and downscale it here to the exact size.
-      const natural = await grab(1);
-      const nat = pngSize(natural);
-      const fits = [vp.dpr, 1].some((k) =>
-        Math.abs(nat.width - width * k) <= Math.max(1, 0.02 * width * k)
-        && Math.abs(nat.height - height * k) <= Math.max(1, 0.02 * height * k));
-      if (fits) {
-        png = resizePng(natural, expectedW, expectedH);
-        image = { width: expectedW, height: expectedH };
-      }
+      const exact = await exactFallback();
+      if (exact) { png = exact; image = { width: expectedW, height: expectedH }; }
     }
     if (off(image) > 1) {
       throw new Error(
@@ -168,6 +170,12 @@ export async function captureClip(send: CdpSend, region: Region | null, scale: n
         + `(expected about ${expectedW}x${expectedH}) even after one correction. Try a different --scale.`,
       );
     }
+  }
+  // Exactly round(CSS * scale) in both dimensions, or resize: a near-miss
+  // inside the tolerance (101x101 CSS at 0.99 returned as 101x101) is still wrong.
+  if (image.width !== expectedW || image.height !== expectedH) {
+    const exact = await exactFallback();
+    if (exact) { png = exact; image = { width: expectedW, height: expectedH }; }
   }
   const measuredX = image.width / width;
   const measuredY = image.height / height;

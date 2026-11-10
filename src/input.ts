@@ -141,7 +141,14 @@ export async function hitAt(send: InputSend, x: number, y: number): Promise<Hit>
     const out = { x, y, tag: el.tagName.toLowerCase(), rect: [r.x, r.y, r.width, r.height].map((n) => Math.round(n * 10) / 10) };
     if (el.id) out.id = el.id;
     if (typeof el.className === 'string' && el.className) out.class = el.className.slice(0, 80);
-    const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ');
+    // No el.value on custom elements: its getter may have side effects and hit is retry-safe.
+    let val = '';
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+      val = d && d.get ? String(d.get.call(el) || '') : '';
+      if (el instanceof HTMLInputElement && el.type === 'password') val = '';
+    }
+    const t = (el.innerText || val || el.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ');
     if (t) out.text = t.slice(0, 60);
     if (el.tagName === 'IFRAME') out.frame = true;
     return out;
