@@ -298,8 +298,13 @@ export interface BridgeConn {
   setDesiredControl(target: ControlTarget): void;
 }
 
-/** Why a `controlled` was emitted: omitted = the peer's tab (re)attached. */
-export type ControlledReason = 'switch';
+/**
+ * Why a `controlled` was emitted: omitted = the peer's tab (re)attached.
+ * `switch` = `use` moved the active peer, no tab changed. `reattach` = the
+ * extension opened a NEW chrome.debugger session on the same tab (after a
+ * detach), so every domain the daemon enabled is off again.
+ */
+export type ControlledReason = 'switch' | 'reattach';
 
 /**
  * Everything that belongs to ONE bound browser's session (plan 12, brief A).
@@ -329,7 +334,7 @@ class PeerSession {
   lastReloadRequestedAt = 0;
   readonly pending = new Map<
     number,
-    { method: string; resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { method: string; startedAt: number; resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
 
   constructor(readonly instanceId: string) {}
@@ -817,8 +822,18 @@ export class Bridge extends EventEmitter {
     // enumerate it without stealing the session.
     if (msg.type === 'controlled') {
       peer.controlledTabId = typeof msg.tabId === 'number' ? msg.tabId : null;
+      // `reattached`: same tab, fresh debugger session (background.js
+      // ensureAttached). Older extensions never send it and re-attached
+      // silently, leaving Page/Runtime/Network off until the next control.
+      const reattached = msg.reattached === true && peer.controlledTabId !== null;
+      if (reattached) {
+        this.log(`bridge: ${this.registry.describePeer(peer)} re-attached chrome.debugger to tab ${peer.controlledTabId} (new session)`);
+      }
       // Only a driver's tab changing is session-relevant (it clears refs).
-      if (session) this.emit('controlled', peer.controlledTabId, peer.instanceId);
+      if (session) {
+        if (reattached) this.emit('controlled', peer.controlledTabId, peer.instanceId, 'reattach' satisfies ControlledReason);
+        else this.emit('controlled', peer.controlledTabId, peer.instanceId);
+      }
       return;
     }
     if (msg.type === 'control-ack') {
@@ -872,7 +887,17 @@ export class Bridge extends EventEmitter {
         // Attach-phase failures deliberately do NOT come here: the extension
         // absorbs the transient ones before dispatch, and a genuinely
         // unattachable tab is a plain error, not an ambiguous outcome.
-        if (msg.error.phase === 'dispatch-detached') p.reject(new BridgeInterrupted(p.method, peer.instanceId));
+        if (msg.error.phase === 'dispatch-detached') {
+          // The socket is fine; chrome.debugger let go of the tab mid-command.
+          // Logged here because nothing else is: without this line the daemon
+          // log showed only the rpc failure (TASK-020).
+          const reason = typeof msg.error.detachReason === 'string' ? msg.error.detachReason : 'unknown';
+          this.log(
+            `bridge: chrome.debugger detached from tab ${peer.controlledTabId ?? '?'} on ${this.registry.describePeer(peer)} `
+            + `while '${p.method}' was in flight (${Date.now() - p.startedAt}ms, reason: ${reason}) — it may have landed`,
+          );
+          p.reject(new BridgeInterrupted(p.method, peer.instanceId));
+        }
         else p.reject(new Error(msg.error.message || 'bridge command failed'));
       } else p.resolve(msg.result);
       return;
@@ -1291,10 +1316,17 @@ export class Bridge extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         session.pending.delete(id);
-        reject(new Error(`bridge: ${method} timed out after ${timeoutMs}ms`));
+        // No reply is not "did not run": the command is on the wire, and an
+        // eval's side effects (a fetch, a PATCH) land whether or not its
+        // result makes it back (TASK-020).
+        reject(new Error(
+          `bridge: ${method} timed out after ${timeoutMs}ms with no reply from the extension — `
+          + 'the page may still have run it, so check its effects before retrying',
+        ));
       }, timeoutMs);
       session.pending.set(id, {
         method,
+        startedAt: Date.now(),
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);

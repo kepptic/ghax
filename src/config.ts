@@ -49,6 +49,20 @@ export function getGitRoot(cwd: string = process.cwd()): string | null {
   }
 }
 
+/**
+ * `<state dir>/<state file stem>-daemon.log`: the default `.ghax/ghax.json`
+ * keeps `ghax-daemon.log`, and `GHAX_STATE_FILE=/tmp/ghax-a.json` gets
+ * `/tmp/ghax-a-daemon.log`. One log per daemon. Every agent used to point its
+ * state file into /tmp and so append to the same /tmp/ghax-daemon.log, which
+ * hid which daemon logged what (TASK-020). Mirrored in crates/cli/src/small.rs.
+ */
+export function daemonLogPath(stateFile: string): string {
+  const base = path.basename(stateFile);
+  const ext = path.extname(base);
+  const stem = (ext.toLowerCase() === '.json' ? base.slice(0, -ext.length) : base) || 'ghax';
+  return path.join(path.dirname(stateFile), `${stem}-daemon.log`);
+}
+
 export function resolveConfig(
   env: Record<string, string | undefined> = process.env,
 ): GhaxConfig {
@@ -76,7 +90,7 @@ export function resolveConfig(
     stateFile,
     consoleLog: path.join(stateDir, 'ghax-console.log'),
     networkLog: path.join(stateDir, 'ghax-network.log'),
-    daemonLog: path.join(stateDir, 'ghax-daemon.log'),
+    daemonLog: daemonLogPath(stateFile),
   };
 }
 

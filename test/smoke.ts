@@ -248,7 +248,7 @@ c('status --json has expected shape', async () => {
   // daemonLog must point at a real, discoverable file so field failures can
   // be self-diagnosed from `shutdown: <reason>` lines.
   assert(
-    typeof s.daemonLog === 'string' && (s.daemonLog as string).endsWith('ghax-daemon.log'),
+    typeof s.daemonLog === 'string' && (s.daemonLog as string).endsWith('-daemon.log'),
     `status daemonLog not a daemon log path: ${JSON.stringify(s.daemonLog)}`,
   );
 });

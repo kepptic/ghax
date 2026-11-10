@@ -368,6 +368,8 @@ class BridgeConnection {
     this.reattachTimer = null;
     this.navigationInProgress = false;
     this.detachedReason = null;
+    /** The tab the last successful chrome.debugger.attach was for. */
+    this.sessionTabId = null;
     /** Consecutive dials that never reached OPEN — see DEAD_DIAL_THRESHOLD. */
     this.failedDials = 0;
   }
@@ -741,6 +743,7 @@ class BridgeConnection {
       ),
     });
     this.attached = true;
+    this.sessionTabId = tabId;
     this.detachedReason = null;
     // Focus emulation lives and dies with the debugger session. The daemon
     // turns it on when it learns of a tab, but every re-attach here (after
@@ -877,7 +880,14 @@ class BridgeConnection {
       throw new Error('no tab under control — click "Control this tab" in the ghax bridge popup, or run `ghax bridge control --active`');
     }
     claimTab(this, this.controlledTabId);
+    const hadSession = this.sessionTabId === this.controlledTabId;
     await this.attachTo(this.controlledTabId);
+    // Same tab, NEW chrome.debugger session (after a detach, or the refusal
+    // recycle in relayCommand): every domain the daemon enabled is off again
+    // and its context bookkeeping is stale. This path used to re-attach
+    // silently, so the daemon kept driving a session with Page/Runtime/Network
+    // disabled. Tell it (TASK-020); switchControlTo reports on its own.
+    if (hadSession) this.send({ type: 'controlled', tabId: this.controlledTabId, reattached: true });
   }
 
   // The single code path both the popup and the daemon control channel use to
@@ -1067,6 +1077,10 @@ class BridgeConnection {
         error: {
           message: err?.message ?? String(err),
           phase: detached ? 'dispatch-detached' : actual,
+          // chrome.debugger.onDetach's reason, when it has fired by now, so the
+          // daemon log can say WHY the session went (target_closed,
+          // canceled_by_user). Best effort: onDetach may land after this.
+          ...(detached && this.detachedReason ? { detachReason: this.detachedReason } : {}),
         },
       });
     }

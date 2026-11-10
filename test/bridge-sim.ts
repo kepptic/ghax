@@ -96,6 +96,10 @@ class FakeExt {
   controlledWindowId: number | null = 7;
   /** Methods to never answer, to simulate a command in flight at drop time. */
   swallow = new Set<string>();
+  /** Methods to answer only after this many ms (a long awaitPromise eval). */
+  delayMs = new Map<string, number>();
+  /** chrome.debugger.onDetach reason to report on a dispatch-detached reply. */
+  detachReason: string | null = null;
   /** Methods to answer with an error reply, keyed by the `phase` to report. */
   failWithPhase = new Map<string, string>();
   /**
@@ -245,6 +249,18 @@ class FakeExt {
       this.received.push(msg.method);
       this.sent.push({ method: msg.method, params: msg.params ?? {} });
       if (this.swallow.has(msg.method)) return; // in flight forever
+      const delay = this.delayMs.get(msg.method);
+      if (delay) {
+        setTimeout(() => this.answer(msg), delay);
+        return;
+      }
+      this.answer(msg);
+    }
+  }
+
+  /** Reply to one CDP command: scripted reply, scripted failure, or an echo. */
+  private answer(msg: any): void {
+    {
       const reply = this.replies.get(msg.method);
       if (reply) {
         try {
@@ -256,7 +272,14 @@ class FakeExt {
       }
       const phase = this.failWithPhase.get(msg.method);
       if (phase) {
-        this.send({ id: msg.id, error: { message: 'Detached while handling command.', phase } });
+        this.send({
+          id: msg.id,
+          error: {
+            message: 'Detached while handling command.',
+            phase,
+            ...(this.detachReason ? { detachReason: this.detachReason } : {}),
+          },
+        });
         return;
       }
       this.send({ id: msg.id, result: { echoed: msg.method } });
@@ -1540,6 +1563,67 @@ async function main(): Promise<void> {
       try { await bridgeEvaluate(bridge.pinned(), 'new Promise(() => {})', { timeoutMs: 400 }); } catch (e) { err = e; }
       assert(err && /Runtime\.evaluate timed out after 400ms/.test(String(err.message)), `message: ${err?.message}`);
       assert(Date.now() - started < 3000, 'gave up near 400 ms');
+    });
+  });
+
+  // TASK-020: a long awaitPromise eval on the bridge came back as
+  // BRIDGE_OUTCOME_UNKNOWN with nothing in the log but the rpc failure, and
+  // the next evals then timed out at 30 s while their side effects landed.
+  // The drop was a `dispatch-detached` reply (chrome.debugger let go of the
+  // tab mid-command), not a socket close, so the daemon logged nothing.
+  await test('TASK-020: a mid-eval debugger detach is logged with method, elapsed time and reason', async () => {
+    await withBridge(async (bridge, port, logs) => {
+      const ext = new FakeExt(port, 'inst-a');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      // Longer than the liveness window: the socket must stay up on pings alone.
+      ext.delayMs.set('Runtime.evaluate', LIVENESS_MS * 2);
+      ext.failWithPhase.set('Runtime.evaluate', 'dispatch-detached');
+      ext.detachReason = 'target_closed';
+      let caught: unknown = null;
+      try {
+        await bridgeEvaluate(bridge.pinned(), 'longFetchLoop()', { timeoutMs: 5000 });
+      } catch (err) { caught = err; }
+      assert(caught instanceof BridgeInterrupted, `expected BridgeInterrupted, got ${caught}`);
+      assert(!logs.some((l) => /lost \(socket closed\)/.test(l)), 'no socket close should be involved');
+      const line = logs.find((l) => /debugger detached/.test(l));
+      assert(line, `the detach must be logged; logs: ${JSON.stringify(logs)}`);
+      assert(/Runtime\.evaluate/.test(line) && /target_closed/.test(line) && /\d+ms/.test(line), `log line: ${line}`);
+    });
+  });
+
+  await test('TASK-020: an extension re-attach is reported as reason "reattach", and evals keep answering', async () => {
+    await withBridge(async (bridge, port, logs) => {
+      const ext = new FakeExt(port, 'inst-a');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      const reasons: Array<string | undefined> = [];
+      bridge.on('controlled', (_tab: number | null, _id: string, reason?: string) => reasons.push(reason));
+      // What background.js now sends after ensureAttached() re-opens a
+      // debugger session on the same tab: every domain the daemon enabled is
+      // off again, so the daemon must hear about it to re-enable them.
+      ext.send({ type: 'controlled', tabId: 42, reattached: true });
+      await until(() => reasons.length > 0, 'controlled emit');
+      assert(reasons[0] === 'reattach', `reason: ${reasons[0]}`);
+      assert(logs.some((l) => /re-attached/.test(l)), `re-attach should be logged; logs: ${JSON.stringify(logs)}`);
+      // A run of small evals after the re-attach, one after another, all answer.
+      ext.replies.set('Runtime.evaluate', () => ({ result: { type: 'number', value: 1 } }));
+      for (let i = 0; i < 12; i++) {
+        const v = await bridgeEvaluate(bridge.pinned(), '1', { timeoutMs: 1000 });
+        assert(v === 1, `eval ${i} answered ${v}`);
+      }
+    });
+  });
+
+  await test('TASK-020: a bridge timeout says the page may still have run the command', async () => {
+    await withBridge(async (bridge, port) => {
+      const ext = new FakeExt(port, 'inst-a');
+      ext.swallow.add('Runtime.evaluate');
+      await ext.connect();
+      await until(() => bridge.connected, 'bind');
+      let err: any;
+      try { await bridgeEvaluate(bridge.pinned(), 'fetch("/x", {method: "PATCH"})', { timeoutMs: 300 }); } catch (e) { err = e; }
+      assert(err && /may still have run/.test(String(err.message)), `message: ${err?.message}`);
     });
   });
 
