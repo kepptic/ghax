@@ -6,6 +6,9 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.17.5] - 2026-11-16
 ### Fixed
 
 - **`attach` no longer takes over another session's browser (TASK-021).**
@@ -1952,7 +1955,8 @@ triples (macOS x64/ARM, Linux x64/ARM, Windows x64).
 - `--json` flag on every command for machine-readable output.
 - `bun build --compile` single-binary CLI + Node ESM daemon bundle.
 
-[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.4...HEAD
+[Unreleased]: https://github.com/kepptic/ghax/compare/v0.17.5...HEAD
+[0.17.5]: https://github.com/kepptic/ghax/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/kepptic/ghax/compare/v0.17.3...v0.17.4
 [0.17.3]: https://github.com/kepptic/ghax/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/kepptic/ghax/compare/v0.17.1...v0.17.2
