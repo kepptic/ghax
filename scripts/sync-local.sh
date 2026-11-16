@@ -226,23 +226,35 @@ OPENED=""
 PROFILES_JSON="$(g bridge profiles --ext-path "${GHAX_EXT_DIR:-$REPO_ROOT/extension}" --json 2>/dev/null || echo '{}')"
 PROFILES="$(node -e '
   const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
-  for (const p of d.profiles ?? []) console.log([p.browser, p.app, p.profileDir, p.profileName].join("\t"));
+  const ps = d.profiles ?? [];
+  // The hello carries (browser family, profile name), not the profile dir, so two
+  // discovered profiles sharing both cannot be told apart: flag them, never guess.
+  const n = (p) => ps.filter((q) => q.family === p.family && q.profileName === p.profileName).length;
+  for (const p of ps) console.log([p.family, p.browser, p.app, p.profileDir, p.profileName, n(p) > 1 ? "ambiguous" : "ok"].join("\t"));
 ' <<< "$PROFILES_JSON" 2>/dev/null || true)"
 
-# Echo the instanceId of a connected instance for browser + profile name, or "".
+# Echo the instanceId(s) of connected instances for browser family + profile name.
+# The hello's `browser` is the family (edge, chrome, chromium), the same key
+# `bridge profiles` reports as `family`; more than one id means ambiguous.
 find_instance() {
-  list_instances | awk -F'\t' -v b="$1" -v l="$2" '$2==b && $3==l {print $1; exit}'
+  list_instances | awk -F'\t' -v b="$1" -v l="$2" '$2==b && $3==l {print $1}'
 }
 
 if [ -n "$PROFILES" ]; then
   echo "▸ profiles with the extension installed: $(printf '%s\n' "$PROFILES" | wc -l | tr -d ' ')"
-  while IFS=$'\t' read -r PBROWSER PAPP PDIR PNAME; do
+  while IFS=$'\t' read -r PFAMILY PBROWSER PAPP PDIR PNAME PAMBIG; do
     [ -n "$PDIR" ] || continue
     WHO="$PBROWSER ($PNAME)"
+    if [ "$PAMBIG" != "ok" ]; then
+      echo "  $WHO: another discovered $PFAMILY profile has the same name; the bridge hello cannot tell them apart. Rename one profile." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
     # A browser that is starting may connect a few seconds after the others.
     PID_=""
     for _ in $(seq 1 8); do
-      PID_="$(find_instance "$PBROWSER" "$PNAME")"
+      PID_="$(find_instance "$PFAMILY" "$PNAME")"
       [ -n "$PID_" ] && break
       sleep 1
     done
@@ -251,10 +263,16 @@ if [ -n "$PROFILES" ]; then
       open -g -na "$PAPP" --args --profile-directory="$PDIR" about:blank >/dev/null 2>&1 || true
       OPENED+="$WHO; "
       for _ in $(seq 1 30); do
-        PID_="$(find_instance "$PBROWSER" "$PNAME")"
+        PID_="$(find_instance "$PFAMILY" "$PNAME")"
         [ -n "$PID_" ] && break
         sleep 1
       done
+    fi
+    if [ "$(printf '%s\n' "$PID_" | grep -c .)" -gt 1 ]; then
+      echo "  $WHO matches several connected instances (same family and profile name); not guessing." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
     fi
     if [ -z "$PID_" ]; then
       echo "  $WHO never connected within 30s." >&2
@@ -263,7 +281,12 @@ if [ -n "$PROFILES" ]; then
       continue
     fi
     # Reload only if this profile is stale (a fresh start loads the on-disk build).
-    g bridge use "$PID_" >/dev/null 2>&1 || true
+    if ! g bridge use "$PID_" >/dev/null 2>&1; then
+      echo "  could not bind $WHO: not reading its version." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
     sleep 2
     VJ="$(g version --full --json 2>/dev/null || echo '{}')"
     if [ "$(read_field "$VJ" "daemon.extensionInfo.version")" != "$(read_field "$VJ" "cli.version")" ] \
@@ -294,7 +317,7 @@ if [ "$EXT_CONNECTED" = 1 ]; then
   while IFS=$'\t' read -r ENAME EVER ESHA EDATE; do
     [ -n "$ENAME" ] || continue
     printf '%-10s %-10s %-10s %s\n' "ext:$ENAME" "${EVER:-?}" "${ESHA:-?}" "${EDATE:-?}"
-    [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" != "unknown" ] || EXT_MISMATCH=1
+    [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" = "$CLI_SHA" ] || EXT_MISMATCH=1
   done <<< "$EXT_ROWS"
 else
   printf '%-10s %s\n' "extension" "(not connected)"
@@ -306,7 +329,7 @@ if [ -n "$PROFILE_ROWS" ]; then
       "not reached") printf '%-10s %s\n' "profile:$ENAME" "NOT REACHED (never connected)" ;;
       *)
         printf '%-10s %-10s %-10s %s\n' "profile:$ENAME" "${EVER:-?}" "${ESHA:-?}" "${EDATE:-?}"
-        [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" != "unknown" ] || EXT_MISMATCH=1 ;;
+        [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" = "$CLI_SHA" ] || EXT_MISMATCH=1 ;;
     esac
   done <<< "$PROFILE_ROWS"
 fi
@@ -314,6 +337,7 @@ if [ -n "$OPENED" ]; then
   echo "opened a background about:blank window in: ${OPENED}close it when convenient (sync-local never closes windows)."
 fi
 [ "$UNREACHED" = 0 ] || EXT_MISMATCH=1
+[ "$RELOAD_FAILED" = 0 ] || EXT_MISMATCH=1
 
 # ── 7. Verdict ───────────────────────────────────────────────────────
 CLI_DAEMON_MATCH=1

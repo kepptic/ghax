@@ -16,13 +16,57 @@ use crate::args::Parsed;
 use crate::dispatch::EXIT_OK;
 use crate::output;
 
-/// (brand id as the bridge reports it, macOS app name, user-data dir under Application Support)
-const BROWSERS: &[(&str, &str, &str)] = &[
-    ("edge", "Microsoft Edge", "Microsoft Edge"),
-    ("chrome", "Google Chrome", "Google/Chrome"),
-    ("chrome-beta", "Google Chrome Beta", "Google/Chrome Beta"),
-    ("brave", "Brave Browser", "BraveSoftware/Brave-Browser"),
-    ("chromium", "Chromium", "Chromium"),
+/// (brand, family, macOS app name, user-data dir under Application Support).
+/// `family` is the key the bridge hello reports (`detectBrowser()` in
+/// extension/background.js: edge, chrome, or chromium for everything else), so
+/// Beta/Dev/Canary channels and Brave match their connected instance. Roots
+/// mirror MAC in src/browser-profiles.ts.
+const BROWSERS: &[(&str, &str, &str, &str)] = &[
+    ("edge", "edge", "Microsoft Edge", "Microsoft Edge"),
+    (
+        "edge-beta",
+        "edge",
+        "Microsoft Edge Beta",
+        "Microsoft Edge Beta",
+    ),
+    (
+        "edge-dev",
+        "edge",
+        "Microsoft Edge Dev",
+        "Microsoft Edge Dev",
+    ),
+    (
+        "edge-canary",
+        "edge",
+        "Microsoft Edge Canary",
+        "Microsoft Edge Canary",
+    ),
+    ("chrome", "chrome", "Google Chrome", "Google/Chrome"),
+    (
+        "chrome-beta",
+        "chrome",
+        "Google Chrome Beta",
+        "Google/Chrome Beta",
+    ),
+    (
+        "chrome-dev",
+        "chrome",
+        "Google Chrome Dev",
+        "Google/Chrome Dev",
+    ),
+    (
+        "chrome-canary",
+        "chrome",
+        "Google Chrome Canary",
+        "Google/Chrome Canary",
+    ),
+    (
+        "brave",
+        "chromium",
+        "Brave Browser",
+        "BraveSoftware/Brave-Browser",
+    ),
+    ("chromium", "chromium", "Chromium", "Chromium"),
 ];
 
 fn is_ghax_bridge(path: &Path, only: Option<&Path>) -> bool {
@@ -75,7 +119,7 @@ fn ext_paths(profile_dir: &Path) -> Vec<(String, PathBuf)> {
 /// Discover profiles under `support` (the Application Support dir).
 pub fn discover(support: &Path, only: Option<&Path>) -> Vec<Value> {
     let mut rows = vec![];
-    for (brand, app, dir) in BROWSERS {
+    for (brand, family, app, dir) in BROWSERS {
         let root = support.join(dir);
         let Some(state) = read_json(&root.join("Local State")) else {
             continue;
@@ -91,7 +135,7 @@ pub fn discover(support: &Path, only: Option<&Path>) -> Vec<Value> {
             for (id, p) in ext_paths(&root.join(pdir)) {
                 if is_ghax_bridge(&p, only) {
                     rows.push(json!({
-                        "browser": brand, "app": app, "profileDir": pdir,
+                        "browser": brand, "family": family, "app": app, "profileDir": pdir,
                         "profileName": name, "extensionId": id,
                         "extensionPath": p.to_string_lossy(),
                     }));
@@ -169,7 +213,42 @@ mod tests {
             ),
         )
         .unwrap();
-        let rows = discover(&t, Some(&ext));
+        // Chrome Beta and Edge Canary: own roots, family matches the hello.
+        for (d, name) in [
+            ("Google/Chrome Beta", "BETA"),
+            ("Microsoft Edge Canary", "CAN"),
+        ] {
+            let r = t.join(d);
+            std::fs::create_dir_all(r.join("Default")).unwrap();
+            std::fs::write(
+                r.join("Local State"),
+                format!(r#"{{"profile":{{"info_cache":{{"Default":{{"name":"{name}"}}}}}}}}"#),
+            )
+            .unwrap();
+            std::fs::write(
+                r.join("Default/Preferences"),
+                format!(
+                    r#"{{"extensions":{{"settings":{{"abc":{{"path":{:?}}}}}}}}}"#,
+                    ext.to_string_lossy()
+                ),
+            )
+            .unwrap();
+        }
+        let all = discover(&t, Some(&ext));
+        let fam = |n: &str| {
+            all.iter().find(|r| r["profileName"] == n).map(|r| {
+                (
+                    r["browser"].as_str().unwrap().to_string(),
+                    r["family"].as_str().unwrap().to_string(),
+                )
+            })
+        };
+        assert_eq!(fam("BETA"), Some(("chrome-beta".into(), "chrome".into())));
+        assert_eq!(fam("CAN"), Some(("edge-canary".into(), "edge".into())));
+        let rows: Vec<Value> = all
+            .into_iter()
+            .filter(|r| r["profileName"] == "KEPPTIC")
+            .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["profileName"], "KEPPTIC");
         assert!(discover(&t, Some(&t.join("other"))).is_empty());

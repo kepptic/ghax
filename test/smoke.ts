@@ -2752,13 +2752,21 @@ c('bridge profiles finds an installed extension in a profile with no window', as
     fs.mkdirSync(path.join(root, 'Profile 3'), { recursive: true });
     fs.writeFileSync(path.join(root, 'Local State'), JSON.stringify({ profile: { info_cache: { 'Profile 3': { name: 'KEPPTIC' } } } }));
     fs.writeFileSync(path.join(root, 'Profile 3', 'Secure Preferences'), JSON.stringify({ extensions: { settings: { abc: { path: ext } } } }));
+    // Chrome Beta: its own root, but the hello reports family "chrome".
+    const beta = path.join(t, 'support', 'Google', 'Chrome Beta');
+    fs.mkdirSync(path.join(beta, 'Default'), { recursive: true });
+    fs.writeFileSync(path.join(beta, 'Local State'), JSON.stringify({ profile: { info_cache: { Default: { name: 'BETA' } } } }));
+    fs.writeFileSync(path.join(beta, 'Default', 'Preferences'), JSON.stringify({ extensions: { settings: { abc: { path: ext } } } }));
     const r = spawnSync(ghax, ['bridge', 'profiles', '--ext-path', ext, '--json'], {
       encoding: 'utf8',
       env: { ...process.env, GHAX_BROWSER_SUPPORT_DIR: path.join(t, 'support') },
     });
     assert(r.status === 0, `exit ${r.status} ${r.stderr}`);
-    const d = JSON.parse(r.stdout) as { profiles: Array<{ browser: string; profileDir: string; profileName: string }> };
-    assert(d.profiles.length === 1 && d.profiles[0].profileDir === 'Profile 3' && d.profiles[0].profileName === 'KEPPTIC' && d.profiles[0].browser === 'edge', `unexpected ${r.stdout}`);
+    const d = JSON.parse(r.stdout) as { profiles: Array<{ browser: string; family: string; profileDir: string; profileName: string }> };
+    const k = d.profiles.find((p) => p.profileName === 'KEPPTIC');
+    const b = d.profiles.find((p) => p.profileName === 'BETA');
+    assert(d.profiles.length === 2 && k?.profileDir === 'Profile 3' && k.browser === 'edge' && k.family === 'edge', `unexpected ${r.stdout}`);
+    assert(b?.browser === 'chrome-beta' && b.family === 'chrome', `beta should report family chrome: ${r.stdout}`);
   } finally {
     fs.rmSync(t, { recursive: true, force: true });
   }
