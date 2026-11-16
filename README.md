@@ -195,7 +195,10 @@ Most verbs work over the bridge (navigation, snapshot/`@ref` click/fill/press/ty
 ghax bridge reload                 # asks the extension to reload itself, waits for it to reconnect
 ghax bridge reload --force         # also proceeds if another agent currently has a tab claimed
 npm run sync-local                 # the whole post-release loop: pull, rebuild, install, bridge reload
+ghax bridge profiles               # profiles with the extension installed, open window or not (macOS)
 ```
+
+`sync-local` also opens a background window in any such profile that has none (its service worker sleeps otherwise), so that profile gets the new build too; it never closes windows.
 
 `ghax bridge reload` drops **every** agent's `chrome.debugger` attachment on that browser — it's one MV3 service worker dying, not a per-agent socket — so it warns and requires `--force` when `ghax tabs` shows another agent's bridge port controlling a tab. Each agent recovers the same way it recovers from an ordinary service-worker eviction: no operator action needed. `npm run sync-local` runs this as part of the standard post-release local sync — see [`scripts/sync-local.sh`](scripts/sync-local.sh).
 

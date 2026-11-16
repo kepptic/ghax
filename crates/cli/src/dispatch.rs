@@ -206,7 +206,11 @@ fn borrow_allowed(verb: &str, rest: &[String]) -> bool {
             let flag = a.split('=').next().unwrap_or(a);
             BORROW_DENIED_FLAGS.contains(&flag)
         }),
-        "bridge" => rest.first().map(String::as_str) == Some("instances"),
+        // `profiles` is local file discovery; it never touches the daemon.
+        "bridge" => matches!(
+            rest.first().map(String::as_str),
+            Some("instances" | "profiles")
+        ),
         _ => false,
     }
 }
@@ -239,6 +243,7 @@ mod local_only_tests {
             assert!(borrow_allowed(verb, &v(&[])), "{verb}");
         }
         assert!(borrow_allowed("bridge", &v(&["instances"])));
+        assert!(borrow_allowed("bridge", &v(&["profiles"])));
         assert!(!borrow_allowed("bridge", &v(&["use", "edge"])));
         assert!(!borrow_allowed("bridge", &v(&["reload"])));
         for verb in [

@@ -6,7 +6,11 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+- `ghax bridge profiles [--ext-path <dir>] [--json]` lists every Chrome/Edge/Brave profile that has the ghax bridge extension installed (unpacked), whether or not a window is open. Reads `Local State` and each profile's `Preferences`; no daemon needed. macOS only, empty elsewhere.
+
+### Fixed
+- `npm run sync-local` now updates the extension in profiles with no open window. It finds them with `bridge profiles`, opens a background `about:blank` window (`open -g`) in each one that did not connect, waits up to 30 s for its hello, reloads it if stale, and lists every discovered profile in the version table. A profile that never connects is marked NOT REACHED and exits 2. It never closes windows: the one it opened is reported. Edge "Profile 3" used to stay on the old version.
 
 ## [0.17.5] - 2026-11-16
 ### Fixed

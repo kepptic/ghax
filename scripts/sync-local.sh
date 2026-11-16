@@ -29,8 +29,13 @@
 #   0  everything in sync (or the extension simply never showed up — see
 #      below; the CLI+daemon half still succeeded in that case)
 #   1  a build/install step failed
-#   2  extension reachable but versions disagree, or its provenance is
-#      still unknown after the reload (something didn't take)
+#   2  extension reachable but versions disagree, its provenance is
+#      still unknown after the reload, or an installed profile could not be
+#      reached (we opened a window, it never connected)
+#
+# Profiles with the extension installed but no open window are found with
+# `ghax bridge profiles` (macOS) and get a background about:blank window
+# (`open -g`) so their extension connects and is checked/reloaded too.
 
 set -euo pipefail
 
@@ -153,7 +158,7 @@ list_instances() {
   json="$(g bridge instances --json 2>/dev/null || echo '{}')"
   node -e '
     const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
-    for (const i of d.instances ?? []) console.log([i.instanceId, i.browser, i.label].join("\t"));
+    for (const i of d.instances ?? []) console.log([i.instanceId, i.browser, i.profile || i.label].join("\t"));
   ' <<< "$json" 2>/dev/null || true
 }
 
@@ -208,6 +213,95 @@ else
   VERSION_JSON="$(g version --full --json 2>/dev/null || echo '{}')"
 fi
 
+# ── 6b. Profiles with the extension installed but no connected instance ──
+# A browser profile with no open window never starts its extension service
+# worker, so it never connects and stays on the old build (2026-11-16: Edge
+# "Profile 3" stayed on 0.17.4). Discover every profile whose unpacked
+# extension is this repo's extension/ dir and open a window in the ones that
+# did not connect. macOS only; elsewhere discovery is empty and this is a no-op.
+# We never close windows: the one we open (about:blank) is reported instead.
+PROFILE_ROWS=""      # name<TAB>version<TAB>sha<TAB>date per discovered profile
+UNREACHED=0
+OPENED=""
+PROFILES_JSON="$(g bridge profiles --ext-path "${GHAX_EXT_DIR:-$REPO_ROOT/extension}" --json 2>/dev/null || echo '{}')"
+PROFILES="$(node -e '
+  const d = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const ps = d.profiles ?? [];
+  // The hello carries (browser family, profile name), not the profile dir, so two
+  // discovered profiles sharing both cannot be told apart: flag them, never guess.
+  const n = (p) => ps.filter((q) => q.family === p.family && q.profileName === p.profileName).length;
+  for (const p of ps) console.log([p.family, p.browser, p.app, p.profileDir, p.profileName, n(p) > 1 ? "ambiguous" : "ok"].join("\t"));
+' <<< "$PROFILES_JSON" 2>/dev/null || true)"
+
+# Echo the instanceId(s) of connected instances for browser family + profile name.
+# The hello's `browser` is the family (edge, chrome, chromium), the same key
+# `bridge profiles` reports as `family`; more than one id means ambiguous.
+find_instance() {
+  list_instances | awk -F'\t' -v b="$1" -v l="$2" '$2==b && $3==l {print $1}'
+}
+
+if [ -n "$PROFILES" ]; then
+  echo "▸ profiles with the extension installed: $(printf '%s\n' "$PROFILES" | wc -l | tr -d ' ')"
+  while IFS=$'\t' read -r PFAMILY PBROWSER PAPP PDIR PNAME PAMBIG; do
+    [ -n "$PDIR" ] || continue
+    WHO="$PBROWSER ($PNAME)"
+    if [ "$PAMBIG" != "ok" ]; then
+      echo "  $WHO: another discovered $PFAMILY profile has the same name; the bridge hello cannot tell them apart. Rename one profile." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
+    # A browser that is starting may connect a few seconds after the others.
+    PID_=""
+    for _ in $(seq 1 8); do
+      PID_="$(find_instance "$PFAMILY" "$PNAME")"
+      [ -n "$PID_" ] && break
+      sleep 1
+    done
+    if [ -z "$PID_" ]; then
+      echo "▸ $WHO has no connected instance: opening a background window in $PDIR"
+      open -g -na "$PAPP" --args --profile-directory="$PDIR" about:blank >/dev/null 2>&1 || true
+      OPENED+="$WHO; "
+      for _ in $(seq 1 30); do
+        PID_="$(find_instance "$PFAMILY" "$PNAME")"
+        [ -n "$PID_" ] && break
+        sleep 1
+      done
+    fi
+    if [ "$(printf '%s\n' "$PID_" | grep -c .)" -gt 1 ]; then
+      echo "  $WHO matches several connected instances (same family and profile name); not guessing." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
+    if [ -z "$PID_" ]; then
+      echo "  $WHO never connected within 30s." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
+    # Reload only if this profile is stale (a fresh start loads the on-disk build).
+    if ! g bridge use "$PID_" >/dev/null 2>&1; then
+      echo "  could not bind $WHO: not reading its version." >&2
+      PROFILE_ROWS+="$WHO"$'\t'"not reached"$'\t'"-"$'\t'"-"$'\n'
+      UNREACHED=1
+      continue
+    fi
+    sleep 2
+    VJ="$(g version --full --json 2>/dev/null || echo '{}')"
+    if [ "$(read_field "$VJ" "daemon.extensionInfo.version")" != "$(read_field "$VJ" "cli.version")" ] \
+      || [ "$(read_field "$VJ" "daemon.extensionInfo.gitSha")" != "$(read_field "$VJ" "cli.gitSha")" ]; then
+      echo "▸ $WHO is stale: reloading."
+      g bridge reload --force --timeout 30000 >/dev/null 2>&1 || RELOAD_FAILED=1
+      sleep 2
+      VJ="$(g version --full --json 2>/dev/null || echo '{}')"
+    fi
+    VERSION_JSON="$VJ"
+    EXT_CONNECTED=1
+    PROFILE_ROWS+="$WHO"$'\t'"$(read_field "$VJ" "daemon.extensionInfo.version")"$'\t'"$(read_field "$VJ" "daemon.extensionInfo.gitSha")"$'\t'"$(read_field "$VJ" "daemon.extensionInfo.buildDate")"$'\n'
+  done <<< "$PROFILES"
+fi
+
 CLI_VERSION="$(read_field "$VERSION_JSON" "cli.version")"
 CLI_SHA="$(read_field "$VERSION_JSON" "cli.gitSha")"
 CLI_DATE="$(read_field "$VERSION_JSON" "cli.buildDate")"
@@ -223,15 +317,37 @@ if [ "$EXT_CONNECTED" = 1 ]; then
   while IFS=$'\t' read -r ENAME EVER ESHA EDATE; do
     [ -n "$ENAME" ] || continue
     printf '%-10s %-10s %-10s %s\n' "ext:$ENAME" "${EVER:-?}" "${ESHA:-?}" "${EDATE:-?}"
-    [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" != "unknown" ] || EXT_MISMATCH=1
+    [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" = "$CLI_SHA" ] || EXT_MISMATCH=1
   done <<< "$EXT_ROWS"
 else
   printf '%-10s %s\n' "extension" "(not connected)"
 fi
+if [ -n "$PROFILE_ROWS" ]; then
+  while IFS=$'\t' read -r ENAME EVER ESHA EDATE; do
+    [ -n "$ENAME" ] || continue
+    case "$EVER" in
+      "not reached") printf '%-10s %s\n' "profile:$ENAME" "NOT REACHED (never connected)" ;;
+      *)
+        printf '%-10s %-10s %-10s %s\n' "profile:$ENAME" "${EVER:-?}" "${ESHA:-?}" "${EDATE:-?}"
+        [ "$EVER" = "$CLI_VERSION" ] && [ -n "$ESHA" ] && [ "$ESHA" = "$CLI_SHA" ] || EXT_MISMATCH=1 ;;
+    esac
+  done <<< "$PROFILE_ROWS"
+fi
+if [ -n "$OPENED" ]; then
+  echo "opened a background about:blank window in: ${OPENED}close it when convenient (sync-local never closes windows)."
+fi
+[ "$UNREACHED" = 0 ] || EXT_MISMATCH=1
+[ "$RELOAD_FAILED" = 0 ] || EXT_MISMATCH=1
 
 # ── 7. Verdict ───────────────────────────────────────────────────────
 CLI_DAEMON_MATCH=1
 [ "$CLI_VERSION" = "$DAEMON_VERSION" ] && [ -n "$CLI_VERSION" ] || CLI_DAEMON_MATCH=0
+
+if [ "$UNREACHED" = 1 ]; then
+  echo ""
+  echo "sync-local: an installed profile never connected after opening a window (see table): its extension is not verified." >&2
+  exit 2
+fi
 
 if [ "$EXT_CONNECTED" = 0 ]; then
   if [ "$CLI_DAEMON_MATCH" = 1 ]; then

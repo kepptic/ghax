@@ -16,9 +16,10 @@ use crate::output;
 use crate::rpc;
 use crate::state::{self, Config};
 
-const USAGE: &str = "Usage: ghax bridge <control|instances|use|reload|stats> [...]\n  \
+const USAGE: &str = "Usage: ghax bridge <control|instances|profiles|use|reload|stats> [...]\n  \
 control [--active | --tab-id <#n|id> | --stop]   point the bridge at a tab\n  \
 instances                                    list connected browsers (bound + parked)\n  \
+profiles [--ext-path <dir>] [--json]        profiles with the extension installed (no window needed)\n  \
 use <instance-id|browser|label>              bind a different browser\n  \
 reload [--timeout <ms>] [--force]            reload the bridge extension (no click in edge://extensions)\n  \
 stats [--reset]                              relayed CDP calls per method since attach or last --reset";
@@ -37,6 +38,7 @@ pub fn cmd_bridge(cfg: &Config, rest: &[String]) -> Result<i32> {
     match sub.as_str() {
         "control" => cmd_bridge_control(cfg, &args::parse(&rest[1..])),
         "instances" => cmd_bridge_instances(cfg, &args::parse(&rest[1..])),
+        "profiles" => crate::profiles::cmd_bridge_profiles(&args::parse(&rest[1..])),
         "use" => cmd_bridge_use(cfg, &args::parse(&rest[1..])),
         "reload" => cmd_bridge_reload(cfg, &args::parse(&rest[1..])),
         "stats" => cmd_bridge_stats(cfg, &args::parse(&rest[1..])),

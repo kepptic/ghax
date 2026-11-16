@@ -15,6 +15,7 @@ mod find_el;
 mod help;
 mod http;
 mod output;
+mod profiles;
 mod qa;
 mod qa_common;
 mod review;

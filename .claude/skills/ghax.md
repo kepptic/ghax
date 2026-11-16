@@ -216,6 +216,7 @@ ghax bridge control --stop               #   release the tab (banner clears)
 ghax attach --extension --bridge-port N  # non-default WS port (default 9223)
 ghax bridge reload                       # reload the extension, no edge://extensions click
 ghax bridge reload --force               # also proceed if another agent has a tab claimed
+ghax bridge profiles                     # profiles with the extension installed, window open or not (macOS); `npm run sync-local` opens a background window in the ones not connected
 
 # Tab work
 ghax tabs                                # #n  id  "title"  Browser · Profile · win N  [active]  controlledBy=you|<name>|none

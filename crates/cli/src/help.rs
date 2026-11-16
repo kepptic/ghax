@@ -44,6 +44,8 @@ Bridge (after attach --extension):
   bridge control [--active | --tab-id <#n|id> | --stop]
                                       # point the bridge at a tab (same ids as 'tab')
   bridge instances                    # connected browsers, bound + parked
+  bridge profiles [--ext-path <dir>]  # browser profiles with the ghax extension installed,
+                                      # open window or not (macOS; no daemon needed)
   bridge use <instance-id|browser|label>
                                       # bind a different browser
   bridge reload [--timeout <ms>] [--force]
