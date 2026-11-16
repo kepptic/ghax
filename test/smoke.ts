@@ -2742,6 +2742,28 @@ c('bridge reload errors clearly when the daemon is not in bridge mode', async ()
   );
 });
 
+c('bridge profiles finds an installed extension in a profile with no window', async () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'ghax-profiles-'));
+  try {
+    const ext = path.join(t, 'repo', 'extension');
+    fs.mkdirSync(ext, { recursive: true });
+    fs.writeFileSync(path.join(ext, 'manifest.json'), '{"name":"ghax bridge"}');
+    const root = path.join(t, 'support', 'Microsoft Edge');
+    fs.mkdirSync(path.join(root, 'Profile 3'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'Local State'), JSON.stringify({ profile: { info_cache: { 'Profile 3': { name: 'KEPPTIC' } } } }));
+    fs.writeFileSync(path.join(root, 'Profile 3', 'Secure Preferences'), JSON.stringify({ extensions: { settings: { abc: { path: ext } } } }));
+    const r = spawnSync(ghax, ['bridge', 'profiles', '--ext-path', ext, '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, GHAX_BROWSER_SUPPORT_DIR: path.join(t, 'support') },
+    });
+    assert(r.status === 0, `exit ${r.status} ${r.stderr}`);
+    const d = JSON.parse(r.stdout) as { profiles: Array<{ browser: string; profileDir: string; profileName: string }> };
+    assert(d.profiles.length === 1 && d.profiles[0].profileDir === 'Profile 3' && d.profiles[0].profileName === 'KEPPTIC' && d.profiles[0].browser === 'edge', `unexpected ${r.stdout}`);
+  } finally {
+    fs.rmSync(t, { recursive: true, force: true });
+  }
+});
+
 c('bridge stats errors clearly when not in bridge mode', async () => {
   const r = await run(['bridge', 'stats'], { allowFailure: true });
   assert(r.exitCode === 2, `expected exit 2, got ${r.exitCode} stderr=${r.stderr}`);
