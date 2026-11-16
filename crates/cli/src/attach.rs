@@ -33,6 +33,9 @@ const EXIT_NOT_ATTACHED: i32 = 2;
 
 const PORT_BASE: u16 = 9222;
 const PORT_RANGE: u16 = 9; // probes 9222..=9230 inclusive
+// `--launch` scans further: bridge daemons sit on 9223-9232 and other
+// sessions' scratch browsers fill the low ports.
+const LAUNCH_PORT_RANGE: u16 = 64;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Browser types — mirror browser-launch.ts
@@ -355,18 +358,6 @@ fn scan_cdp_ports(start: u16, count: u16) -> Vec<CdpEndpoint> {
     results.into_iter().flatten().collect()
 }
 
-/// Find the first port in `[start, start+count)` with no CDP answer.
-/// Mirrors `findFreePort()` in browser-launch.ts.
-fn find_free_port(start: u16, count: u16) -> Option<u16> {
-    for i in 0..count {
-        let port = start + i;
-        if probe_cdp(port).is_none() {
-            return Some(port);
-        }
-    }
-    None
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Browser kind inference — mirrors `inferKindFromVersion` in cli.ts
 // ─────────────────────────────────────────────────────────────────────────────
@@ -463,6 +454,14 @@ fn launch_browser(
     let data_dir = data_dir.unwrap_or_else(|| profile_dir_for(&binary.kind));
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| anyhow::anyhow!("cannot create profile dir {}: {e}", data_dir.display()))?;
+    // A profile already open in a browser hands our launch to that browser
+    // and the CDP port never opens: fail fast instead of a 10 s timeout.
+    if let Some(holder) = crate::browser_owner::profile_lock_holder(&data_dir) {
+        return Err(anyhow::anyhow!(
+            "profile {} is already open in another browser (pid {holder}).\n  Pass --data-dir <new dir> for a separate scratch profile, or attach to that browser instead.",
+            data_dir.display()
+        ));
+    }
 
     let mut args: Vec<String> = vec![
         format!("--remote-debugging-port={port}"),
@@ -508,6 +507,17 @@ fn launch_browser(
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(ep) = probe_cdp(port) {
+            // Another launch may have won this port between our free-port
+            // probe and spawn. Only accept the browser on our profile.
+            if !crate::browser_owner::port_serves_profile(port, &data_dir) {
+                return Err(anyhow::anyhow!(
+                    "Launched {} (pid {pid}) but :{port} is served by a different browser (profile {}); another launch took the port. Retry 'ghax attach --launch'.",
+                    binary.label,
+                    crate::browser_owner::describe(&crate::browser_owner::user_data_dir_for_port(
+                        port
+                    ))
+                ));
+            }
             return Ok(LaunchResult {
                 pid,
                 endpoint: ep,
@@ -1398,9 +1408,22 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     // ── Step 1: find an endpoint ─────────────────────────────────────────────
+    // `--launch` never reuses a listener (TASK-021): it always starts a new
+    // browser on a free port, so the scan below is skipped entirely.
     let mut endpoint: Option<CdpEndpoint> = None;
+    let takeover = matches!(
+        parsed.flags.get("takeover"),
+        Some(serde_json::Value::Bool(true))
+    );
+    let data_dir_opt: Option<PathBuf> = parsed
+        .flags
+        .get("data-dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
 
-    if let Some(port) = explicit_port {
+    if launch {
+        // fall through to the launch path
+    } else if let Some(port) = explicit_port {
         if let Some(hit) = probe_cdp(port) {
             let hit_kind = infer_kind_from_ua(&hit.version.user_agent);
             if browser_opt.is_none() || browser_opt.as_ref() == Some(&hit_kind) {
@@ -1412,6 +1435,18 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         if let Some(ref kind) = browser_opt {
             found.retain(|ep| &infer_kind_from_ua(&ep.version.user_agent) == kind);
         }
+        // Scanning: prefer browsers nobody else drives. If that leaves none,
+        // keep the full list so the guard below names the owner.
+        if !takeover && found.len() > 1 {
+            let free: Vec<CdpEndpoint> = found
+                .iter()
+                .filter(|ep| crate::browser_owner::other_owner(cfg, ep.port).is_none())
+                .cloned()
+                .collect();
+            if !free.is_empty() {
+                found = free;
+            }
+        }
         if found.len() == 1 {
             endpoint = found.into_iter().next();
         } else if found.len() > 1 {
@@ -1420,6 +1455,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
     }
 
     let mut kind: BrowserKind = browser_opt.clone().unwrap_or(BrowserKind::Edge);
+    let mut profile: Option<Option<PathBuf>> = None;
 
     if endpoint.is_none() {
         // ── Step 2: launch path ──────────────────────────────────────────────
@@ -1489,30 +1525,22 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         };
 
         // Pick the launch port.
+        // Never reuse a listener: anything bound to the port (another
+        // session's browser, a bridge daemon on 9223+) is skipped.
         let launch_port: u16;
         if let Some(port) = explicit_port {
-            launch_port = port;
-            // Reuse-first invariant: re-check in case CDP appeared since scan.
-            if let Some(inuse) = probe_cdp(port) {
-                let inuse_kind = browser_opt
-                    .clone()
-                    .unwrap_or_else(|| infer_kind_from_ua(&inuse.version.user_agent));
-                let state = spawn_daemon(
-                    cfg,
-                    &inuse,
-                    &inuse_kind,
-                    capture_bodies_ref,
-                    downloads_dir_ref,
-                    agent_name,
-                )?;
-                println!(
-                    "attached (port race resolved) — pid {}, port {}, browser {}",
-                    state.pid, state.port, state.browser_kind
+            if !crate::browser_owner::port_is_bindable(port) {
+                eprintln!(
+                    "--launch --port {port}: :{port} is already in use{}. --launch always starts a new browser.\n  Drop --port to auto-pick a free one, or attach without --launch to use the running browser.",
+                    probe_cdp(port)
+                        .map(|ep| format!(" by {}", describe_endpoint(&ep)))
+                        .unwrap_or_default()
                 );
-                return Ok(EXIT_OK);
+                return Ok(EXIT_NOT_ATTACHED);
             }
+            launch_port = port;
         } else {
-            match find_free_port(PORT_BASE, PORT_RANGE) {
+            match crate::browser_owner::find_unbound_port(PORT_BASE, LAUNCH_PORT_RANGE) {
                 Some(p) => {
                     if p != PORT_BASE {
                         println!(":{PORT_BASE} in use — using :{p}");
@@ -1522,7 +1550,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
                 None => {
                     eprintln!(
                         "No free port in {PORT_BASE}..{} (all occupied). Pass --port to override.",
-                        PORT_BASE + PORT_RANGE - 1
+                        PORT_BASE + LAUNCH_PORT_RANGE - 1
                     );
                     return Ok(EXIT_NOT_ATTACHED);
                 }
@@ -1530,11 +1558,7 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         }
 
         let load_ext = parsed.flags.get("load-extension").and_then(|v| v.as_str());
-        let data_dir_opt = parsed
-            .flags
-            .get("data-dir")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from);
+        let data_dir_opt = data_dir_opt.clone();
 
         let ext_note = load_ext
             .map(|e| format!(" with unpacked extension from {e}"))
@@ -1551,12 +1575,48 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         );
 
         let launched = launch_browser(target, launch_port, data_dir_opt, headless, load_ext)?;
+        profile = Some(Some(launched.data_dir.clone()));
         endpoint = Some(launched.endpoint);
         kind = target.kind.clone();
     } else if let Some(ref ep) = endpoint {
         kind = browser_opt
             .clone()
             .unwrap_or_else(|| infer_kind_from_ua(&ep.version.user_agent));
+
+        // Ownership guard (TASK-021): refuse a browser another live daemon
+        // drives, or one whose profile isn't the --data-dir asked for.
+        let found = crate::browser_owner::user_data_dir_for_port(ep.port);
+        if !takeover {
+            if let Some(owner) = crate::browser_owner::other_owner(cfg, ep.port) {
+                eprintln!(
+                    "refusing to attach: {} (profile {}) is already driven by another ghax daemon: {}\n  Use 'ghax attach --launch' for your own browser, or pass --takeover to share it anyway.",
+                    describe_endpoint(ep),
+                    crate::browser_owner::describe(&found),
+                    owner.describe()
+                );
+                return Ok(EXIT_NOT_ATTACHED);
+            }
+            if let Some(want) = data_dir_opt.as_ref() {
+                let want_n = crate::browser_owner::normalize(want);
+                let matches = match &found {
+                    Some(Some(have)) => crate::browser_owner::normalize(have) == want_n,
+                    Some(None) => false,
+                    // Can't read the profile on this host: don't guess.
+                    None => false,
+                };
+                if !matches {
+                    eprintln!(
+                        "refusing to attach: {} uses profile {}, not --data-dir {}.\n  Use 'ghax attach --launch --data-dir {}' to start a browser on that profile, or pass --takeover to attach anyway.",
+                        describe_endpoint(ep),
+                        crate::browser_owner::describe(&found),
+                        want_n.display(),
+                        want.display()
+                    );
+                    return Ok(EXIT_NOT_ATTACHED);
+                }
+            }
+        }
+        profile = found;
     }
 
     let ep = endpoint.unwrap(); // always Some at this point
@@ -1575,11 +1635,28 @@ pub fn cmd_attach(parsed: &Parsed, cfg: &Config) -> Result<i32> {
         parsed.flags.get("verbose"),
         Some(serde_json::Value::Bool(true))
     ) || std::env::var("GHAX_VERBOSE").is_ok();
-    if verbose {
+    let profile_s = crate::browser_owner::describe(&profile);
+    if parsed.json() {
         println!(
-            "attached — pid {}, port {}, browser {}",
-            state.pid, state.port, state.browser_kind
+            "{}",
+            serde_json::json!({
+                "pid": state.pid,
+                "port": state.port,
+                "browser": state.browser_kind,
+                "cdpPort": ep.port,
+                "userDataDir": profile_s,
+            })
         );
+    } else {
+        if verbose {
+            println!(
+                "attached — pid {}, port {}, browser {}",
+                state.pid, state.port, state.browser_kind
+            );
+        }
+        // Always say which profile we drive, on stderr so a quiet
+        // success keeps stdout empty.
+        eprintln!("profile: {profile_s} (cdp :{})", ep.port);
     }
     Ok(EXIT_OK)
 }

@@ -6,6 +6,7 @@ mod args;
 mod attach;
 mod auth;
 mod bridge;
+mod browser_owner;
 mod canary;
 mod cookies;
 mod dispatch;

@@ -198,7 +198,7 @@ c('daemon survives parent process-group teardown (setsid detach)', async () => {
   const stateFile = `/tmp/ghax-smoke-setsid-${process.pid}.json`;
   const env: NodeJS.ProcessEnv = { ...process.env, GHAX_STATE_FILE: stateFile };
   try {
-    const proc = spawn(ghax, ['attach', '--port', smokePort ?? '9222'], {
+    const proc = spawn(ghax, ['attach', '--port', smokePort ?? '9222', '--takeover'], {
       env,
       detached: true, // child becomes a new session/group leader: pgid === pid
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -225,6 +225,73 @@ c('daemon survives parent process-group teardown (setsid detach)', async () => {
   } finally {
     spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
     try { fs.unlinkSync(stateFile); } catch { /* best effort */ }
+  }
+});
+
+// TASK-021: a second agent must not silently drive a browser another daemon
+// owns, --launch must never reuse a listener, and attach names the profile.
+// Each check uses its own state file; none launches a browser.
+const isoEnv = (tag: string): NodeJS.ProcessEnv => ({
+  ...process.env,
+  GHAX_STATE_FILE: `/tmp/ghax-smoke-${tag}-${process.pid}.json`,
+});
+const suitePort = (): string => {
+  const out = spawnSync(ghax, ['status', '--json'], { encoding: 'utf-8' }).stdout;
+  const url = parseJson<{ browserUrl?: string }>(out).browserUrl ?? '';
+  const m = /127\.0\.0\.1:(\d+)/.exec(url);
+  return m ? m[1] : (smokePort ?? '9222');
+};
+
+c('attach refuses a browser another daemon drives (TASK-021)', async () => {
+  const env = isoEnv('owner');
+  try {
+    const r = spawnSync(ghax, ['attach', '--port', suitePort()], { env, encoding: 'utf-8' });
+    assert(r.status === 2, `expected exit 2, got ${r.status}: ${r.stdout}${r.stderr}`);
+    assert(/already driven by another ghax daemon/.test(r.stderr), `no owner in error: ${r.stderr}`);
+    assert(/--takeover/.test(r.stderr), `error should name --takeover: ${r.stderr}`);
+  } finally {
+    spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
+  }
+});
+
+c('attach --launch --port <busy> refuses instead of reusing (TASK-021)', async () => {
+  const env = isoEnv('launchbusy');
+  try {
+    const r = spawnSync(ghax, ['attach', '--launch', '--port', suitePort()], { env, encoding: 'utf-8' });
+    assert(r.status === 2, `expected exit 2, got ${r.status}: ${r.stdout}${r.stderr}`);
+    assert(/already in use/.test(r.stderr), `unexpected error: ${r.stderr}`);
+  } finally {
+    spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
+  }
+});
+
+c('attach --takeover --json reports the user-data-dir (TASK-021)', async () => {
+  const env = isoEnv('takeover');
+  try {
+    const r = spawnSync(ghax, ['attach', '--port', suitePort(), '--takeover', '--json'], { env, encoding: 'utf-8' });
+    assert(r.status === 0, `takeover attach failed: ${r.stdout}${r.stderr}`);
+    const j = parseJson<{ userDataDir: string; cdpPort: number }>(r.stdout.trim().split('\n').pop() ?? '');
+    assert(typeof j.userDataDir === 'string' && j.userDataDir.length > 0, `no userDataDir: ${r.stdout}`);
+    assert(String(j.cdpPort) === suitePort(), `cdpPort mismatch: ${r.stdout}`);
+  } finally {
+    spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
+  }
+});
+
+c('attach --data-dir mismatch refuses (TASK-021)', async () => {
+  const env = isoEnv('datadir');
+  try {
+    const r = spawnSync(
+      ghax,
+      ['attach', '--port', suitePort(), '--data-dir', `/tmp/ghax-smoke-nope-${process.pid}`],
+      { env, encoding: 'utf-8' },
+    );
+    // The owner check fires first while the suite daemon is attached; either
+    // refusal is correct, silent success is the bug.
+    assert(r.status === 2, `expected exit 2, got ${r.status}: ${r.stdout}${r.stderr}`);
+    assert(/refusing to attach/.test(r.stderr), `unexpected error: ${r.stderr}`);
+  } finally {
+    spawnSync(ghax, ['detach'], { env, stdio: 'ignore' });
   }
 });
 
@@ -2631,7 +2698,8 @@ c('downloads land in --downloads-dir with the site-suggested name', async () => 
       proc.on('exit', (code) => resolve({ stdout, stderr, exitCode: code ?? 0 }));
     });
   try {
-    await runIso(attachArgs('--downloads-dir', scratch));
+    // --takeover: the suite daemon already drives this browser (TASK-021).
+    await runIso(attachArgs('--downloads-dir', scratch, '--takeover'));
     await runIso(['new-window', 'about:blank']);
     // Hermetic: a blob download, no network.
     await runIso(['eval',

@@ -6,7 +6,22 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+
+- **`attach` no longer takes over another session's browser (TASK-021).**
+  `attach --launch --data-dir X` with no `--port` used to reuse whatever
+  was already on :9222, so one agent drove another's scratch browser and its
+  sign-ins. Now `--launch` always starts a new browser on the first port
+  nothing is bound to (9222 up, skipping bridge daemons too), and
+  `--launch --port <busy>` exits 2 instead of reusing. Plain `attach` exits 2
+  when another live ghax daemon already drives that browser, or when its
+  `--user-data-dir` differs from the `--data-dir` you asked for; the error
+  names the owner and the fix. `--takeover` overrides both. Every attach
+  prints `profile: <dir> (cdp :<port>)` on stderr, and `attach --json`
+  returns `{pid, port, browser, cdpPort, userDataDir}`. A launch into a
+  profile another browser already has open (live `SingletonLock`) now fails
+  at once naming that pid instead of timing out after 10 s, and a launch
+  whose port was won by a concurrent launch is rejected.
 
 ## [0.17.4] - 2026-11-10
 ### Added
