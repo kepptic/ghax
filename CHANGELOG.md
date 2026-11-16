@@ -18,7 +18,10 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--user-data-dir` differs from the `--data-dir` you asked for; the error
   names the owner and the fix. `--takeover` overrides both. Every attach
   prints `profile: <dir> (cdp :<port>)` on stderr, and `attach --json`
-  returns `{pid, port, browser, cdpPort, userDataDir}`.
+  returns `{pid, port, browser, cdpPort, userDataDir}`. A launch into a
+  profile another browser already has open (live `SingletonLock`) now fails
+  at once naming that pid instead of timing out after 10 s, and a launch
+  whose port was won by a concurrent launch is rejected.
 
 ## [0.17.4] - 2026-11-10
 ### Added

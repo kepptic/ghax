@@ -454,6 +454,14 @@ fn launch_browser(
     let data_dir = data_dir.unwrap_or_else(|| profile_dir_for(&binary.kind));
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| anyhow::anyhow!("cannot create profile dir {}: {e}", data_dir.display()))?;
+    // A profile already open in a browser hands our launch to that browser
+    // and the CDP port never opens: fail fast instead of a 10 s timeout.
+    if let Some(holder) = crate::browser_owner::profile_lock_holder(&data_dir) {
+        return Err(anyhow::anyhow!(
+            "profile {} is already open in another browser (pid {holder}).\n  Pass --data-dir <new dir> for a separate scratch profile, or attach to that browser instead.",
+            data_dir.display()
+        ));
+    }
 
     let mut args: Vec<String> = vec![
         format!("--remote-debugging-port={port}"),
@@ -499,6 +507,17 @@ fn launch_browser(
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(ep) = probe_cdp(port) {
+            // Another launch may have won this port between our free-port
+            // probe and spawn. Only accept the browser on our profile.
+            if !crate::browser_owner::port_serves_profile(port, &data_dir) {
+                return Err(anyhow::anyhow!(
+                    "Launched {} (pid {pid}) but :{port} is served by a different browser (profile {}); another launch took the port. Retry 'ghax attach --launch'.",
+                    binary.label,
+                    crate::browser_owner::describe(&crate::browser_owner::user_data_dir_for_port(
+                        port
+                    ))
+                ));
+            }
             return Ok(LaunchResult {
                 pid,
                 endpoint: ep,
