@@ -17,8 +17,13 @@ Connection:
                                   #   Both list each browser seen.
          [--headless] [--load-extension <path>] [--data-dir <path>]
          [--capture-bodies[=<url-glob>]] [--verbose] [--name <label>]
+         [--takeover] [--json]
          # Without --port, scans :9222-9230. Multiple running → picker.
-         # With --launch and no --port, auto-picks first free port in range.
+         # --launch always starts a NEW browser; with no --port it picks the
+         #   first free port from :9222 up and never reuses a listener.
+         # Refuses (exit 2) a browser another ghax daemon drives, or one whose
+         #   profile differs from --data-dir. --takeover overrides both.
+         # Prints the attached profile on stderr; --json adds userDataDir.
          # --capture-bodies records JSON/text response bodies (opt-in,
          #   32KB cap per body). Glob filters by URL (e.g. '*/api/*').
          #   Also captures POST/PUT/PATCH request bodies (requestBody)

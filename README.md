@@ -93,6 +93,12 @@ ghax attach --launch                 # picks Edge/Chrome, scratch profile
 ghax attach --launch --browser edge  # or pick explicitly
 ```
 
+`--launch` always starts a new browser on the first free port from :9222
+up; it never reuses one that is already listening. Plain `attach` refuses a
+browser another ghax daemon drives, or one whose profile isn't the
+`--data-dir` you passed, unless you add `--takeover`. Every attach prints
+the profile it ended up on (`userDataDir` in `--json`).
+
 Or launch manually:
 
 ```bash
